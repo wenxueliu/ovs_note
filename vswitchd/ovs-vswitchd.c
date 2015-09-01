@@ -97,6 +97,10 @@ main(int argc, char *argv[])
 #endif
     }
 
+    /*
+     * 将 punix:unixctl_path 以 : 分割, 检查前面部分是否是 ptcp, punix, pwindows, pssl, 如果满足条件,
+     * 调用对应协议的 listen 方法, 监听 path 的连接, 这里是典型的工厂模式
+     */
     retval = unixctl_server_create(unixctl_path, &unixctl);
     if (retval) {
         exit(EXIT_FAILURE);
