@@ -189,7 +189,11 @@ static int get_dpifindex(const struct datapath *dp)
 
 	rcu_read_lock();
 
+    //OVSP_LOCAL = 0
+	//begin &dp->ports[port_no & (DP_VPORT_HASH_BUCKETS - 1)] to find the
+    //port_no = OVSP_LOCAL, return the vport founded
 	local = ovs_vport_rcu(dp, OVSP_LOCAL);
+    //by the local to netdev_port*; net_device
 	if (local)
 		ifindex = netdev_vport_priv(local)->dev->ifindex;
 	else
@@ -224,6 +228,11 @@ struct vport *ovs_lookup_vport(const struct datapath *dp, u16 port_no)
 	struct hlist_head *head;
 
 	head = vport_hash_bucket(dp, port_no);
+    /*
+     * dp_hash_node is member of vport, head belong to vport's
+     * travel ports of datapath begin at head, find the
+     * vport->port_no == port_no. vport is changing
+     */
 	hlist_for_each_entry_rcu(vport, head, dp_hash_node) {
 		if (vport->port_no == port_no)
 			return vport;
@@ -463,7 +472,7 @@ static int queue_userspace_packet(struct datapath *dp, struct sk_buff *skb,
 	else
 		hlen = skb->len;
 
-	len = upcall_msg_size(upcall_info, hlen);
+	len = upcall_msg_size(upcall_info, hlen); //计算 upcall_info + hlen + ovs_header 的长度
 	user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC);
 	if (!user_skb) {
 		err = -ENOMEM;
