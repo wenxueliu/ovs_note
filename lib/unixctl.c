@@ -237,6 +237,34 @@ unixctl_server_create(const char *path, struct unixctl_server **serverp)
 #endif
     }
 
+    //   /* Server for control connection. */
+    //   struct unixctl_server {
+    //       struct pstream *listener;
+    //       struct ovs_list conns;
+    //   };
+    //   /* Passive listener for incoming stream connections.
+    //   *
+    //   * This structure should be treated as opaque by stream implementations. */
+    //   struct pstream {
+    //       const struct pstream_class *class;
+    //       char *name;
+    //       ovs_be16 bound_port;
+    //   };
+    //   struct pstream_class {
+    //       const char *name;
+    //       bool needs_probes;
+
+    //       int (*listen)(const char *name, char *suffix, struct pstream **pstreamp,
+    //                   uint8_t dscp);
+    //       void (*close)(struct pstream *pstream);
+    //       int (*accept)(struct pstream *pstream, struct stream **new_streamp);
+    //       void (*wait)(struct pstream *pstream);
+    //   };
+
+    /*
+     * 将 punix:path 以 : 分割, 检查前面部分是否是 ptcp, punix, pwindows, pssl, 如果满足条件,
+     * 调用对应协议的 listen 方法, 监听 path 的连接, 这里是典型的工厂模式
+     */
     error = pstream_open(punix_path, &listener, 0);
     if (error) {
         ovs_error(error, "could not initialize control socket %s", punix_path);
@@ -249,6 +277,13 @@ unixctl_server_create(const char *path, struct unixctl_server **serverp)
 
     server = xmalloc(sizeof *server);
     server->listener = listener;
+    /*
+        static inline void
+        list_init(struct ovs_list *list)
+        {
+            list->next = list->prev = list;
+        }
+     * */
     list_init(&server->conns);
     *serverp = server;
 
