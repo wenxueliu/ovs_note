@@ -1,3 +1,66 @@
+##预备知识
+
+基本的 makefile 语法见[跟我一起写 Makefile](http://blog.csdn.net/haoel/article/details/2886/)
+
+##编译
+
+为了区别 Kbuild Makefile 和 Normal Makefile
+
+```
+    ifeq ($(KERNELRELEASE),)
+    # We're being called directly by running make in this directory.
+    include Makefile.main
+    else
+    # We're being included by the Linux kernel build system
+    include Kbuild
+    endif
+```
+
+首先执行 Makefile.main.in 然后执行 Kbuild.in
+
+###Makefile.main.in
+
+####@var@
+
+    export builddir = @abs_builddir@
+    export srcdir = @abs_srcdir@
+    export top_srcdir = @abs_top_srcdir@
+    export KSRC = @KBUILD@
+    export VERSION = @VERSION@
+
+@var@ 首先包含这种变量的文件一般以in 为后缀. 在运行 ./configure 的时候, 文件的
+in 后缀被去掉, 该变量被替换为 ./configure 配置指定的变量
+
+###foreach
+
+    $(foreach var,list,text)
+
+
+这个函数的意思是, 把参数 list 中的单词逐一取出放到参数 var 所指定的变量中, 然后再执行 text 所包含的表达式.
+每一次 text 会返回一个字符串, 循环过程中 text 的所返回的每个字符串会以空格分隔, 最后当整个循环结束时,
+text 所返回的每个字符串所组成的整个字符串(以空格分隔)将会是 foreach 函数的返回值。
+
+###eval
+
+```
+    define module_template
+    $(1)-y = $$(notdir $$(patsubst %.c,%.o,$($(1)_sources)))
+    endef
+
+    $(foreach module,$(build_multi_modules),$(eval $(call module_template,$(module))))
+```
+如果 module = openvswitch, 结果
+
+openvswitch-y= *.c //*.c 为 openvswitch_sources 下的所有 *.c 文件
+
+###Kbuild.in
+
+ccflags-y：$(CC)的编译选项添加这里，宏开关也在这里添加
+
+
+
+
+
 
 DP_VPORT_HASH_BUCKETS : 大小是否会影响速率
 
@@ -890,5 +953,5 @@ ovs_dp_process_packet()
             nla_type(actions) : nla_data(actions)
         }
 
-
+###eval
 
