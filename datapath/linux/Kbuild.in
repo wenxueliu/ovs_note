@@ -13,6 +13,8 @@ ccflags-y += -I$(builddir)/..
 ccflags-y += -g
 ccflags-y += -include $(builddir)/kcompat.h
 
+# srcdir = $(shell pwd)
+#
 # These include directories have to go before -I$(KSRC)/include.
 # NOSTDINC_FLAGS just happens to be a variable that goes in the
 # right place, even though it's conceptually incorrect.
@@ -24,4 +26,6 @@ define module_template
 $(1)-y = $$(notdir $$(patsubst %.c,%.o,$($(1)_sources)))
 endef
 
+# module = openvswitch
+# openvswitch-y = openvswitch_sources/ 下所有 *.c 文件
 $(foreach module,$(build_multi_modules),$(eval $(call module_template,$(module))))
