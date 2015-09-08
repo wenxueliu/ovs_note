@@ -51,6 +51,10 @@ static inline void ether_addr_copy(u8 *dst, const u8 *src)
 }
 #endif
 
+/*
+ * #define ETH_P_802_3_MIN 0x0600
+ * If the value in the ethernet type is less than this value
+ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
 #define eth_proto_is_802_3 rpl_eth_proto_is_802_3
 static inline bool eth_proto_is_802_3(__be16 proto)
