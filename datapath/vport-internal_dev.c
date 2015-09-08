@@ -312,10 +312,12 @@ int ovs_internal_dev_rtnl_link_register(void)
 {
 	int err;
 
+    //将 internal_dev_link_ops 加入 linux/rtnetlink.h 中 link_ops
 	err = rtnl_link_register(&internal_dev_link_ops);
 	if (err < 0)
 		return err;
 
+    //如果 vport_ops_list->type 不存在 ovs_internal_vport_ops->type 中加入之
 	err = ovs_vport_ops_register(&ovs_internal_vport_ops);
 	if (err < 0)
 		rtnl_link_unregister(&internal_dev_link_ops);
