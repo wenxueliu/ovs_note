@@ -193,14 +193,17 @@ static bool arphdr_ok(struct sk_buff *skb)
 
 static int check_iphdr(struct sk_buff *skb)
 {
+    //nh_ofs 为 ethhdr 长度, 此时 skb->data 指向 ethhdr 头
 	unsigned int nh_ofs = skb_network_offset(skb);
 	unsigned int ip_len;
 	int err;
 
+    //确保 skb->len 大于 ethhdr 和 iphdr
 	err = check_header(skb, nh_ofs + sizeof(struct iphdr));
 	if (unlikely(err))
 		return err;
 
+    //ip_len 单位为字节
 	ip_len = ip_hdrlen(skb);
 	if (unlikely(ip_len < sizeof(struct iphdr) ||
 		     skb->len < nh_ofs + ip_len))
@@ -210,6 +213,9 @@ static int check_iphdr(struct sk_buff *skb)
 	return 0;
 }
 
+/*
+ * 确保 skb 中长度可以容纳 tcp 头长度
+ */
 static bool tcphdr_ok(struct sk_buff *skb)
 {
 	int th_ofs = skb_transport_offset(skb);
@@ -316,6 +322,9 @@ static int parse_vlan(struct sk_buff *skb, struct sw_flow_key *key)
 	return 0;
 }
 
+/*
+ * 参考 https://en.wikipedia.org/wiki/Ethernet_frame
+ */
 static __be16 parse_ethertype(struct sk_buff *skb)
 {
 	struct llc_snap_hdr {
@@ -458,6 +467,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	/* Flags are always used as part of stats */
 	key->tp.flags = 0;
 
+	//skb->mac_header = skb->data;
 	skb_reset_mac_header(skb);
 
 	/* Link layer.  We are guaranteed to have at least the 14 byte Ethernet
@@ -467,6 +477,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	ether_addr_copy(key->eth.src, eth->h_source);
 	ether_addr_copy(key->eth.dst, eth->h_dest);
 
+    //skb->data 向下移动两个　ETH_ALEN, 调用完成之后 skb->data 指向协议类型
 	__skb_pull(skb, 2 * ETH_ALEN);
 	/* We are going to push all headers that we pull, so no need to
 	 * update skb->csum here.
@@ -483,8 +494,12 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 	if (unlikely(key->eth.type == htons(0)))
 		return -ENOMEM;
 
+	//skb->nh.raw = skb->data;
 	skb_reset_network_header(skb);
+
+	//skb->mac_len = skb->network_header - skb->mac_header;
 	skb_reset_mac_len(skb);
+    //skb->data 此时又指向 eth 头
 	__skb_push(skb, skb->data - skb_mac_header(skb));
 
 	/* Network layer. */
@@ -492,6 +507,8 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 		struct iphdr *nh;
 		__be16 offset;
 
+        //检查 ethhdr iphdr 的长度 < skb->len; ip_len(即ihl * 4) + ethhdr < skb->len.
+        //并设置 skb->h.row = skb->data + ip_len + ethhdr
 		error = check_iphdr(skb);
 		if (unlikely(error)) {
 			memset(&key->ip, 0, sizeof(key->ip));
@@ -511,11 +528,15 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 		key->ip.tos = nh->tos;
 		key->ip.ttl = nh->ttl;
 
+        //如果不是第一帧, 直接返回 nh->frag_off & 0xff1f
 		offset = nh->frag_off & htons(IP_OFFSET);
 		if (offset) {
 			key->ip.frag = OVS_FRAG_TYPE_LATER;
 			return 0;
 		}
+        //如果 nh->frag_off = 0
+        //1. nh->frag_off & 0x0020
+        //2. skb_shinfo(skb)->gso_type & 10
 		if (nh->frag_off & htons(IP_MF) ||
 			skb_shinfo(skb)->gso_type & SKB_GSO_UDP)
 			key->ip.frag = OVS_FRAG_TYPE_FIRST;
@@ -705,6 +726,7 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 	}
 
 	key->phy.priority = skb->priority;
+    //包进入 ovs bridge 的端口
 	key->phy.in_port = OVS_CB(skb)->input_vport->port_no;
 	key->phy.skb_mark = skb->mark;
 	key->ovs_flow_hash = 0;
