@@ -494,6 +494,7 @@ static u32 flow_hash(const struct sw_flow_key *key,
 	int key_start = range->start;
 	int key_end = range->end;
 	const u32 *hash_key = (const u32 *)((const u8 *)key + key_start);
+    //因为 key_end-key_end 是字节数, 而 jhash2 是 u32,　因此除以 4
 	int hash_u32s = (key_end - key_start) >> 2;
 
 	/* Make sure number of hash bytes are multiple of u32. */
