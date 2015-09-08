@@ -61,6 +61,7 @@ ccflags-y：$(CC)的编译选项添加这里，宏开关也在这里添加
 
 
 
+##数据结构
 
 DP_VPORT_HASH_BUCKETS : 大小是否会影响速率
 
@@ -68,7 +69,10 @@ struct datapath {
 	struct rcu_head rcu;
 	struct list_head list_node;
 
-	/* Flow table. */
+	/*
+     * Flow table.
+     * 每个 datapath 有 255 张 table
+     */
 	struct flow_table table;
 
 	/* Switch ports. */
@@ -85,6 +89,50 @@ struct datapath {
 	u32 user_features;  // 什么意思待理解
 };
 
+/**
+ * enum ovs_datapath_attr - attributes for %OVS_DP_* commands.
+ * @OVS_DP_ATTR_NAME: Name of the network device that serves as the "local
+ * port".  This is the name of the network device whose dp_ifindex is given in
+ * the &struct ovs_header.  Always present in notifications.  Required in
+ * %OVS_DP_NEW requests.  May be used as an alternative to specifying
+ * dp_ifindex in other requests (with a dp_ifindex of 0).
+ * @OVS_DP_ATTR_UPCALL_PID: The Netlink socket in userspace that is initially
+ * set on the datapath port (for OVS_ACTION_ATTR_MISS).  Only valid on
+ * %OVS_DP_CMD_NEW requests. A value of zero indicates that upcalls should
+ * not be sent.
+ * @OVS_DP_ATTR_STATS: Statistics about packets that have passed through the
+ * datapath.  Always present in notifications.
+ * @OVS_DP_ATTR_MEGAFLOW_STATS: Statistics about mega flow masks usage for the
+ * datapath. Always present in notifications.
+ *
+ * These attributes follow the &struct ovs_header within the Generic Netlink
+ * payload for %OVS_DP_* commands.
+ */
+enum ovs_datapath_attr {
+	OVS_DP_ATTR_UNSPEC,
+	OVS_DP_ATTR_NAME,		/* name of dp_ifindex netdev */
+	OVS_DP_ATTR_UPCALL_PID,		/* Netlink PID to receive upcalls */
+	OVS_DP_ATTR_STATS,		/* struct ovs_dp_stats */
+	OVS_DP_ATTR_MEGAFLOW_STATS,	/* struct ovs_dp_megaflow_stats */
+	OVS_DP_ATTR_USER_FEATURES,	/* OVS_DP_F_*  */
+	__OVS_DP_ATTR_MAX
+};
+
+#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
+
+/**
+ * struct vport - one port within a datapath
+ * @rcu: RCU callback head for deferred destruction.
+ * @dp: Datapath to which this port belongs.
+ * @upcall_portids: RCU protected 'struct vport_portids'.
+ * @port_no: Index into @dp's @ports array.
+ * @hash_node: Element in @dev_table hash table in vport.c.
+ * @dp_hash_node: Element in @datapath->ports hash table in datapath.c.
+ * @ops: Class structure.
+ * @percpu_stats: Points to per-CPU statistics used and maintained by vport
+ * @err_stats: Points to error statistics used and maintained by vport
+ * @detach_list: list used for detaching vport in net-exit call.
+ */
 struct vport {
 	struct rcu_head rcu;
 	struct datapath	*dp;
@@ -92,7 +140,7 @@ struct vport {
 	u16 port_no;
 
 	struct hlist_node hash_node;
-	struct hlist_node dp_hash_node;
+	struct hlist_node dp_hash_node; --> datapath->vport->first
 	const struct vport_ops *ops;
 
 	struct pcpu_sw_netstats __percpu *percpu_stats;
@@ -132,13 +180,16 @@ struct vport_portids {
 struct flow_table {
 	struct table_instance __rcu *ti;
 	struct table_instance __rcu *ufid_ti;
+    //每个 CPU 都有的流表的缓存, 只有三条, 索引为 skb->hash & 3
 	struct mask_cache_entry __percpu *mask_cache;
+    //内核流表项缓存
 	struct mask_array __rcu *mask_array;
 	unsigned long last_rehash;
 	unsigned int count;
 	unsigned int ufid_count;
 };
 
+//table_instance　的每个 buckets 中保存 sw_flow.
 struct table_instance {
 	struct flex_array *buckets;
 	unsigned int n_buckets;
@@ -164,6 +215,33 @@ struct flex_array {
 		char padding[FLEX_ARRAY_BASE_SIZE]; //#define FLEX_ARRAY_BASE_SIZE PAGE_SIZE
 	};
 };
+
+struct mask_cache_entry {
+	u32 skb_hash;
+	u32 mask_index;
+};
+
+struct mask_array {
+	struct rcu_head rcu;
+	int count;
+    int max; //最大索引
+	struct sw_flow_mask __rcu *masks[];
+};
+
+struct sw_flow_mask {
+	int ref_count;
+	struct rcu_head rcu;
+	struct sw_flow_key_range range;
+	struct sw_flow_key key;
+};
+
+//key 匹配的范围
+struct sw_flow_key_range {
+	unsigned short int start;
+	unsigned short int end;
+};
+
+
 
 struct flex_array_part {
     char elements[FLEX_ARRAY_PART_SIZE];
@@ -786,22 +864,223 @@ static int sample(struct datapath *dp, struct sk_buff *skb,
     OVS_ACTION_ATTR_USERSPACE   output_userspace(dp, skb, key, a, actions, actions_len);
 
 --------------------------------------------------------------
+
+struct ovs_gso_cb {
+	struct ovs_skb_cb dp_cb;
+	gso_fix_segment_t fix_segment;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,11,0)
+	__be16		inner_protocol;
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
+	unsigned int	inner_mac_header;
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0)
+	unsigned int	inner_network_header;
+#endif
+};
+#define OVS_GSO_CB(skb) ((struct ovs_gso_cb *)(skb)->cb)
+
+--------------------------------------------------------------
+
+/**
+ * struct ovs_skb_cb - OVS data in skb CB
+ * @egress_tun_info: Tunnel information about this packet on egress path.
+ * NULL if the packet is not being tunneled.
+ * @input_vport: The original vport packet came in on. This value is cached
+ * when a packet is received by OVS.
+ */
+struct ovs_skb_cb {
+	struct ovs_tunnel_info  *egress_tun_info;
+	struct vport		*input_vport;
+};
+#define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
+
+--------------------------------------------------------------
+
+void ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
+		       const struct ovs_tunnel_info *tun_info)
+
+	OVS_CB(skb)->input_vport = vport;
+	OVS_CB(skb)->egress_tun_info = NULL;
+	ovs_flow_key_extract(tun_info, skb, &key);
+	ovs_dp_process_packet(skb, &key);
+
+--------------------------------------------------------------
+
+int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
+			 struct sk_buff *skb, struct sw_flow_key *key)
+
+    如果 tun_info 不为 null
+        key->tun_key = tun_info->tunnel
+        key->tun_opts = tun_info->options
+        key->tun_opts_len = tun_info->options_len
+
+    key->tun_key = {0}
+	key->tun_opts_len = 0;
+	key->phy.priority = skb->priority;
+	key->phy.in_port = OVS_CB(skb)->input_vport->port_no;
+	key->phy.skb_mark = skb->mark;
+	key->ovs_flow_hash = 0;
+	key->recirc_id = 0;
+    其余见 key_extract()
+
+--------------------------------------------------------------
+static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
+
+    此时 skb->data 必须指向 eth 头
+
+    key->tp.flas = 0;
+    eth = ethhdr(skb->head + skb->data)
+    key->eth.src = eth->h_source
+    key->eth.dst = eth->h_dest
+
+    #define ETH_P_8021Q     0x8100
+
+    key->eth.tci = 0 或 0x1000
+
+    如果是 802.3 #define ETH_P_802_3     0x0001
+        key->eth.type = (__be16)skb->data
+
+    如果是 LLC 并且 LLC ethertype 为 802.3
+        key->eth.type = (__be16)skb->data
+    否则 #define ETH_P_802_2     0x0004
+        key->eth.type = 0 或 0x0004
+
+    //IPV4
+    key->ipv4.addr.src = nh->saddr
+	key->ipv4.addr.dst = nh->daddr;
+	key->ip.proto = nh->protocol;
+	key->ip.tos = nh->tos;
+	key->ip.ttl = nh->ttl;
+    key->ip.frag = OVS_FRAG_TYPE_FIRST 或 OVS_FRAG_TYPE_LATER 或 OVS_FRAG_TYPE_NONE
+    //TCP
+    key->tp.src = tcp->source
+    key->tp.dst = tcp->dest
+    key->tp.flags = tcp->words[3] & htons(0x0FFF)
+    //UDP
+    key->tp.src = udp->source
+    key->tp.dst = udp->dest
+    //SCTP
+    key->tp.src = sctp->source
+    key->tp.dst = sctp->dest
+    //ICMP
+    key->tp.src = htons(icmp->type)
+    key->tp.dst = htons(icmp->code)
+
+    //ARP RARP
+    key->ip.proto = ntohs(arp->ar_op) 或 0
+    key->ipv4.addr.src = arp->ar_sip
+    key->ipv4.addr.dst = arp->ar_tip
+    key->ipv4.arp.sha  = arp->ar_sha
+    key->ipv4.arp.tha  = arp->ar_tha
+
+
+--------------------------------------------------------------
+
+#define VLAN_CFI_MASK           0x1000 /* Canonical Format Indicator */
+#define VLAN_TAG_PRESENT        VLAN_CFI_MASK
+#define skb_vlan_tag_present(__skb)     ((__skb)->vlan_tci & VLAN_TAG_PRESENT)
+
+如果包含 VLAN, skb_vlan_tag_present 就不会为 0, 也即 skb->vlan_tci = 0x1000
+
+-------------------------------------------------------------
+void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
+
+	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb),
+    if (!flow) --> ovs_dp_upcall(dp, skb, key, &upcall);
+                   ovs_execute_actions(dp, skb, sf_acts, key);
+    else       --> ovs_execute_actions(dp, skb, sf_acts, key);
+
+-------------------------------------------------------------
+struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl,
+					  const struct sw_flow_key *key,
+					  u32 skb_hash,
+					  u32 *n_mask_hit)
+
+     skb_hash 唯一鉴别一条 flow, 不同的 flow 应该有不同的 hash, 相同的 flow 应该有相同的 hash
+
+    如果 skb_hash = 0
+	return flow_lookup(tbl, ti, ma, key, n_mask_hit, &mask_index);
+
+    否则 先查 CPU 缓存, 再查内核缓存
+        entries = tbl->mask_cache
+        取 skb_hash 每个字节的低两位为 index
+        如果 entries[index] = skb_hash 这 entries 是每个 CPU 缓存的流表; return flow_lookup(tbl, ti, ma, key, 0,&e->mask_index);
+        否则 ce = (e->skb_hash 最小值) flow = flow_lookup(tbl, ti, ma, key, 0, &ce->mask_index);
+
+-------------------------------------------------------------
+static struct sw_flow *flow_lookup(struct flow_table *tbl,
+				   struct table_instance *ti,
+				   const struct mask_array *ma,
+				   const struct sw_flow_key *key,
+				   u32 *n_mask_hit,
+				   u32 *index)
+
+    充分利用 CPU 缓存
+    如果 index < ma->max;  返回 masked_flow_lookup(ti, key, ma->mask[*index], n_mask_hit)
+    否则 遍历 ma 数组所有元素 i, 如果 ma->masks[i] != 0; 返回 masked_flow_lookup(ti, key, ma->mask[i], n_mask_hit)
+
+-------------------------------------------------------------
+static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
+					  const struct sw_flow_key *unmasked,
+					  const struct sw_flow_mask *mask,
+					  u32 *n_mask_hit)
+
+	struct sw_flow *flow;
+	struct sw_flow_key masked_key;
+	struct hlist_head *head;
+
+    //从 mask unmasked 获取 masked_key
+	ovs_flow_mask_key(&masked_key, unmasked, mask);
+
+    //找到 ti 合适的 bucket
+    hash = jhash2(masked_key+mask->range->start, (mask->ranger->end - mask->ranger->start)>>2, 0)
+	head = flex_array_get(ti->buckets, jhash_1word(hash, ti->hash_seed) & (ti->n_buckets - 1));
+
+    //遍历 ti 的每个 bucket 中的每条 sw_flow 直到找到满足如下条件的 flow
+	hlist_for_each_entry_rcu(flow, head, flow_table.node[ti->node_ver])
+		if (flow->mask == mask && flow->flow_table.hash == hash &&
+		    flow_cmp_masked_key(flow, &masked_key, &mask->range))
+			return flow;
+
+-------------------------------------------------------------
+
+void ovs_flow_mask_key(struct sw_flow_key *dst, const struct sw_flow_key *src,
+		       const struct sw_flow_mask *mask)
+    通过 mask->key 和 src 逻辑运算与, 获取 dst
+
+-------------------------------------------------------------
+
+static u32 flow_hash(const struct sw_flow_key *key,
+		     const struct sw_flow_key_range *range)
+    通过　jhash2 计算 hash
+    jhash2(key+range->start, (ranger->end - ranger->start)>>2, 0)
+
+-------------------------------------------------------------
+
+static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
+
+	return flex_array_get(ti->buckets, jhash_1word(hash, ti->hash_seed) & (ti->n_buckets - 1));
+
+-------------------------------------------------------------
+
 ##核心处理逻辑
 
-
-ovs_dp_process_packet()
-    flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb), &n_mask_hit)
-     -->true:
-            ovs_dp_upcall(dp, skb, key, upcall_info)
-            --> skb_is_gso(skb)
-                --> queue_gso_packets(dp, skb, key, upcall_info)
-            --> !skb_is_gso(skb)
-                --> queue_userspace_packet(dp, skb, key, upcall_info)
-            n_lost++
-     -->false:
-            ovs_execute_actions(dp, skb, acts, key)
-            --> do_execute_actions(dp, skb, key, flow->sf_acts->actions,
-                    flow->sf_acts->actions_len)
+    ovs_vport_receive()
+        -->ovs_flow_key_extract()
+        -->ovs_dp_process_packet()
+            flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb), &n_mask_hit)
+            -->true:
+                    ovs_dp_upcall(dp, skb, key, upcall_info)
+                    --> skb_is_gso(skb)
+                        --> queue_gso_packets(dp, skb, key, upcall_info)
+                    --> !skb_is_gso(skb)
+                        --> queue_userspace_packet(dp, skb, key, upcall_info)
+                    n_lost++
+            -->false:
+                    ovs_execute_actions(dp, skb, acts, key)
+                    --> do_execute_actions(dp, skb, key, flow->sf_acts->actions,
+                            flow->sf_acts->actions_len)
 
 ###流表动作执行
 
@@ -953,5 +1232,549 @@ ovs_dp_process_packet()
             nla_type(actions) : nla_data(actions)
         }
 
-###eval
+## datapath 初始化
 
+1 action_fifos_init();
+2 ovs_internal_dev_rtnl_link_register();
+3 ovs_flow_init();
+4 ovs_vport_init();
+5 register_pernet_device(&ovs_net_ops);
+6 register_netdevice_notifier(&ovs_dp_device_notifier);
+7 ovs_netdev_init();
+8 dp_register_genl();
+
+
+##action
+
+###action_fifos_init()
+
+#define DEFERRED_ACTION_FIFO_SIZE 10
+struct action_fifo {
+	int head;
+	int tail;
+	/* Deferred action fifo queue storage. */
+	struct deferred_action fifo[DEFERRED_ACTION_FIFO_SIZE];
+};
+
+##vport-internal_dev
+
+----------------------------------------------
+int ovs_internal_dev_rtnl_link_register(void)
+
+    static struct rtnl_link_ops internal_dev_link_ops __read_mostly = {
+        .kind = "openvswitch",
+    };
+
+    rtnl_link_register(&internal_dev_link_ops);
+
+    static struct vport_ops ovs_internal_vport_ops = {
+        .type		= OVS_VPORT_TYPE_INTERNAL,
+        .create		= internal_dev_create,
+        .destroy	= internal_dev_destroy,
+        .get_name	= ovs_netdev_get_name,
+        .send		= internal_dev_recv,
+    };
+
+    //如果 vport_ops_list->type 不存在 ovs_internal_vport_ops->type 中加入之
+    ovs_vport_ops_register(&ovs_internal_vport_ops);
+----------------------------------------------
+
+##flow_table
+
+----------------------------------------------
+int ovs_flow_init(void)
+
+    从内核缓存区分配 sw_flow sw_flow_stats 两块内存
+
+	flow_cache = kmem_cache_create("sw_flow", sizeof(struct sw_flow)
+				       + (nr_node_ids
+					  * sizeof(struct flow_stats *)),
+				       0, 0, NULL);
+	flow_stats_cache
+		= kmem_cache_create("sw_flow_stats", sizeof(struct flow_stats),
+				    0, SLAB_HWCACHE_ALIGN, NULL);
+
+    nr_node_ids = 1
+----------------------------------------------
+
+##vport
+
+static LIST_HEAD(vport_ops_list);
+static struct hlist_head *dev_table;
+
+----------------------------------------------
+
+int ovs_vport_init(void)
+
+
+    分配 1024 个 hlist_head, 即 hash 桶的大小
+
+    #define VPORT_HASH_BUCKETS 1024
+	dev_table = kzalloc(VPORT_HASH_BUCKETS * sizeof(struct hlist_head),
+			    GFP_KERNEL);
+
+----------------------------------------------
+
+int ovs_vport_ops_register(struct vport_ops *ops)
+
+    将 ops 加入 vport_ops_list 中(前提是 vport_ops_list 中 type 是唯一的)
+
+----------------------------------------------
+
+##net_namespace
+
+----------------------------------------------
+static struct pernet_operations ovs_net_ops = {
+	.init = ovs_init_net,
+	.exit = ovs_exit_net,
+	.id   = &ovs_net_id,
+	.size = sizeof(struct ovs_net),
+};
+
+int register_pernet_device(struct pernet_operations *ops)
+
+    将 ops->list 加入 pernet_list
+    分配 ops->size 内存空间
+    遍历 net_exit_list, 中寻找 net_generic
+    调用 ops->init 函数
+
+    注册一个 net namespace 设备, 当 net namespace 创建的时候调用
+    ops->init 在 net namespace 销毁的时候调用 ops->exit
+
+----------------------------------------------
+
+int register_netdevice_notifier(&ovs_dp_device_notifier);
+
+    struct notifier_block ovs_dp_device_notifier = {
+        .notifier_call = dp_device_event
+    };
+
+----------------------------------------------
+
+##vport_netdev
+
+static struct vport_ops ovs_netdev_vport_ops = {
+	.type		= OVS_VPORT_TYPE_NETDEV,
+	.create		= netdev_create,
+	.destroy	= netdev_destroy,
+	.get_name	= ovs_netdev_get_name,
+	.send		= netdev_send,
+};
+
+int __init ovs_netdev_init(void)
+{
+	return ovs_vport_ops_register(&ovs_netdev_vport_ops);
+}
+
+##datapath
+
+------------------------------------------------
+static struct genl_family * const dp_genl_families[] = {
+	&dp_datapath_genl_family,
+	&dp_vport_genl_family,
+	&dp_flow_genl_family,
+	&dp_packet_genl_family,
+};
+
+#define OVS_DATAPATH_VERSION 2
+#define OVS_DATAPATH_FAMILY  "ovs_datapath"
+
+/**
+ * enum ovs_datapath_attr - attributes for %OVS_DP_* commands.
+ * @OVS_DP_ATTR_NAME: Name of the network device that serves as the "local
+ * port".  This is the name of the network device whose dp_ifindex is given in
+ * the &struct ovs_header.  Always present in notifications.  Required in
+ * %OVS_DP_NEW requests.  May be used as an alternative to specifying
+ * dp_ifindex in other requests (with a dp_ifindex of 0).
+ * @OVS_DP_ATTR_UPCALL_PID: The Netlink socket in userspace that is initially
+ * set on the datapath port (for OVS_ACTION_ATTR_MISS).  Only valid on
+ * %OVS_DP_CMD_NEW requests. A value of zero indicates that upcalls should
+ * not be sent.
+ * @OVS_DP_ATTR_STATS: Statistics about packets that have passed through the
+ * datapath.  Always present in notifications.
+ * @OVS_DP_ATTR_MEGAFLOW_STATS: Statistics about mega flow masks usage for the
+ * datapath. Always present in notifications.
+ *
+ * These attributes follow the &struct ovs_header within the Generic Netlink
+ * payload for %OVS_DP_* commands.
+ */
+enum ovs_datapath_attr {
+	OVS_DP_ATTR_UNSPEC,
+	OVS_DP_ATTR_NAME,		/* name of dp_ifindex netdev */
+	OVS_DP_ATTR_UPCALL_PID,		/* Netlink PID to receive upcalls */
+	OVS_DP_ATTR_STATS,		/* struct ovs_dp_stats */
+	OVS_DP_ATTR_MEGAFLOW_STATS,	/* struct ovs_dp_megaflow_stats */
+	OVS_DP_ATTR_USER_FEATURES,	/* OVS_DP_F_*  */
+	__OVS_DP_ATTR_MAX
+};
+
+#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
+
+enum ovs_datapath_cmd {
+	OVS_DP_CMD_UNSPEC,
+	OVS_DP_CMD_NEW,
+	OVS_DP_CMD_DEL,
+	OVS_DP_CMD_GET,
+	OVS_DP_CMD_SET
+};
+
+static const struct nla_policy datapath_policy[OVS_DP_ATTR_MAX + 1] = {
+	[OVS_DP_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
+	[OVS_DP_ATTR_UPCALL_PID] = { .type = NLA_U32 },
+	[OVS_DP_ATTR_USER_FEATURES] = { .type = NLA_U32 },
+};
+
+static const struct genl_ops dp_datapath_genl_ops[] = {
+	{ .cmd = OVS_DP_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_new
+	},
+	{ .cmd = OVS_DP_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_del
+	},
+	{ .cmd = OVS_DP_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_get,
+	  .dumpit = ovs_dp_cmd_dump
+	},
+	{ .cmd = OVS_DP_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_set,
+	},
+};
+
+static const struct genl_multicast_group ovs_dp_datapath_multicast_group = {
+	.name = OVS_DATAPATH_MCGROUP,
+};
+
+static struct genl_family dp_datapath_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_DATAPATH_FAMILY,
+	.version = OVS_DATAPATH_VERSION,
+	.maxattr = OVS_DP_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_datapath_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_datapath_genl_ops),
+	.mcgrps = &ovs_dp_datapath_multicast_group,
+	.n_mcgrps = 1,
+};
+
+-----------------------------------------------
+
+#define OVS_VPORT_FAMILY  "ovs_vport"
+
+static const struct nla_policy vport_policy[OVS_VPORT_ATTR_MAX + 1] = {
+	[OVS_VPORT_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
+	[OVS_VPORT_ATTR_STATS] = { .len = sizeof(struct ovs_vport_stats) },
+	[OVS_VPORT_ATTR_PORT_NO] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_TYPE] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_UPCALL_PID] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_OPTIONS] = { .type = NLA_NESTED },
+};
+
+static const struct genl_ops dp_vport_genl_ops[] = {
+	{ .cmd = OVS_VPORT_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_new
+	},
+	{ .cmd = OVS_VPORT_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_del
+	},
+	{ .cmd = OVS_VPORT_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_get,
+	  .dumpit = ovs_vport_cmd_dump
+	},
+	{ .cmd = OVS_VPORT_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_set,
+	},
+};
+
+const struct genl_multicast_group ovs_dp_vport_multicast_group = {
+	.name = OVS_VPORT_MCGROUP,
+};
+
+#define OVS_VPORT_MCGROUP "ovs_vport"
+
+struct genl_family dp_vport_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_VPORT_FAMILY,
+	.version = OVS_VPORT_VERSION,
+	.maxattr = OVS_VPORT_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_vport_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_vport_genl_ops),
+	.mcgrps = &ovs_dp_vport_multicast_group,
+	.n_mcgrps = 1,
+};
+
+------------------------------------------------
+
+#define OVS_FLOW_FAMILY  "ovs_flow"
+#define OVS_FLOW_VERSION 0x1
+
+/**
+ * enum ovs_flow_attr - attributes for %OVS_FLOW_* commands.
+ * @OVS_FLOW_ATTR_KEY: Nested %OVS_KEY_ATTR_* attributes specifying the flow
+ * key.  Always present in notifications.  Required for all requests (except
+ * dumps).
+ * @OVS_FLOW_ATTR_ACTIONS: Nested %OVS_ACTION_ATTR_* attributes specifying
+ * the actions to take for packets that match the key.  Always present in
+ * notifications.  Required for %OVS_FLOW_CMD_NEW requests, optional for
+ * %OVS_FLOW_CMD_SET requests.  An %OVS_FLOW_CMD_SET without
+ * %OVS_FLOW_ATTR_ACTIONS will not modify the actions.  To clear the actions,
+ * an %OVS_FLOW_ATTR_ACTIONS without any nested attributes must be given.
+ * @OVS_FLOW_ATTR_STATS: &struct ovs_flow_stats giving statistics for this
+ * flow.  Present in notifications if the stats would be nonzero.  Ignored in
+ * requests.
+ * @OVS_FLOW_ATTR_TCP_FLAGS: An 8-bit value giving the OR'd value of all of the
+ * TCP flags seen on packets in this flow.  Only present in notifications for
+ * TCP flows, and only if it would be nonzero.  Ignored in requests.
+ * @OVS_FLOW_ATTR_USED: A 64-bit integer giving the time, in milliseconds on
+ * the system monotonic clock, at which a packet was last processed for this
+ * flow.  Only present in notifications if a packet has been processed for this
+ * flow.  Ignored in requests.
+ * @OVS_FLOW_ATTR_CLEAR: If present in a %OVS_FLOW_CMD_SET request, clears the
+ * last-used time, accumulated TCP flags, and statistics for this flow.
+ * Otherwise ignored in requests.  Never present in notifications.
+ * @OVS_FLOW_ATTR_MASK: Nested %OVS_KEY_ATTR_* attributes specifying the
+ * mask bits for wildcarded flow match. Mask bit value '1' specifies exact
+ * match with corresponding flow key bit, while mask bit value '0' specifies
+ * a wildcarded match. Omitting attribute is treated as wildcarding all
+ * corresponding fields. Optional for all requests. If not present,
+ * all flow key bits are exact match bits.
+ * @OVS_FLOW_ATTR_UFID: A value between 1-16 octets specifying a unique
+ * identifier for the flow. Causes the flow to be indexed by this value rather
+ * than the value of the %OVS_FLOW_ATTR_KEY attribute. Optional for all
+ * requests. Present in notifications if the flow was created with this
+ * attribute.
+ * @OVS_FLOW_ATTR_UFID_FLAGS: A 32-bit value of OR'd %OVS_UFID_F_*
+ * flags that provide alternative semantics for flow installation and
+ * retrieval. Optional for all requests.
+ *
+ * These attributes follow the &struct ovs_header within the Generic Netlink
+ * payload for %OVS_FLOW_* commands.
+ */
+enum ovs_flow_attr {
+	OVS_FLOW_ATTR_UNSPEC,
+	OVS_FLOW_ATTR_KEY,       /* Sequence of OVS_KEY_ATTR_* attributes. */
+	OVS_FLOW_ATTR_ACTIONS,   /* Nested OVS_ACTION_ATTR_* attributes. */
+	OVS_FLOW_ATTR_STATS,     /* struct ovs_flow_stats. */
+	OVS_FLOW_ATTR_TCP_FLAGS, /* 8-bit OR'd TCP flags. */
+	OVS_FLOW_ATTR_USED,      /* u64 msecs last used in monotonic time. */
+	OVS_FLOW_ATTR_CLEAR,     /* Flag to clear stats, tcp_flags, used. */
+	OVS_FLOW_ATTR_MASK,      /* Sequence of OVS_KEY_ATTR_* attributes. */
+	OVS_FLOW_ATTR_PROBE,     /* Flow operation is a feature probe, error
+				  * logging should be suppressed. */
+	OVS_FLOW_ATTR_UFID,      /* Variable length unique flow identifier. */
+	OVS_FLOW_ATTR_UFID_FLAGS,/* u32 of OVS_UFID_F_*. */
+	__OVS_FLOW_ATTR_MAX
+};
+
+#define OVS_FLOW_ATTR_MAX (__OVS_FLOW_ATTR_MAX - 1)
+
+static const struct genl_ops dp_flow_genl_ops[] = {
+	{ .cmd = OVS_FLOW_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_new
+	},
+	{ .cmd = OVS_FLOW_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_del
+	},
+	{ .cmd = OVS_FLOW_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_get,
+	  .dumpit = ovs_flow_cmd_dump
+	},
+	{ .cmd = OVS_FLOW_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_set,
+	},
+};
+
+#define OVS_FLOW_MCGROUP "ovs_flow"
+
+static const struct genl_multicast_group ovs_dp_flow_multicast_group = {
+	.name = OVS_FLOW_MCGROUP,
+};
+
+static struct genl_family dp_flow_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_FLOW_FAMILY,
+	.version = OVS_FLOW_VERSION,
+	.maxattr = OVS_FLOW_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_flow_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_flow_genl_ops),
+	.mcgrps = &ovs_dp_flow_multicast_group,
+	.n_mcgrps = 1,
+};
+
+----------------------------------------------------
+
+#define OVS_PACKET_FAMILY "ovs_packet"
+#define OVS_PACKET_VERSION 0x1
+
+/**
+ * enum ovs_packet_attr - attributes for %OVS_PACKET_* commands.
+ * @OVS_PACKET_ATTR_PACKET: Present for all notifications.  Contains the entire
+ * packet as received, from the start of the Ethernet header onward.  For
+ * %OVS_PACKET_CMD_ACTION, %OVS_PACKET_ATTR_PACKET reflects changes made by
+ * actions preceding %OVS_ACTION_ATTR_USERSPACE, but %OVS_PACKET_ATTR_KEY is
+ * the flow key extracted from the packet as originally received.
+ * @OVS_PACKET_ATTR_KEY: Present for all notifications.  Contains the flow key
+ * extracted from the packet as nested %OVS_KEY_ATTR_* attributes.  This allows
+ * userspace to adapt its flow setup strategy by comparing its notion of the
+ * flow key against the kernel's.  When used with %OVS_PACKET_CMD_EXECUTE, only
+ * metadata key fields (e.g. priority, skb mark) are honored.  All the packet
+ * header fields are parsed from the packet instead.
+ * @OVS_PACKET_ATTR_ACTIONS: Contains actions for the packet.  Used
+ * for %OVS_PACKET_CMD_EXECUTE.  It has nested %OVS_ACTION_ATTR_* attributes.
+ * Also used in upcall when %OVS_ACTION_ATTR_USERSPACE has optional
+ * %OVS_USERSPACE_ATTR_ACTIONS attribute.
+ * @OVS_PACKET_ATTR_USERDATA: Present for an %OVS_PACKET_CMD_ACTION
+ * notification if the %OVS_ACTION_ATTR_USERSPACE action specified an
+ * %OVS_USERSPACE_ATTR_USERDATA attribute, with the same length and content
+ * specified there.
+ * @OVS_PACKET_ATTR_EGRESS_TUN_KEY: Present for an %OVS_PACKET_CMD_ACTION
+ * notification if the %OVS_ACTION_ATTR_USERSPACE action specified an
+ * %OVS_USERSPACE_ATTR_EGRESS_TUN_PORT attribute, which is sent only if the
+ * output port is actually a tunnel port. Contains the output tunnel key
+ * extracted from the packet as nested %OVS_TUNNEL_KEY_ATTR_* attributes.
+ * These attributes follow the &struct ovs_header within the Generic Netlink
+ * payload for %OVS_PACKET_* commands.
+ */
+enum ovs_packet_attr {
+	OVS_PACKET_ATTR_UNSPEC,
+	OVS_PACKET_ATTR_PACKET,      /* Packet data. */
+	OVS_PACKET_ATTR_KEY,         /* Nested OVS_KEY_ATTR_* attributes. */
+	OVS_PACKET_ATTR_ACTIONS,     /* Nested OVS_ACTION_ATTR_* attributes. */
+	OVS_PACKET_ATTR_USERDATA,    /* OVS_ACTION_ATTR_USERSPACE arg. */
+	OVS_PACKET_ATTR_EGRESS_TUN_KEY,  /* Nested OVS_TUNNEL_KEY_ATTR_*
+					    attributes. */
+	OVS_PACKET_ATTR_UNUSED1,
+	OVS_PACKET_ATTR_UNUSED2,
+	OVS_PACKET_ATTR_PROBE,      /* Packet operation is a feature probe,
+				       error logging should be suppressed. */
+	__OVS_PACKET_ATTR_MAX
+};
+
+#define OVS_PACKET_ATTR_MAX (__OVS_PACKET_ATTR_MAX - 1)
+
+static const struct genl_ops dp_packet_genl_ops[] = {
+	{ .cmd = OVS_PACKET_CMD_EXECUTE,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = packet_policy,
+	  .doit = ovs_packet_cmd_execute
+	}
+};
+
+static struct genl_family dp_packet_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_PACKET_FAMILY,
+	.version = OVS_PACKET_VERSION,
+	.maxattr = OVS_PACKET_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_packet_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_packet_genl_ops),
+};
+
+
+int dp_register_genl(void)
+
+    遍历 dp_genl_families, 对每个元素调用 genl_register_family(dp_genl_families[i]);
+    其中 genl_register_family(dp_genl_families[i])
+
+------------------------------------------------
+
+内核版本为 *** 之前
+
+#define genl_register_family rpl_genl_register_family
+static inline int rpl_genl_register_family(struct genl_family *family)
+{
+	family->module = THIS_MODULE;
+	return rpl___genl_register_family(family);
+}
+
+------------------------------------------------
+
+##genetlink
+
+#define GENL_ID_GENERATE        0
+#define GENL_FAM_TAB_SIZE       16
+#define GENL_FAM_TAB_MASK       (GENL_FAM_TAB_SIZE - 1)
+static struct list_head family_ht[GENL_FAM_TAB_SIZE]
+
+struct rpl_genl_family {
+	struct genl_family	compat_family;
+	unsigned int            id;
+	unsigned int            hdrsize;
+	char                    name[GENL_NAMSIZ];
+	unsigned int            version;
+	unsigned int            maxattr;
+	bool                    netnsok;
+	bool                    parallel_ops;
+	int                     (*pre_doit)(const struct genl_ops *ops,
+					    struct sk_buff *skb,
+					    struct genl_info *info);
+	void                    (*post_doit)(const struct genl_ops *ops,
+					     struct sk_buff *skb,
+					     struct genl_info *info);
+	struct nlattr **        attrbuf;        /* private */
+	const struct genl_ops * ops;            /* private */
+	const struct genl_multicast_group *mcgrps; /* private */
+	unsigned int            n_ops;          /* private */
+	unsigned int            n_mcgrps;       /* private */
+	unsigned int            mcgrp_offset;   /* private */
+	struct list_head        family_list;    /* private */
+	struct module           *module;
+};
+
+------------------------------------------------
+
+static inline struct list_head *genl_family_chain(unsigned int id)
+
+    return &family_ht[genl_family_hash(id)];
+
+------------------------------------------------
+
+static inline unsigned int genl_family_hash(unsigned int id)
+
+    return id & GENL_FAM_TAB_MASK;
+
+------------------------------------------------
+
+static inline int genl_register_family(struct genl_family *family)
+
+    family->module = THIS_MODULE;
+    return __genl_register_family(family);
+
+------------------------------------------------
+
+int __genl_register_family(struct genl_family *family)
+
+        genl_family_find_byname(family->name))
