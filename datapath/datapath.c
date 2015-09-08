@@ -190,8 +190,8 @@ static int get_dpifindex(const struct datapath *dp)
 	rcu_read_lock();
 
     //OVSP_LOCAL = 0
-	//begin &dp->ports[port_no & (DP_VPORT_HASH_BUCKETS - 1)] to find the
-    //port_no = OVSP_LOCAL, return the vport founded
+	//&dp->ports[port_no & (DP_VPORT_HASH_BUCKETS - 1)] to find when port->port_no = port_no
+    //where port_no = OVSP_LOCAL, return the vport founded
 	local = ovs_vport_rcu(dp, OVSP_LOCAL);
     //by the local to netdev_port*; net_device
 	if (local)
@@ -279,7 +279,11 @@ void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
 
 	stats = this_cpu_ptr(dp->stats_percpu);
 
-	/* Look up flow. */
+	/*
+     * Look up flow.
+     * skb_get_hash(skb) 获取一个 skb 的 hash, 唯一鉴别一条 flow, 不同的 flow
+     * 应该有不同的 hash, 相同的 flow 应该有相同的 hash
+     */
 	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb),
 					 &n_mask_hit);
 	if (unlikely(!flow)) {
