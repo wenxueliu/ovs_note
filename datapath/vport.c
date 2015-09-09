@@ -43,6 +43,7 @@ static void ovs_vport_record_error(struct vport *,
 static LIST_HEAD(vport_ops_list);
 
 /* Protected by RCU read lock for reading, ovs_mutex for writing. */
+//根据网络对 vport 划分
 static struct hlist_head *dev_table;
 #define VPORT_HASH_BUCKETS 1024
 
@@ -83,6 +84,7 @@ int ovs_vport_ops_register(struct vport_ops *ops)
 	struct vport_ops *o;
 
 	ovs_lock();
+    //防止 ovs_internal_vport_ops->type 与 vport_ops_list中元素的 type 重复
 	list_for_each_entry(o, &vport_ops_list, list)
 	if (ops->type == o->type)
 		goto errout;

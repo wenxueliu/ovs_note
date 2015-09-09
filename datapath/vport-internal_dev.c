@@ -317,7 +317,7 @@ int ovs_internal_dev_rtnl_link_register(void)
 	if (err < 0)
 		return err;
 
-    //如果 vport_ops_list->type 不存在 ovs_internal_vport_ops->type 中加入之
+    //将 ovs_internal_vport_ops 加入 vport.c 中的 vport_ops_list 中
 	err = ovs_vport_ops_register(&ovs_internal_vport_ops);
 	if (err < 0)
 		rtnl_link_unregister(&internal_dev_link_ops);
