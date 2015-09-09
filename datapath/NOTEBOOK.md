@@ -149,6 +149,25 @@ struct vport {
 	struct list_head detach_list;
 };
 
+/**
+ * struct vport_ops - definition of a type of virtual port
+ *
+ * @type: %OVS_VPORT_TYPE_* value for this type of virtual port.
+ * @create: Create a new vport configured as specified.  On success returns
+ * a new vport allocated with ovs_vport_alloc(), otherwise an ERR_PTR() value.
+ * @destroy: Destroys a vport.  Must call vport_free() on the vport but not
+ * before an RCU grace period has elapsed.
+ * @set_options: Modify the configuration of an existing vport.  May be %NULL
+ * if modification is not supported.
+ * @get_options: Appends vport-specific attributes for the configuration of an
+ * existing vport to a &struct sk_buff.  May be %NULL for a vport that does not
+ * have any configuration.
+ * @get_name: Get the device's name.
+ * @send: Send a packet on the device.  Returns the length of the packet sent,
+ * zero for dropped packets or negative for error.
+ * @get_egress_tun_info: Get the egress tunnel 5-tuple and other info for
+ * a packet.
+ */
 struct vport_ops {
 	enum ovs_vport_type type;
 
@@ -167,7 +186,7 @@ struct vport_ops {
 				   struct ovs_tunnel_info *);
 
 	struct module *owner;
-	struct list_head list;
+	struct list_head list; //连接所有的 vport_ops
 };
 
 struct vport_portids {
@@ -1243,12 +1262,37 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
 7 ovs_netdev_init();
 8 dp_register_genl();
 
+对应于
+
+1 分配一个动态的　percpu 区域初始化 action_fifos
+2 将 internal_dev_link_ops 加入 linux/rtnetlink.h 中 link_ops 双向链表中,
+  将 ovs_internal_vport_ops 加入 vport.c 中的 vport_ops_list 双向链表中
+3 从内核缓存区初始化 sw_flow, sw_flow_stats 两块内存
+4 分配 1024 个 hlist_head(hash 桶的大小) 初始化 dev_table
+5 将 ovs_net_ops 操作, 注册到所有命名空间
+6 将 ovs_dp_device_notifier 注册一个网络通知
+7 将 ovs_netdev_vport_ops 注册到所有命名空间
+8 将 dp_genl_families  中所有元素注册到 generic netlink family
+
 
 ##action
 
 ###action_fifos_init()
 
+分配一个动态的　percpu 区域初始化 action_fifos
+
+static struct action_fifo __percpu *action_fifos;
+action_fifos = alloc_percpu(struct action_fifo);
+
 #define DEFERRED_ACTION_FIFO_SIZE 10
+struct deferred_action {
+	struct sk_buff *skb;
+	const struct nlattr *actions;
+
+	/* Store pkt_key clone when creating deferred action. */
+	struct sw_flow_key pkt_key;
+};
+
 struct action_fifo {
 	int head;
 	int tail;
@@ -1256,17 +1300,21 @@ struct action_fifo {
 	struct deferred_action fifo[DEFERRED_ACTION_FIFO_SIZE];
 };
 
+
 ##vport-internal_dev
 
 ----------------------------------------------
 int ovs_internal_dev_rtnl_link_register(void)
 
+将 internal_dev_link_ops 加入 linux/rtnetlink.h 中 link_ops 双向链表中
+将 ovs_internal_vport_ops 加入 vport.c 中的 vport_ops_list 双向链表中
+
     static struct rtnl_link_ops internal_dev_link_ops __read_mostly = {
         .kind = "openvswitch",
     };
-
     rtnl_link_register(&internal_dev_link_ops);
 
+    static LIST_HEAD(vport_ops_list);
     static struct vport_ops ovs_internal_vport_ops = {
         .type		= OVS_VPORT_TYPE_INTERNAL,
         .create		= internal_dev_create,
@@ -1274,9 +1322,8 @@ int ovs_internal_dev_rtnl_link_register(void)
         .get_name	= ovs_netdev_get_name,
         .send		= internal_dev_recv,
     };
-
-    //如果 vport_ops_list->type 不存在 ovs_internal_vport_ops->type 中加入之
     ovs_vport_ops_register(&ovs_internal_vport_ops);
+
 ----------------------------------------------
 
 ##flow_table
@@ -1284,8 +1331,10 @@ int ovs_internal_dev_rtnl_link_register(void)
 ----------------------------------------------
 int ovs_flow_init(void)
 
-    从内核缓存区分配 sw_flow sw_flow_stats 两块内存
+    从内核缓存区初始化 sw_flow sw_flow_stats 两块内存
 
+    static struct kmem_cache *flow_cache;
+    struct kmem_cache *flow_stats_cache __read_mostly;
 	flow_cache = kmem_cache_create("sw_flow", sizeof(struct sw_flow)
 				       + (nr_node_ids
 					  * sizeof(struct flow_stats *)),
@@ -1299,16 +1348,13 @@ int ovs_flow_init(void)
 
 ##vport
 
-static LIST_HEAD(vport_ops_list);
-static struct hlist_head *dev_table;
-
 ----------------------------------------------
 
 int ovs_vport_init(void)
 
+    分配 1024 个 hlist_head(hash 桶的大小) 初始化 dev_table
 
-    分配 1024 个 hlist_head, 即 hash 桶的大小
-
+    static struct hlist_head *dev_table;
     #define VPORT_HASH_BUCKETS 1024
 	dev_table = kzalloc(VPORT_HASH_BUCKETS * sizeof(struct hlist_head),
 			    GFP_KERNEL);
@@ -1317,7 +1363,7 @@ int ovs_vport_init(void)
 
 int ovs_vport_ops_register(struct vport_ops *ops)
 
-    将 ops 加入 vport_ops_list 中(前提是 vport_ops_list 中 type 是唯一的)
+    将 ops 加入 vport_ops_list 中(前提是 vport_ops_list 中每个元素的 type 是唯一的)
 
 ----------------------------------------------
 
@@ -1331,23 +1377,60 @@ static struct pernet_operations ovs_net_ops = {
 	.size = sizeof(struct ovs_net),
 };
 
+/**
+ *      register_pernet_device - register a network namespace device
+ *      @ops:  pernet operations structure for the subsystem
+ *
+ *      Register a device which has init and exit functions
+ *      that are called when network namespaces are created and
+ *      destroyed respectively.
+ *
+ *      When registered all network namespace init functions are
+ *      called for every existing network namespace.  Allowing kernel
+ *      modules to have a race free view of the set of network spaces.
+ *
+ *      When a new network namespace is created all of the init
+ *      methods are called in the order in which they were registered.
+ *
+ *      When a network namespace is destroyed all of the exit methods
+ *      are called in the reverse of the order with which they were
+ *      registered.
+ */
 int register_pernet_device(struct pernet_operations *ops)
 
-    将 ops->list 加入 pernet_list
-    分配 ops->size 内存空间
-    遍历 net_exit_list, 中寻找 net_generic
-    调用 ops->init 函数
+    将 ops->list 加入 linux/net_namespace.h pernet_list 双向链表中
+    linux/net_namespace.h 从 net_namespace_list 开始遍历所有的 struct net
+    1. 分配 ops->size 内存空间 data 并且 net->gen->ptr[id-1] = data
+    2. 调用 ops->init(net)
+    3. 将 net->exit_list 加入 net_exit_list 双向链表中
 
     注册一个 net namespace 设备, 当 net namespace 创建的时候调用
     ops->init 在 net namespace 销毁的时候调用 ops->exit
 
+    NOTE: net_namespace_list, net_exit_list 都是 net_namespace.h 中 head_list 类型的全局变量,
+
 ----------------------------------------------
+
+/**
+ *      register_netdevice_notifier - register a network notifier
+ *      @nb: notifier
+ *
+ *      Register a notifier to be called when network device events .
+ *      The notifier passed is linked into the kernel structures and
+ *      not be reused until it has been unregistered. A negative code
+ *      is returned on a failure.
+ *
+ *      When registered all registration and up events are replayed
+ *      to the new notifier to allow device to have a race free
+ *      view of the network device list.
+ */
 
 int register_netdevice_notifier(&ovs_dp_device_notifier);
 
     struct notifier_block ovs_dp_device_notifier = {
         .notifier_call = dp_device_event
     };
+
 
 ----------------------------------------------
 
@@ -1775,6 +1858,20 @@ static inline int genl_register_family(struct genl_family *family)
 
 ------------------------------------------------
 
+/**
+ * __genl_register_family - register a generic netlink family
+ * @family: generic netlink family
+ *
+ * Registers the specified family after validating it first. Only one
+ * family may be registered with the same family name or identifier.
+ * The family id may equal GENL_ID_GENERATE causing an unique id to
+ * be automatically generated and assigned.
+ *
+ * The family's ops array must already be assigned, you can use the
+ * genl_register_family_with_ops() helper function.
+ *
+ * Return 0 on success or a negative error code.
+ */
 int __genl_register_family(struct genl_family *family)
 
         genl_family_find_byname(family->name))
