@@ -258,10 +258,12 @@ static int set_eth_addr(struct sk_buff *skb, struct sw_flow_key *flow_key,
 {
 	int err;
 
+    //确保 skb 有 ETH_HLEN 长度修改
 	err = skb_ensure_writable(skb, ETH_HLEN);
 	if (unlikely(err))
 		return err;
 
+    //校验和
 	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_ALEN * 2);
 
 	ether_addr_copy_masked(eth_hdr(skb)->h_source, key->eth_src,
@@ -269,6 +271,7 @@ static int set_eth_addr(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	ether_addr_copy_masked(eth_hdr(skb)->h_dest, key->eth_dst,
 			       mask->eth_dst);
 
+    //校验和
 	ovs_skb_postpush_rcsum(skb, eth_hdr(skb), ETH_ALEN * 2);
 
 	ether_addr_copy(flow_key->eth.src, eth_hdr(skb)->h_source);
@@ -389,6 +392,7 @@ static int set_ipv4(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	if (mask->ipv4_src) {
 		new_addr = MASKED(nh->saddr, key->ipv4_src, mask->ipv4_src);
 
+        //这里应该为 linkely 更合适
 		if (unlikely(new_addr != nh->saddr)) {
 			set_ip_addr(skb, nh, &nh->saddr, new_addr);
 			flow_key->ipv4.addr.src = new_addr;
@@ -397,12 +401,14 @@ static int set_ipv4(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	if (mask->ipv4_dst) {
 		new_addr = MASKED(nh->daddr, key->ipv4_dst, mask->ipv4_dst);
 
+        //这里应该为 linkely 更合适
 		if (unlikely(new_addr != nh->daddr)) {
 			set_ip_addr(skb, nh, &nh->daddr, new_addr);
 			flow_key->ipv4.addr.dst = new_addr;
 		}
 	}
 	if (mask->ipv4_tos) {
+        //矫正 nh->check, 重置 nh->tos
 		ipv4_change_dsfield(nh, ~mask->ipv4_tos, key->ipv4_tos);
 		flow_key->ip.tos = nh->tos;
 	}
@@ -746,6 +752,28 @@ static int execute_set_action(struct sk_buff *skb,
 /* Mask is at the midpoint of the data. */
 #define get_mask(a, type) ((const type)nla_data(a) + 1)
 
+/*
+ *   Attribute Format:
+ *      <------- nla_total_size(payload) ------->
+ *      <---- nla_attr_size(payload) ----->
+ *      +----------+- - -+- - - - - - - - - +- - -+-------- - -
+ *      |  Header  | Pad |     Payload      | Pad |  Header
+ *      +----------+- - -+- - - - - - - - - +- - -+-------- - -
+ *                       <- nla_len(nla) ->      ^
+ *      nla_data(nla)----^                        |
+ *      nla_next(nla)-----------------------------'
+ *
+ *      <------- NLA_HDRLEN ------> <-- NLA_ALIGN(payload)-->
+ *      +---------------------+- - -+- - - - - - - - - -+- - -+
+ *      |        Header       | Pad |     Payload       | Pad |
+ *      |   (struct nlattr)   | ing |                   | ing |
+ *      +---------------------+- - -+- - - - - - - - - -+- - -+
+ *      <-------------- nlattr->nla_len -------------->
+ *
+ * 'KEY' must not have any bits set outside of the 'MASK'
+ * #define MASKED(OLD, KEY, MASK) ((KEY) | ((OLD) & ~(MASK)))
+ * #define SET_MASKED(OLD, KEY, MASK) ((OLD) = MASKED(OLD, KEY, MASK))
+ */
 static int execute_masked_set_action(struct sk_buff *skb,
 				     struct sw_flow_key *flow_key,
 				     const struct nlattr *a)
@@ -975,6 +1003,7 @@ int ovs_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			const struct sw_flow_actions *acts,
 			struct sw_flow_key *key)
 {
+    //exec_actions_level 这里的作用是什么?
 	int level = this_cpu_read(exec_actions_level);
 	int err;
 

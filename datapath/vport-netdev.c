@@ -110,6 +110,7 @@ static struct vport *netdev_create(const struct vport_parms *parms)
 
 	netdev_vport = netdev_vport_priv(vport);
 
+    //TODO:这里直接获取, 原因
 	netdev_vport->dev = dev_get_by_name(ovs_dp_get_net(vport->dp), parms->name);
 	if (!netdev_vport->dev) {
 		err = -ENODEV;
@@ -124,11 +125,37 @@ static struct vport *netdev_create(const struct vport_parms *parms)
 	}
 
 	rtnl_lock();
+    /**
+     * netdev_master_upper_dev_link - Add a master link to the upper device
+     * @dev: device
+     * @upper_dev: new upper device
+     *
+     * Adds a link to device which is upper to this one. In this case, only
+     * one master upper device can be linked, although other non-master devices
+     * might be linked as well. The caller must hold the RTNL lock.
+     * On a failure a negative errno code is returned. On success the reference
+     * counts are adjusted and the function returns zero.
+     */
+
 	err = netdev_master_upper_dev_link(netdev_vport->dev,
 					   get_dpdev(vport->dp));
 	if (err)
 		goto error_unlock;
 
+    /**
+    *      netdev_rx_handler_register - register receive handler
+    *      @dev: device to register a handler for
+    *      @rx_handler: receive handler to register
+    *      @rx_handler_data: data pointer that is used by rx handler
+    *
+    *      Register a receive handler for a device. This handler will then be
+    *      called from __netif_receive_skb. A negative errno code is returned
+    *      on a failure.
+    *
+    *      The caller must hold the rtnl_mutex.
+    *
+    *      For a general description of rx_handler, see enum rx_handler_result.
+    */
 	err = netdev_rx_handler_register(netdev_vport->dev, netdev_frame_hook,
 					 vport);
 	if (err)
@@ -157,10 +184,12 @@ static void free_port_rcu(struct rcu_head *rcu)
 	struct netdev_vport *netdev_vport = container_of(rcu,
 					struct netdev_vport, rcu);
 
+    //netdev_vport->dev 引用计数减1
 	dev_put(netdev_vport->dev);
 	ovs_vport_free(vport_from_priv(netdev_vport));
 }
 
+//与 netdev_create 正好相反
 void ovs_netdev_detach_dev(struct vport *vport)
 {
 	struct netdev_vport *netdev_vport = netdev_vport_priv(vport);

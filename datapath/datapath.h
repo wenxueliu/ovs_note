@@ -154,6 +154,16 @@ int lockdep_ovsl_is_held(void);
 #define rcu_dereference_ovsl(p)					\
 	rcu_dereference_check(p, lockdep_ovsl_is_held())
 
+/*
+ * static inline struct net *read_pnet(const possible_net_t *pnet)
+ * {
+ * #ifdef CONFIG_NET_NS
+ *         return pnet->net;
+ * #else
+ *         return &init_net;
+ * #endif
+ * }
+*/
 static inline struct net *ovs_dp_get_net(const struct datapath *dp)
 {
 	return read_pnet(&dp->net);

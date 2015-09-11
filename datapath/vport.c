@@ -275,7 +275,9 @@ void ovs_vport_del(struct vport *vport)
 {
 	ASSERT_OVSL();
 
+    //将 vport->hash_node 从其对应的链表中删除;
 	hlist_del_rcu(&vport->hash_node);
+    //递减 vport->ops->owner 的引用计数
 	module_put(vport->ops->owner);
 	vport->ops->destroy(vport);
 }
@@ -399,6 +401,7 @@ int ovs_vport_set_upcall_portids(struct vport *vport, const struct nlattr *ids)
 	if (!nla_len(ids) || nla_len(ids) % sizeof(u32))
 		return -EINVAL;
 
+    //读保护, rcu_dereference_protected
 	old = ovsl_dereference(vport->upcall_portids);
 
 	vport_portids = kmalloc(sizeof *vport_portids + nla_len(ids),
@@ -413,6 +416,7 @@ int ovs_vport_set_upcall_portids(struct vport *vport, const struct nlattr *ids)
 	rcu_assign_pointer(vport->upcall_portids, vport_portids);
 
 	if (old)
+        //等待 old 的所有读者都完成后, 是否 old 指向的内存
 		call_rcu(&old->rcu, vport_portids_destroy_rcu_cb);
 
 	return 0;

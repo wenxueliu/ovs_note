@@ -74,13 +74,17 @@ void ovs_dp_notify_wq(struct work_struct *work)
 	ovs_unlock();
 }
 
+//如果 ptr->dev->netdev_ops != internal_dev_netdev_ops 直接返回
+//如果 event 是 NETDEV_UNREGISTER, 将 ptr->dev->dp_notify_work 加入 system_wq
 static int dp_device_event(struct notifier_block *unused, unsigned long event,
 			   void *ptr)
 {
 	struct ovs_net *ovs_net;
+    //dev = ptr 或　dev = ptr->dev
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct vport *vport = NULL;
 
+	//if dev->netdev_ops == &internal_dev_netdev_ops;
 	if (!ovs_is_internal_dev(dev))
 		vport = ovs_netdev_get_vport(dev);
 

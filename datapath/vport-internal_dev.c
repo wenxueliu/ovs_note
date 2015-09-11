@@ -34,6 +34,7 @@
 #include "vport-internal_dev.h"
 #include "vport-netdev.h"
 
+//net_device 的私有数据
 struct internal_dev {
 	struct vport *vport;
 };
@@ -133,12 +134,18 @@ static void internal_dev_destructor(struct net_device *dev)
 }
 
 static const struct net_device_ops internal_dev_netdev_ops = {
+    //开启
 	.ndo_open = internal_dev_open,
+    //关闭
 	.ndo_stop = internal_dev_stop,
+    //开始接收
 	.ndo_start_xmit = internal_dev_xmit,
+    //设置 MAC
 	.ndo_set_mac_address = eth_mac_addr,
+    //设置 MTU
 	.ndo_change_mtu = internal_dev_change_mtu,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)
+    //获取状态如接收,传输的包数, 错误和丢弃的包数
 	.ndo_get_stats64 = internal_dev_get_stats,
 #else
 	.ndo_get_stats = internal_dev_sys_stats,
@@ -151,12 +158,22 @@ static struct rtnl_link_ops internal_dev_link_ops __read_mostly = {
 
 static void do_setup(struct net_device *netdev)
 {
+    //dev->header_ops         = &eth_header_ops;
+    //dev->type               = ARPHRD_ETHER;
+    //dev->hard_header_len    = ETH_HLEN;
+    //dev->mtu                = ETH_DATA_LEN;
+    //dev->addr_len           = ETH_ALEN;
+    //dev->tx_queue_len       = 1000; /* Ethernet wants good queues */
+    //dev->flags              = IFF_BROADCAST|IFF_MULTICAST;
+    //dev->priv_flags         |= IFF_TX_SKB_SHARING;
+    //eth_broadcast_addr(dev->broadcast);
 	ether_setup(netdev);
 
 	netdev->netdev_ops = &internal_dev_netdev_ops;
 
 	netdev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	netdev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+    // 释放 internal_dev_create 中分配的 dev 及 vport
 	netdev->destructor = internal_dev_destructor;
 	netdev->ethtool_ops = &internal_dev_ethtool_ops;
 	netdev->rtnl_link_ops = &internal_dev_link_ops;
@@ -177,6 +194,7 @@ static void do_setup(struct net_device *netdev)
 	netdev->hw_enc_features = netdev->features;
 #endif
 
+    //netdev->dev_addr 分配随机的MAC地址
 	eth_hw_addr_random(netdev);
 }
 
@@ -187,6 +205,7 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 	struct internal_dev *internal_dev;
 	int err;
 
+    //分配一个 vport 对象, 其中私有数据为 struct netdev_vport
 	vport = ovs_vport_alloc(sizeof(struct netdev_vport),
 				&ovs_internal_vport_ops, parms);
 	if (IS_ERR(vport)) {
@@ -196,6 +215,7 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 
 	netdev_vport = netdev_vport_priv(vport);
 
+    //分配一个 net_device 对象, 其中的私有数据为 struct internal_dev
 	netdev_vport->dev = alloc_netdev(sizeof(struct internal_dev),
 					 parms->name, NET_NAME_UNKNOWN, do_setup);
 	if (!netdev_vport->dev) {
@@ -212,12 +232,17 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 		netdev_vport->dev->features |= NETIF_F_NETNS_LOCAL;
 
 	rtnl_lock();
+    //注册网络设备
 	err = register_netdevice(netdev_vport->dev);
 	if (err)
 		goto error_free_netdev;
 
+    //设置混杂模式
 	dev_set_promiscuity(netdev_vport->dev, 1);
 	rtnl_unlock();
+    //允许上层设备调用netdev_vport 的 hard_start_xmit routine
+    //__QUEUE_STATE_DRV_XOFF is used by drivers to stop the transmit queue.
+    //clear_bit(__QUEUE_STATE_DRV_XOFF, netdev_vport->dev->tx[0]->state)
 	netif_start_queue(netdev_vport->dev);
 
 	return vport;
@@ -273,8 +298,11 @@ static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
 
 	len = skb->len;
 
+    //skb->_refdst = 0
 	skb_dst_drop(skb);
+    //skb->nfct = NULL
 	nf_reset(skb);
+    //skb->sp = NULL;
 	secpath_reset(skb);
 
 	skb->dev = netdev;
@@ -282,6 +310,7 @@ static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
 	skb->protocol = eth_type_trans(skb, netdev);
 	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
 
+    //将 skb 加入当前 CPU 的 backlog
 	netif_rx(skb);
 
 	return len;

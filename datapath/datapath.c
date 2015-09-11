@@ -95,6 +95,21 @@ static void ovs_notify(struct genl_family *family,
 		       const struct genl_multicast_group *grp,
 		       struct sk_buff *skb, struct genl_info *info)
 {
+ /**
+  * nlmsg_notify - send a notification netlink message
+  * @sk: netlink socket to use
+  * @skb: notification message
+  * @portid: destination netlink portid for reports or 0
+  * @group: destination multicast group or 0
+  * @report: 1 to report back, 0 to disable
+  * @flags: allocation flags
+  */
+  // genl_notify(family,skb, net, portid, group, nlh, flags))
+  // ================
+  // struct sock *sk = net->genl_sock;
+  // group = family->mcgrp_offset + group;
+  // nlmsg_notify(sk, skb, portid, group, report, flags);
+
 	genl_notify(family, skb, genl_info_net(info),
 		    info->snd_portid, GROUP_ID(grp), info->nlhdr, GFP_KERNEL);
 }
@@ -547,6 +562,29 @@ out:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 {
 	struct ovs_header *ovs_header = info->userhdr;
@@ -658,6 +696,61 @@ static const struct genl_ops dp_packet_genl_ops[] = {
 	}
 };
 
+ /**
+  * struct genl_family - generic netlink family
+  * @id: protocol family idenfitier
+  * @hdrsize: length of user specific header in bytes
+  * @name: name of family
+  * @version: protocol version
+  * @maxattr: maximum number of attributes supported
+  * @netnsok: set to true if the family can handle network
+  *      namespaces and should be presented in all of them
+  * @parallel_ops: operations can be called in parallel and aren't
+  *      synchronized by the core genetlink code
+  * @pre_doit: called before an operation's doit callback, it may
+  *      do additional, common, filtering and return an error
+  * @post_doit: called after an operation's doit callback, it may
+  *      undo operations done by pre_doit, for example release locks
+  * @mcast_bind: a socket bound to the given multicast group (which
+  *      is given as the offset into the groups array)
+  * @mcast_unbind: a socket was unbound from the given multicast group.
+  *      Note that unbind() will not be called symmetrically if the
+  *      generic netlink family is removed while there are still open
+  *      sockets.
+  * @attrbuf: buffer to store parsed attributes, 当 maxattr != NULL &&
+  * parallel_ops = true 时, kmalloc 分配空间, 否则为 null
+  * @family_list: family list
+  * @mcgrps: multicast groups used by this family (private)
+  * @n_mcgrps: number of multicast groups (private)
+  * @mcgrp_offset: starting number of multicast group IDs in this family
+  * @ops: the operations supported by this family (private)
+  * @n_ops: number of operations supported by this family (private)
+  */
+ //struct genl_family {
+ //        unsigned int            id;
+ //        unsigned int            hdrsize;
+ //        char                    name[GENL_NAMSIZ];
+ //        unsigned int            version;
+ //        unsigned int            maxattr;
+ //        bool                    netnsok;
+ //        bool                    parallel_ops;
+ //        int                     (*pre_doit)(const struct genl_ops *ops,
+ //                                            struct sk_buff *skb,
+ //                                            struct genl_info *info);
+ //        void                    (*post_doit)(const struct genl_ops *ops,
+ //                                             struct sk_buff *skb,
+ //                                             struct genl_info *info);
+ //        int                     (*mcast_bind)(struct net *net, int group);
+ //        void                    (*mcast_unbind)(struct net *net, int group);
+ //        struct nlattr **        attrbuf;        /* private */
+ //        const struct genl_ops * ops;            /* private */
+ //        const struct genl_multicast_group *mcgrps; /* private */
+ //        unsigned int            n_ops;          /* private */
+ //        unsigned int            n_mcgrps;       /* private */
+ //        unsigned int            mcgrp_offset;   /* private */
+ //        struct list_head        family_list;    /* private */
+ //        struct module           *module;
+ //};
 static struct genl_family dp_packet_genl_family = {
 	.id = GENL_ID_GENERATE,
 	.hdrsize = sizeof(struct ovs_header),
@@ -903,6 +996,29 @@ static struct sk_buff *ovs_flow_cmd_build_info(const struct sw_flow *flow,
 	return skb;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1083,6 +1199,29 @@ static struct sw_flow_actions *get_flow_actions(const struct nlattr *a,
 	return acts;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_flow_cmd_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1195,6 +1334,29 @@ error:
 	return error;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_flow_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1253,6 +1415,29 @@ unlock:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_flow_cmd_del(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1409,6 +1594,61 @@ static const struct genl_ops dp_flow_genl_ops[] = {
 	},
 };
 
+ /**
+  * struct genl_family - generic netlink family
+  * @id: protocol family idenfitier
+  * @hdrsize: length of user specific header in bytes
+  * @name: name of family
+  * @version: protocol version
+  * @maxattr: maximum number of attributes supported
+  * @netnsok: set to true if the family can handle network
+  *      namespaces and should be presented in all of them
+  * @parallel_ops: operations can be called in parallel and aren't
+  *      synchronized by the core genetlink code
+  * @pre_doit: called before an operation's doit callback, it may
+  *      do additional, common, filtering and return an error
+  * @post_doit: called after an operation's doit callback, it may
+  *      undo operations done by pre_doit, for example release locks
+  * @mcast_bind: a socket bound to the given multicast group (which
+  *      is given as the offset into the groups array)
+  * @mcast_unbind: a socket was unbound from the given multicast group.
+  *      Note that unbind() will not be called symmetrically if the
+  *      generic netlink family is removed while there are still open
+  *      sockets.
+  * @attrbuf: buffer to store parsed attributes, 当 maxattr != NULL &&
+  * parallel_ops = true 时, kmalloc 分配空间, 否则为 null
+  * @family_list: family list
+  * @mcgrps: multicast groups used by this family (private)
+  * @n_mcgrps: number of multicast groups (private)
+  * @mcgrp_offset: starting number of multicast group IDs in this family
+  * @ops: the operations supported by this family (private)
+  * @n_ops: number of operations supported by this family (private)
+  */
+ //struct genl_family {
+ //        unsigned int            id;
+ //        unsigned int            hdrsize;
+ //        char                    name[GENL_NAMSIZ];
+ //        unsigned int            version;
+ //        unsigned int            maxattr;
+ //        bool                    netnsok;
+ //        bool                    parallel_ops;
+ //        int                     (*pre_doit)(const struct genl_ops *ops,
+ //                                            struct sk_buff *skb,
+ //                                            struct genl_info *info);
+ //        void                    (*post_doit)(const struct genl_ops *ops,
+ //                                             struct sk_buff *skb,
+ //                                             struct genl_info *info);
+ //        int                     (*mcast_bind)(struct net *net, int group);
+ //        void                    (*mcast_unbind)(struct net *net, int group);
+ //        struct nlattr **        attrbuf;        /* private */
+ //        const struct genl_ops * ops;            /* private */
+ //        const struct genl_multicast_group *mcgrps; /* private */
+ //        unsigned int            n_ops;          /* private */
+ //        unsigned int            n_mcgrps;       /* private */
+ //        unsigned int            mcgrp_offset;   /* private */
+ //        struct list_head        family_list;    /* private */
+ //        struct module           *module;
+ //};
 static struct genl_family dp_flow_genl_family = {
 	.id = GENL_ID_GENERATE,
 	.hdrsize = sizeof(struct ovs_header),
@@ -1436,6 +1676,7 @@ static size_t ovs_dp_cmd_msg_size(void)
 }
 
 /* Called with ovs_mutex. */
+//填充上层传递的消息到 skb
 static int ovs_dp_cmd_fill_info(struct datapath *dp, struct sk_buff *skb,
 				u32 portid, u32 seq, u32 flags, u8 cmd)
 {
@@ -1479,6 +1720,17 @@ error:
 
 static struct sk_buff *ovs_dp_cmd_alloc_info(struct genl_info *info)
 {
+    /**
+     * genlmsg_new_unicast - Allocate generic netlink message for unicast
+     * @payload: size of the message payload
+     * @info: information on destination
+     * @flags: the type of memory to allocate
+     *
+     * Allocates a new sk_buff large enough to cover the specified payload
+     * plus required Netlink headers. Will check receiving socket for
+     * memory mapped i/o capability and use it if enabled. Will fall back
+     * to non-mapped skb if message size exceeds the frame size of the ring.
+     */
 	return genlmsg_new_unicast(ovs_dp_cmd_msg_size(), info, GFP_KERNEL);
 }
 
@@ -1518,6 +1770,32 @@ static void ovs_dp_change(struct datapath *dp, struct nlattr *a[])
 		dp->user_features = nla_get_u32(a[OVS_DP_ATTR_USER_FEATURES]);
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
+ //
+
+//为 struct datapath 分配内存, 并用 info 初始化
 static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1577,6 +1855,7 @@ static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	/* So far only local changes have been made, now need the lock. */
 	ovs_lock();
 
+    //BUG:这里为什么要 new vport(), 后面没有用到啊
 	vport = new_vport(&parms);
 	if (IS_ERR(vport)) {
 		err = PTR_ERR(vport);
@@ -1648,6 +1927,29 @@ static void __dp_destroy(struct datapath *dp)
 	call_rcu(&dp->rcu, destroy_dp_rcu);
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_dp_cmd_del(struct sk_buff *skb, struct genl_info *info)
 {
 	struct sk_buff *reply;
@@ -1680,6 +1982,29 @@ err_unlock_free:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_dp_cmd_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct sk_buff *reply;
@@ -1713,6 +2038,29 @@ err_unlock_free:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_dp_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct sk_buff *reply;
@@ -1771,6 +2119,28 @@ static const struct nla_policy datapath_policy[OVS_DP_ATTR_MAX + 1] = {
 	[OVS_DP_ATTR_USER_FEATURES] = { .type = NLA_U32 },
 };
 
+ /**
+  * struct genl_ops - generic netlink operations
+  * @cmd: command identifier
+  * @internal_flags: flags used by the family
+  * @flags: flags
+  * @policy: attribute validation policy
+  * @doit: standard command callback
+  * @dumpit: callback for dumpers
+  * @done: completion callback for dumps
+  * @ops_list: operations list
+  */
+ //struct genl_ops {
+ //        const struct nla_policy *policy;
+ //        int                    (*doit)(struct sk_buff *skb,
+ //                                       struct genl_info *info);
+ //        int                    (*dumpit)(struct sk_buff *skb,
+ //                                         struct netlink_callback *cb);
+ //        int                    (*done)(struct netlink_callback *cb);
+ //        u8                      cmd;
+ //        u8                      internal_flags;
+ //        u8                      flags;
+ //};
 static const struct genl_ops dp_datapath_genl_ops[] = {
 	{ .cmd = OVS_DP_CMD_NEW,
 	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
@@ -1795,6 +2165,61 @@ static const struct genl_ops dp_datapath_genl_ops[] = {
 	},
 };
 
+ /**
+  * struct genl_family - generic netlink family
+  * @id: protocol family idenfitier
+  * @hdrsize: length of user specific header in bytes
+  * @name: name of family
+  * @version: protocol version
+  * @maxattr: maximum number of attributes supported
+  * @netnsok: set to true if the family can handle network
+  *      namespaces and should be presented in all of them
+  * @parallel_ops: operations can be called in parallel and aren't
+  *      synchronized by the core genetlink code
+  * @pre_doit: called before an operation's doit callback, it may
+  *      do additional, common, filtering and return an error
+  * @post_doit: called after an operation's doit callback, it may
+  *      undo operations done by pre_doit, for example release locks
+  * @mcast_bind: a socket bound to the given multicast group (which
+  *      is given as the offset into the groups array)
+  * @mcast_unbind: a socket was unbound from the given multicast group.
+  *      Note that unbind() will not be called symmetrically if the
+  *      generic netlink family is removed while there are still open
+  *      sockets.
+  * @attrbuf: buffer to store parsed attributes, 当 maxattr != NULL &&
+  * parallel_ops = true 时, kmalloc 分配空间, 否则为 null
+  * @family_list: family list
+  * @mcgrps: multicast groups used by this family (private)
+  * @n_mcgrps: number of multicast groups (private)
+  * @mcgrp_offset: starting number of multicast group IDs in this family
+  * @ops: the operations supported by this family (private)
+  * @n_ops: number of operations supported by this family (private)
+  */
+ //struct genl_family {
+ //        unsigned int            id;
+ //        unsigned int            hdrsize;
+ //        char                    name[GENL_NAMSIZ];
+ //        unsigned int            version;
+ //        unsigned int            maxattr;
+ //        bool                    netnsok;
+ //        bool                    parallel_ops;
+ //        int                     (*pre_doit)(const struct genl_ops *ops,
+ //                                            struct sk_buff *skb,
+ //                                            struct genl_info *info);
+ //        void                    (*post_doit)(const struct genl_ops *ops,
+ //                                             struct sk_buff *skb,
+ //                                             struct genl_info *info);
+ //        int                     (*mcast_bind)(struct net *net, int group);
+ //        void                    (*mcast_unbind)(struct net *net, int group);
+ //        struct nlattr **        attrbuf;        /* private */
+ //        const struct genl_ops * ops;            /* private */
+ //        const struct genl_multicast_group *mcgrps; /* private */
+ //        unsigned int            n_ops;          /* private */
+ //        unsigned int            n_mcgrps;       /* private */
+ //        unsigned int            mcgrp_offset;   /* private */
+ //        struct list_head        family_list;    /* private */
+ //        struct module           *module;
+ //};
 static struct genl_family dp_datapath_genl_family = {
 	.id = GENL_ID_GENERATE,
 	.hdrsize = sizeof(struct ovs_header),
@@ -1907,6 +2332,29 @@ static struct vport *lookup_vport(struct net *net,
 		return ERR_PTR(-EINVAL);
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_vport_cmd_new(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1984,6 +2432,29 @@ exit_unlock_free:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_vport_cmd_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -2035,6 +2506,29 @@ exit_unlock_free:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_vport_cmd_del(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -2072,6 +2566,29 @@ exit_unlock_free:
 	return err;
 }
 
+ /**
+  * struct genl_info - receiving information
+  * @snd_seq: sending sequence number
+  * @snd_portid: netlink portid of sender
+  * @nlhdr: netlink message header
+  * @genlhdr: generic netlink message header
+  * @userhdr: user specific header
+  * @attrs: netlink attributes
+  * @_net: network namespace
+  * @user_ptr: user pointers
+  * @dst_sk: destination socket
+  */
+ //struct genl_info {
+ //        u32                     snd_seq;
+ //        u32                     snd_portid;
+ //        struct nlmsghdr *       nlhdr;
+ //        struct genlmsghdr *     genlhdr;
+ //        void *                  userhdr;
+ //        struct nlattr **        attrs;
+ //        possible_net_t          _net;
+ //        void *                  user_ptr[2];
+ //        struct sock *           dst_sk;
+ //};
 static int ovs_vport_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -2174,6 +2691,61 @@ static const struct genl_ops dp_vport_genl_ops[] = {
 	},
 };
 
+ /**
+  * struct genl_family - generic netlink family
+  * @id: protocol family idenfitier
+  * @hdrsize: length of user specific header in bytes
+  * @name: name of family
+  * @version: protocol version
+  * @maxattr: maximum number of attributes supported
+  * @netnsok: set to true if the family can handle network
+  *      namespaces and should be presented in all of them
+  * @parallel_ops: operations can be called in parallel and aren't
+  *      synchronized by the core genetlink code
+  * @pre_doit: called before an operation's doit callback, it may
+  *      do additional, common, filtering and return an error
+  * @post_doit: called after an operation's doit callback, it may
+  *      undo operations done by pre_doit, for example release locks
+  * @mcast_bind: a socket bound to the given multicast group (which
+  *      is given as the offset into the groups array)
+  * @mcast_unbind: a socket was unbound from the given multicast group.
+  *      Note that unbind() will not be called symmetrically if the
+  *      generic netlink family is removed while there are still open
+  *      sockets.
+  * @attrbuf: buffer to store parsed attributes, 当 maxattr != NULL &&
+  * parallel_ops = true 时, kmalloc 分配空间, 否则为 null
+  * @family_list: family list
+  * @mcgrps: multicast groups used by this family (private)
+  * @n_mcgrps: number of multicast groups (private)
+  * @mcgrp_offset: starting number of multicast group IDs in this family
+  * @ops: the operations supported by this family (private)
+  * @n_ops: number of operations supported by this family (private)
+  */
+ //struct genl_family {
+ //        unsigned int            id;
+ //        unsigned int            hdrsize;
+ //        char                    name[GENL_NAMSIZ];
+ //        unsigned int            version;
+ //        unsigned int            maxattr;
+ //        bool                    netnsok;
+ //        bool                    parallel_ops;
+ //        int                     (*pre_doit)(const struct genl_ops *ops,
+ //                                            struct sk_buff *skb,
+ //                                            struct genl_info *info);
+ //        void                    (*post_doit)(const struct genl_ops *ops,
+ //                                             struct sk_buff *skb,
+ //                                             struct genl_info *info);
+ //        int                     (*mcast_bind)(struct net *net, int group);
+ //        void                    (*mcast_unbind)(struct net *net, int group);
+ //        struct nlattr **        attrbuf;        /* private */
+ //        const struct genl_ops * ops;            /* private */
+ //        const struct genl_multicast_group *mcgrps; /* private */
+ //        unsigned int            n_ops;          /* private */
+ //        unsigned int            n_mcgrps;       /* private */
+ //        unsigned int            mcgrp_offset;   /* private */
+ //        struct list_head        family_list;    /* private */
+ //        struct module           *module;
+ //};
 struct genl_family dp_vport_genl_family = {
 	.id = GENL_ID_GENERATE,
 	.hdrsize = sizeof(struct ovs_header),
@@ -2224,6 +2796,7 @@ error:
 
 static int __net_init ovs_init_net(struct net *net)
 {
+    //ovs_net = net->gen->ptr[ovs_net_id - 1]
 	struct ovs_net *ovs_net = net_generic(net, ovs_net_id);
 
 	INIT_LIST_HEAD(&ovs_net->dps);
@@ -2231,6 +2804,12 @@ static int __net_init ovs_init_net(struct net *net)
 	return 0;
 }
 
+/*
+ *
+ * 遍历 vport = net->gen->ptr[ovs_net_id-1]->dps[i]->vport[j]
+ * 如果 vport->ops->type = OVS_VPORT_TYPE_INTERNAL && netdev_vport_priv(vport)->dev->net = dnet
+ * 将 vport->detach_list 加入 head
+ */
 static void __net_exit list_vports_from_net(struct net *net, struct net *dnet,
 					    struct list_head *head)
 {
@@ -2263,6 +2842,7 @@ static void __net_exit ovs_exit_net(struct net *dnet)
 	struct ovs_net *ovs_net = net_generic(dnet, ovs_net_id);
 	struct vport *vport, *vport_next;
 	struct net *net;
+    //head 没有定义???
 	LIST_HEAD(head);
 
 	ovs_lock();
