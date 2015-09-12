@@ -1,3 +1,30 @@
+
+##datapath 需要解决的问题
+
+* 内核模块的构建过程
+* datapath 如何收到包
+* key 的生成
+* 流表的匹配
+* actions 的执行
+* 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么
+* 如何与用户空间的 vswitchd 交互, 支持哪些交换操作
+
+##vswitch 需要解决的问题
+
+* 如何接受 datapath 的消息
+* 如何与 controller 交互, 发送什么, 接受什么
+* 如何向 datapath 发送消息, 包括被动应答, 主动发送
+* 如何与 ovsdb 交互
+* 当 table_miss 后, vswitch 是如何决断的
+* 当 table_miss 后, 是否可以直接将包发送出去还是, 必须通过 datapath 发送, 如果发送, 方式是怎么样的 ?
+
+
+
+
+
+
+
+
 ##预备知识
 
 基本的 makefile 语法见[跟我一起写 Makefile](http://blog.csdn.net/haoel/article/details/2886/)
