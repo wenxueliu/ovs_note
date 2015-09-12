@@ -77,6 +77,7 @@ static struct net_device_stats *internal_dev_sys_stats(struct net_device *netdev
 }
 
 /* Called with rcu_read_lock_bh. */
+//接受数据包
 static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	rcu_read_lock();
@@ -87,12 +88,14 @@ static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
 
 static int internal_dev_open(struct net_device *netdev)
 {
+    //通知上层可以调用 dev_hard_start_xmit 进行数据包发送
 	netif_start_queue(netdev);
 	return 0;
 }
 
 static int internal_dev_stop(struct net_device *netdev)
 {
+    //通知上层不可以调用 dev_hard_start_xmit 进行数据包发送
 	netif_stop_queue(netdev);
 	return 0;
 }
@@ -134,9 +137,9 @@ static void internal_dev_destructor(struct net_device *dev)
 }
 
 static const struct net_device_ops internal_dev_netdev_ops = {
-    //开启
+    //开启发送数据给驱动
 	.ndo_open = internal_dev_open,
-    //关闭
+    //停止发送数据给驱动
 	.ndo_stop = internal_dev_stop,
     //开始接收
 	.ndo_start_xmit = internal_dev_xmit,
@@ -198,6 +201,7 @@ static void do_setup(struct net_device *netdev)
 	eth_hw_addr_random(netdev);
 }
 
+//根据params 分配一个 vport, 并将其私有数据对应的 dev 分配一个 netdev, 并注册
 static struct vport *internal_dev_create(const struct vport_parms *parms)
 {
 	struct vport *vport;
@@ -310,7 +314,21 @@ static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
 	skb->protocol = eth_type_trans(skb, netdev);
 	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
 
-    //将 skb 加入当前 CPU 的 backlog
+    /**
+     *      netif_rx        -       post buffer to the network code
+     *      @skb: buffer to post
+     *
+     *      This function receives a packet from a device driver and queues it for
+     *      the upper (protocol) levels to process.  It always succeeds. The buffer
+     *      may be dropped during processing for congestion control or by the
+     *      protocol layers.
+     *
+     *      return values:
+     *      NET_RX_SUCCESS  (no congestion)
+     *      NET_RX_DROP     (packet was dropped)
+     *
+     */
+    //硬件将数据包从设备内存拷贝到系统内存后, 将包放在中断所属的 CPU 的 softnet_data->input_pkt_queue 队列中
 	netif_rx(skb);
 
 	return len;
