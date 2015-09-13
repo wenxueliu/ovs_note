@@ -293,6 +293,7 @@ int ovs_flow_tbl_init(struct flow_table *table)
 	rcu_assign_pointer(table->ti, ti);
 	rcu_assign_pointer(table->ufid_ti, ufid_ti);
 	rcu_assign_pointer(table->mask_array, ma);
+    //系统最近一次启动以来的时钟滴答数
 	table->last_rehash = jiffies;
 	table->count = 0;
 	table->ufid_count = 0;
@@ -477,6 +478,7 @@ int ovs_flow_tbl_flush(struct flow_table *flow_table)
 
 	rcu_assign_pointer(flow_table->ti, new_ti);
 	rcu_assign_pointer(flow_table->ufid_ti, new_ufid_ti);
+    //系统最近一次启动以来的时钟滴答数
 	flow_table->last_rehash = jiffies;
 	flow_table->count = 0;
 	flow_table->ufid_count = 0;
@@ -939,6 +941,7 @@ static void flow_key_insert(struct flow_table *table, struct sw_flow *flow)
 	if (new_ti) {
 		rcu_assign_pointer(table->ti, new_ti);
 		call_rcu(&ti->rcu, flow_tbl_destroy_rcu_cb);
+        //系统最近一次启动以来的时钟滴答数
 		table->last_rehash = jiffies;
 	}
 }

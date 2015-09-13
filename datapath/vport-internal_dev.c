@@ -201,7 +201,7 @@ static void do_setup(struct net_device *netdev)
 	eth_hw_addr_random(netdev);
 }
 
-//根据params 分配一个 vport, 并将其私有数据对应的 dev 分配一个 netdev, 并注册
+//根据params 分配一个 vport, 并将其私有数据对应的 dev 注册为一个网络设备(类似网卡)
 static struct vport *internal_dev_create(const struct vport_parms *parms)
 {
 	struct vport *vport;
