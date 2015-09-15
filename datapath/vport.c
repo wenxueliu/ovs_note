@@ -72,12 +72,14 @@ void ovs_vport_exit(void)
 	kfree(dev_table);
 }
 
+//net = vport->dp->net, name = vport->ops->get_name(vport)
 static struct hlist_head *hash_bucket(const struct net *net, const char *name)
 {
 	unsigned int hash = jhash(name, strlen(name), (unsigned long) net);
 	return &dev_table[hash & (VPORT_HASH_BUCKETS - 1)];
 }
 
+//注册新的 vport->ops->type
 int ovs_vport_ops_register(struct vport_ops *ops)
 {
 	int err = -EEXIST;
@@ -111,6 +113,11 @@ EXPORT_SYMBOL_GPL(ovs_vport_ops_unregister);
  * @name: name of port to find
  *
  * Must be called with ovs or RCU read lock.
+ *
+ * 以 name 和 net 的哈希值 hash 为索引, 在 dev_table[hash] 中找对应的 vport
+ *
+ * bucket = dev_table[jhash(name, strlen(name), (unsigned long) net) & (VPORT_HASH_BUCKETS - 1)]
+ * 找到 name = vport->ops->get_name(vport) 并且 vport->dp->net = net 的 vport
  */
 struct vport *ovs_vport_locate(const struct net *net, const char *name)
 {
@@ -135,6 +142,8 @@ struct vport *ovs_vport_locate(const struct net *net, const char *name)
  * a private data area of size @priv_size that can be accessed using
  * vport_priv().  vports that are no longer needed should be released with
  * ovs_vport_free().
+ *
+ * 没有初始化的 hash_node, err_stats, detach_list
  */
 struct vport *ovs_vport_alloc(int priv_size, const struct vport_ops *ops,
 			      const struct vport_parms *parms)
@@ -172,6 +181,7 @@ struct vport *ovs_vport_alloc(int priv_size, const struct vport_ops *ops,
 }
 EXPORT_SYMBOL_GPL(ovs_vport_alloc);
 
+//确保 params->type 在 vport_ops_list(保持所有 vport->ops->type) 中
 static struct vport_ops *ovs_vport_lookup(const struct vport_parms *parms)
 {
 	struct vport_ops *ops;
@@ -208,21 +218,35 @@ EXPORT_SYMBOL_GPL(ovs_vport_free);
  *
  * Creates a new vport with the specified configuration (which is dependent on
  * device type).  ovs_mutex must be held.
+ *
+ * 创建并初始化 vport:
+ * 1. 参数校验
+ *    * 确保 params->type 在 vport_ops_list(保持所有 vport->ops->type) 中, 返回类型为 params->type 的 ops
+ *    * 确保 params->type->ops->owner 的模块是 alive 的
+ * 2. 调用 internal_dev_create(params) 创建 vport, 初始化各个数据成员及私有数据
+ * 3. 将 vport->hash_node 加入 dev_table
+ *
+ * 注: 没有初始化的 err_stats, detach_list
  */
 struct vport *ovs_vport_add(const struct vport_parms *parms)
 {
 	struct vport_ops *ops;
 	struct vport *vport;
 
+    //确保 params->type 在 vport_ops_list(保持所有 vport->ops->type) 中, 返回
+    //类型为 params->type 的 ops
 	ops = ovs_vport_lookup(parms);
 	if (ops) {
 		struct hlist_head *bucket;
 
+        //ops->owner 的模块是 alive 的
 		if (!try_module_get(ops->owner))
 			return ERR_PTR(-EAFNOSUPPORT);
 
+        //调用 internal_dev_create 创建 vport, 初始化各个数据成员及私有数据
 		vport = ops->create(parms);
 		if (IS_ERR(vport)) {
+            // ops->owener->refcnt = ops->owener->refcnt - 1
 			module_put(ops->owner);
 			return vport;
 		}
@@ -443,6 +467,7 @@ int ovs_vport_get_upcall_portids(const struct vport *vport,
 
 	ids = rcu_dereference_ovsl(vport->upcall_portids);
 
+    //#define OVS_DP_F_UNALIGNED	(1 << 0)
 	if (vport->dp->user_features & OVS_DP_F_VPORT_PIDS)
 		return nla_put(skb, OVS_VPORT_ATTR_UPCALL_PID,
 			       ids->n_ids * sizeof(u32), (void *) ids->ids);

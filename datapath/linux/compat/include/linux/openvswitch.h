@@ -110,6 +110,7 @@ enum ovs_datapath_attr {
 #define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
 
 /* All 64-bit integers within Netlink messages are 4-byte aligned only. */
+//统计某个 datapath 的所有 CPU 的 n_hit, n_missed, n_lost, n_flows
 struct ovs_dp_stats {
 	__u64 n_hit;             /* Number of flow table matches. */
 	__u64 n_missed;          /* Number of flow table misses. */
@@ -117,6 +118,7 @@ struct ovs_dp_stats {
 	__u64 n_flows;           /* Number of flows present */
 };
 
+//统计的时候用
 struct ovs_dp_megaflow_stats {
 	__u64 n_mask_hit;	 /* Number of masks used for flow lookups. */
 	__u32 n_masks;		 /* Number of masks for the datapath. */
@@ -125,6 +127,7 @@ struct ovs_dp_megaflow_stats {
 	__u64 pad2;		 /* Pad for future expension. */
 };
 
+//统计的时候用,　包含所有 CPU
 struct ovs_vport_stats {
 	__u64   rx_packets;		/* total packets received       */
 	__u64   tx_packets;		/* total packets transmitted    */
@@ -143,6 +146,8 @@ struct ovs_vport_stats {
 #define OVS_DP_F_VPORT_PIDS	(1 << 1)
 
 /* Fixed logical ports. */
+//每个datapath 都有一个同名的对应的 internal port,
+//可以通过 ovs-vsctl show 来确认
 #define OVSP_LOCAL      ((__u32)0)
 
 /* Packet transfer. */
@@ -616,6 +621,7 @@ enum ovs_hash_alg {
  * @hash_basis: basis used for computing hash.
  */
 struct ovs_action_hash {
+	//hash_alg 必须为 OVS_HASH_ALG_L4:
 	uint32_t  hash_alg;     /* One of ovs_hash_alg. */
 	uint32_t  hash_basis;
 };

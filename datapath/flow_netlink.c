@@ -83,6 +83,7 @@ static void update_range(struct sw_flow_match *match,
 		range->end = end;
 }
 
+//如果 is_mask = true, 更新 mask, 否则更新 key
 #define SW_FLOW_KEY_PUT(match, field, value, is_mask) \
 	do { \
 		update_range(match, offsetof(struct sw_flow_key, field),    \
@@ -118,10 +119,13 @@ static void update_range(struct sw_flow_match *match,
 			       sizeof((match)->key->field));                \
 	} while (0)
 
+//对 key 和 mask 的 ovs_key_attr 进行校验
 static bool match_validate(const struct sw_flow_match *match,
 			   u64 key_attrs, u64 mask_attrs, bool log)
 {
+    //期望的 key 的 ovs_key_attr
 	u64 key_expected = 1ULL << OVS_KEY_ATTR_ETHERNET;
+    //期望的 mask 的 ovs_key_attr, 其 bit 位 1 表示允许 的 ovs_key_attr
 	u64 mask_allowed = key_attrs;  /* At most allow all key attributes */
 
 	/* The following mask attributes allowed only if they
@@ -355,15 +359,27 @@ static bool is_all_zero(const u8 *fp, size_t size)
 	return true;
 }
 
+/*
+ * 解析 attr 写入 a, ovs_key_attr 保持在 attrsp
+ *
+ * @attr   : 待解析的内嵌属性
+ * @a      : 保持解析 attr 后的 type:value
+ * @attrsp : 保持所有已经解析的 ovs_key_attr
+ * @log    : 是否记日志
+ * @nz     : 应该为 false, 否则不解析
+ */
 static int __parse_flow_nlattrs(const struct nlattr *attr,
 				const struct nlattr *a[],
 				u64 *attrsp, bool log, bool nz)
 {
 	const struct nlattr *nla;
+    //判断重复属性
 	u64 attrs;
 	int rem;
 
+    //attrs = 0
 	attrs = *attrsp;
+    //迭代 attr 的每个属性, 将其加入 a
 	nla_for_each_nested(nla, attr, rem) {
 		u16 type = nla_type(nla);
 		int expected_len;
@@ -379,6 +395,32 @@ static int __parse_flow_nlattrs(const struct nlattr *attr,
 			return -EINVAL;
 		}
 
+        /*
+        static const struct ovs_len_tbl ovs_key_lens[OVS_KEY_ATTR_MAX + 1] = {
+            [OVS_KEY_ATTR_ENCAP]	 = { .len = OVS_ATTR_NESTED },
+            [OVS_KEY_ATTR_PRIORITY]	 = { .len = sizeof(u32) },
+            [OVS_KEY_ATTR_IN_PORT]	 = { .len = sizeof(u32) },
+            [OVS_KEY_ATTR_SKB_MARK]	 = { .len = sizeof(u32) },
+            [OVS_KEY_ATTR_ETHERNET]	 = { .len = sizeof(struct ovs_key_ethernet) },
+            [OVS_KEY_ATTR_VLAN]	 = { .len = sizeof(__be16) },
+            [OVS_KEY_ATTR_ETHERTYPE] = { .len = sizeof(__be16) },
+            [OVS_KEY_ATTR_IPV4]	 = { .len = sizeof(struct ovs_key_ipv4) },
+            [OVS_KEY_ATTR_IPV6]	 = { .len = sizeof(struct ovs_key_ipv6) },
+            [OVS_KEY_ATTR_TCP]	 = { .len = sizeof(struct ovs_key_tcp) },
+            [OVS_KEY_ATTR_TCP_FLAGS] = { .len = sizeof(__be16) },
+            [OVS_KEY_ATTR_UDP]	 = { .len = sizeof(struct ovs_key_udp) },
+            [OVS_KEY_ATTR_SCTP]	 = { .len = sizeof(struct ovs_key_sctp) },
+            [OVS_KEY_ATTR_ICMP]	 = { .len = sizeof(struct ovs_key_icmp) },
+            [OVS_KEY_ATTR_ICMPV6]	 = { .len = sizeof(struct ovs_key_icmpv6) },
+            [OVS_KEY_ATTR_ARP]	 = { .len = sizeof(struct ovs_key_arp) },
+            [OVS_KEY_ATTR_ND]	 = { .len = sizeof(struct ovs_key_nd) },
+            [OVS_KEY_ATTR_RECIRC_ID] = { .len = sizeof(u32) },
+            [OVS_KEY_ATTR_DP_HASH]	 = { .len = sizeof(u32) },
+            [OVS_KEY_ATTR_TUNNEL]	 = { .len = OVS_ATTR_NESTED,
+                            .next = ovs_tunnel_key_lens, },
+            [OVS_KEY_ATTR_MPLS]	 = { .len = sizeof(struct ovs_key_mpls) },
+        };
+        */
 		expected_len = ovs_key_lens[type].len;
 		if (nla_len(nla) != expected_len && expected_len != OVS_ATTR_NESTED) {
 			OVS_NLERR(log, "Key %d has unexpected len %d expected %d",
@@ -387,6 +429,7 @@ static int __parse_flow_nlattrs(const struct nlattr *attr,
 		}
 
 		if (!nz || !is_all_zero(nla_data(nla), expected_len)) {
+            //标记属性已经解析
 			attrs |= 1ULL << type;
 			a[type] = nla;
 		}
@@ -400,6 +443,7 @@ static int __parse_flow_nlattrs(const struct nlattr *attr,
 	return 0;
 }
 
+//解析 attr 写入 a, ovs_key_attr 保持在 attrsp
 static int parse_flow_mask_nlattrs(const struct nlattr *attr,
 				   const struct nlattr *a[], u64 *attrsp,
 				   bool log)
@@ -407,6 +451,14 @@ static int parse_flow_mask_nlattrs(const struct nlattr *attr,
 	return __parse_flow_nlattrs(attr, a, attrsp, log, true);
 }
 
+/*
+ * 解析 attr 保持在 a 中
+ *
+ * @attr   : 待解析的内嵌属性
+ * @a      : 保持解析 attr 后的 type:value
+ * @attrsp : 保持所有已经解析的 type
+ * @log    : 是否记日志
+ */
 static int parse_flow_nlattrs(const struct nlattr *attr,
 			      const struct nlattr *a[], u64 *attrsp,
 			      bool log)
@@ -500,6 +552,19 @@ static int vxlan_tun_opt_from_nlattr(const struct nlattr *a,
 	return 0;
 }
 
+/*
+ * 解析 attr 赋值给 match
+ * match->key->tun_key.tun_id = a[OVS_TUNNEL_KEY_ATTR_ID]
+ * match->key->tun_key.ipv4_src = a[OVS_TUNNEL_KEY_ATTR_IPV4_SRC]
+ * match->key->tun_key.ipv4_dst = a[OVS_TUNNEL_KEY_ATTR_IPV4_DST]
+ * match->key->tun_key.ipv4_tos = a[OVS_TUNNEL_KEY_ATTR_IPV4_TOS]
+ * match->key->tun_key.ipv4_ttl = a[OVS_TUNNEL_KEY_ATTR_IPV4_TTL]
+ * match->key->tun_key.tp_src   = a[OVS_TUNNEL_KEY_ATTR_TP_SRC]
+ * match->key->tun_key.tp_dst   = a[OVS_TUNNEL_KEY_ATTR_TP_DST]
+ * match->key->tun_key.tun_flags = TUNNEL_KEY | TUNNEL_DONT_FRAGMENT | TUNNEL_CSUM
+ *                              | TUNNEL_OAM | TUNNEL_GENEVE_OPT | TUNNEL_VXLAN_OPT
+ * TODO: genev, vxlan
+ */
 static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 				struct sw_flow_match *match, bool is_mask,
 				bool log)
@@ -507,9 +572,12 @@ static int ipv4_tun_from_nlattr(const struct nlattr *attr,
 	struct nlattr *a;
 	int rem;
 	bool ttl = false;
+    //TUNNEL_KEY | TUNNEL_DONT_FRAGMENT | TUNNEL_CSUM | TUNNEL_OAM | TUNNEL_GENEVE_OPT | TUNNEL_VXLAN_OPT
 	__be16 tun_flags = 0;
+    //只能是 OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS,OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS:
 	int opts_type = 0;
 
+    //遍历 attr 初始化 match 的 tun_key.tun_id.
 	nla_for_each_nested(a, attr, rem) {
 		int type = nla_type(a);
 		int err;
@@ -713,10 +781,37 @@ int ovs_nla_put_egress_tunnel_key(struct sk_buff *skb,
 				    egress_tun_info->options_len);
 }
 
+/*
+ * @attrs   : 保存的是 a 中已经包含的　type
+ * @a       : 保持 type:value 的数组
+ * @is_mask : 如果为 true, 赋值给 match->mask.key.field,　否则赋值给 match->key->field
+ * @log     :
+ * 运行完之后, attrs 中为 1 的位表面是没有提取的type, 为 0 的位表面
+ * 已经提取了 type
+ *
+ *
+ *  match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+ *  match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+ *  match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+ *  match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+ *  match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+ *  match->key->tun_key = ipv4_tun_from_nlattr()
+ *
+ *  match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+ *  match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
+ *  match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+ *  match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+ *  match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+ *
+ *  match->mask->tun_key = ipv4_tun_from_nlattr(a[OVS_KEY_ATTR_TUNNEL], match, is_mask, log)
+ *
+ */
 static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 				 const struct nlattr **a, bool is_mask,
 				 bool log)
 {
+    //match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    //match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_DP_HASH)) {
 		u32 hash_val = nla_get_u32(a[OVS_KEY_ATTR_DP_HASH]);
 
@@ -724,6 +819,8 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_DP_HASH);
 	}
 
+    //match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    //match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_RECIRC_ID)) {
 		u32 recirc_id = nla_get_u32(a[OVS_KEY_ATTR_RECIRC_ID]);
 
@@ -731,12 +828,16 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_RECIRC_ID);
 	}
 
+    //match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    //match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_PRIORITY)) {
 		SW_FLOW_KEY_PUT(match, phy.priority,
 			  nla_get_u32(a[OVS_KEY_ATTR_PRIORITY]), is_mask);
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_PRIORITY);
 	}
 
+    //match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    //match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_IN_PORT)) {
 		u32 in_port = nla_get_u32(a[OVS_KEY_ATTR_IN_PORT]);
 
@@ -754,12 +855,15 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		SW_FLOW_KEY_PUT(match, phy.in_port, DP_MAX_PORTS, is_mask);
 	}
 
+    //match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    //match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_SKB_MARK)) {
 		uint32_t mark = nla_get_u32(a[OVS_KEY_ATTR_SKB_MARK]);
 
 		SW_FLOW_KEY_PUT(match, phy.skb_mark, mark, is_mask);
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_SKB_MARK);
 	}
+    //a[OVS_KEY_ATTR_TUNNEL] 是内嵌的 nlattr
 	if (*attrs & (1ULL << OVS_KEY_ATTR_TUNNEL)) {
 		if (ipv4_tun_from_nlattr(a[OVS_KEY_ATTR_TUNNEL], match,
 					 is_mask, log) < 0)
@@ -769,12 +873,108 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 	return 0;
 }
 
+/*
+ * @match : 待赋值的 match
+ * @attrs : 已经被解析的 type
+ * @a     : 保持已经解析的 type 对应的 value
+ * @is_mask : 赋值给 match->key 还是 match->mask->key
+ * @log  : 是否记录日志
+ *
+ * 将 attrs 中对应的 type 从 a 中取出来赋值给 match
+ *
+ *  match->key->eth.src = a[OVS_KEY_ATTR_ETHERNET]->eth_src
+ *  match->key->eth.dst = a[OVS_KEY_ATTR_ETHERNET]->eth_dst
+ *  match->key->eth.tci = a[OVS_KEY_ATTR_VLAN]
+ *  match->key->eth.type = htons(ETH_P_802_2)
+ *
+ *  //IPV4
+ *  match->key->ip.proto = a[OVS_KEY_ATTR_IPV4]->ipv4_proto
+ *  match->key->ip.tos = a[OVS_KEY_ATTR_IPV4]->ipv4_tos
+ *  match->key->ip.ttl = a[OVS_KEY_ATTR_IPV4]->ipv4_ttl
+ *  match->key->ip.frag = a[OVS_KEY_ATTR_IPV4]->ipv4_frag
+ *  match->key->ip.addr.src = a[OVS_KEY_ATTR_IPV4]->ipv4_src
+ *  match->key->ip.addr.dst = a[OVS_KEY_ATTR_IPV4]->ipv4_dst
+ *
+ *  //IPV6
+ *  match->key->ipv6_key->ipv6_label = a[OVS_KEY_ATTR_IPV6]->ipv6_label
+ *  match->key->ipv6_key->ip.proto = a[OVS_KEY_ATTR_IPV6]->ipv6_proto
+ *  match->key->ip.tos   = a[OVS_KEY_ATTR_IPV6]->ipv6_tclass
+ *  match->key->ip.ttl   = a[OVS_KEY_ATTR_IPV6]->ipv6_hlimit
+ *  match->key->ip.frag  = a[OVS_KEY_ATTR_IPV6]->ipv6_frag
+ *  match->key->ipv6_key->ipv6.addr.src = a[OVS_KEY_ATTR_IPV6]->ipv6_src
+ *  match->key->ipv6_key->ipv6.addr.dst = a[OVS_KEY_ATTR_IPV6]->ipv6_dst
+ *
+ *  //ARP
+ *  match->key->ipv4.addr.src = a[OVS_KEY_ATTR_ARP]->arp_sip
+ *  match->key->ipv4.addr.dst = a[OVS_KEY_ATTR_ARP]->arp_tip
+ *  match->key->ip.proto = a[OVS_KEY_ATTR_ARP]->arp_op
+ *  match->key->ipv4.arp.sha = a[OVS_KEY_ATTR_ARP]->arp_sha
+ *  match->key->ipv4.arp.tha = a[OVS_KEY_ATTR_ARP]->arp_tha
+ *
+ *  //TCP
+ *  match->key->mpls.top_lse = a[OVS_KEY_ATTR_MPLS]->mpls_lse
+ *  match->key->tp.src = a[OVS_KEY_ATTR_TCP]->tcp_src
+ *  match->key->tp.dst = a[OVS_KEY_ATTR_TCP]->tcp_dst
+ *  match->key->tp.flags = a[OVS_KEY_ATTR_TCP_FLAGS]
+ *
+ *  //UDP
+ *  match->key->tp.src = a[OVS_KEY_ATTR_UDP]->udp_src
+ *  match->key->tp.dst = a[OVS_KEY_ATTR_UDP]->udp_dst
+ *
+ *  //UDP
+ *  match->key->tp.src = a[OVS_KEY_ATTR_SCTP]->sctp_src
+ *  match->key->tp.dst = a[OVS_KEY_ATTR_SCTP]->sctp_dst
+ *
+ *  //ICMP
+ *  match->key->tp.src = a[OVS_KEY_ATTR_ICMP]->icmp_src
+ *  match->key->tp.dst = a[OVS_KEY_ATTR_ICMP]->icmp_dst
+ *
+ *  //ICMPV6
+ *  match->key->tp.src = a[OVS_KEY_ATTR_ICMPV6]->icmpv6_type
+ *  match->key->tp.dst = a[OVS_KEY_ATTR_ICMPV6]->icmpv6_code
+ *
+ *  //
+ *  match->key->ipv6.nd.target = a[OVS_KEY_ATTR_ND]->nd_target
+ *  match->key->ipv6.nd.ssl = a[OVS_KEY_ATTR_ND]->nd_sll
+ *  match->key->ipv6.nd.tll = a[OVS_KEY_ATTR_ND]->nd_tll
+ *
+ *  match->mask->key.eth.src = a[OVS_KEY_ATTR_ETHERNET]->eth_src
+ *  match->mask->key.eth.dst = a[OVS_KEY_ATTR_ETHERNET]->eth_dst
+ *  match->mask->key.eth.tci = a[OVS_KEY_ATTR_VLAN]
+ *  match->mask->key.eth.type = htons(0xffff)
+ *  match->mask->key.ip.proto = a[OVS_KEY_ATTR_IPV4]->ipv4_proto
+ *  match->mask->key.ip.tos = a[OVS_KEY_ATTR_IPV4]->ipv4_tos
+ *  match->mask->key.ip.ttl = a[OVS_KEY_ATTR_IPV4]->ipv4_ttl
+ *  match->mask->key.ip.frag = a[OVS_KEY_ATTR_IPV4]->ipv4_frag
+ *  match->mask->key.ip.addr.src = a[OVS_KEY_ATTR_IPV4]->ipv4_src
+ *  match->mask->key.ip.addr.dst = a[OVS_KEY_ATTR_IPV4]->ipv4_dst
+ *  
+ *
+ *
+ *
+ *  match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+ *  match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+ *  match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+ *  match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+ *  match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+ *  match->key->tun_key = ipv4_tun_from_nlattr()
+ *
+ *  match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+ *  match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
+ *  match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+ *  match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+ *  match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+ *
+ *  match->mask->tun_key = ipv4_tun_from_nlattr(a[OVS_KEY_ATTR_TUNNEL], match, is_mask, log)
+ */
 static int ovs_key_from_nlattrs(struct sw_flow_match *match, u64 attrs,
 				const struct nlattr **a, bool is_mask,
 				bool log)
 {
 	int err;
 
+    //is_mask = true 解析 attrs 中的属性, 初始化 match->mask->key
+    //is_mask = false 解析 attrs 中的属性, 初始化 match->key
 	err = metadata_from_nlattrs(match, &attrs, a, is_mask, log);
 	if (err)
 		return err;
@@ -1038,6 +1238,13 @@ static void mask_set_nlattr(struct nlattr *attr, u8 val)
  * probing for feature compatibility this should be passed in as false to
  * suppress unnecessary error logging.
  */
+ /*
+  * 1. 解析 a[OVS_FLOW_ATTR_KEY] 保存在中间变量 tmp_key 中, 变量 key_attrs 标记已经解析的 ovs_key_attr
+  * 2. 将 key_attrs 中对应的 ovs_key_attr 从 tmp_key 中取出来赋值给 match->key
+  * 3. 解析 a[OVS_FLOW_ATTR_MASK] 保存在中间变量 tmp_mask 中, 变量 mask_attrs 标记已经解析的 ovs_key_attr
+  * 4. 将 mask_attrs 中对应的 ovs_key_attr 从 tmp_mask 中取出来赋值给 match->mask->key
+  * 5. 对 match 进行有效性检查
+  */
 int ovs_nla_get_match(struct sw_flow_match *match,
 		      const struct nlattr *nla_key,
 		      const struct nlattr *nla_mask,
@@ -1051,15 +1258,20 @@ int ovs_nla_get_match(struct sw_flow_match *match,
 	bool encap_valid = false;
 	int err;
 
+    /*
+    * 解析 nal_key 保持在 a 中, key_attrs 保持已经解析的 type
+    */
 	err = parse_flow_nlattrs(nla_key, a, &key_attrs, log);
 	if (err)
 		return err;
 
+    //如果解析后的 a 中 eth_src, eth_dst, eth_type = 8021.Q, 即包含 vlan
 	if ((key_attrs & (1ULL << OVS_KEY_ATTR_ETHERNET)) &&
 	    (key_attrs & (1ULL << OVS_KEY_ATTR_ETHERTYPE)) &&
 	    (nla_get_be16(a[OVS_KEY_ATTR_ETHERTYPE]) == htons(ETH_P_8021Q))) {
 		__be16 tci;
 
+        //VLAN 和 ENCAP 必须包含
 		if (!((key_attrs & (1ULL << OVS_KEY_ATTR_VLAN)) &&
 		      (key_attrs & (1ULL << OVS_KEY_ATTR_ENCAP)))) {
 			OVS_NLERR(log, "Invalid Vlan frame.");
@@ -1072,22 +1284,27 @@ int ovs_nla_get_match(struct sw_flow_match *match,
 		key_attrs &= ~(1ULL << OVS_KEY_ATTR_ENCAP);
 		encap_valid = true;
 
+        // tci = 0x0010
 		if (tci & htons(VLAN_TAG_PRESENT)) {
+            // 解析 encp 到 a
 			err = parse_flow_nlattrs(encap, a, &key_attrs, log);
 			if (err)
 				return err;
 		} else if (!tci) {
+            //tci = xx0x, x 至少一个为非 0
 			/* Corner case for truncated 802.1Q header. */
 			if (nla_len(encap)) {
 				OVS_NLERR(log, "Truncated 802.1Q header has non-zero encap attribute.");
 				return -EINVAL;
 			}
 		} else {
+            //tci = 0000;
 			OVS_NLERR(log, "Encap attr is set for non-VLAN frame");
 			return  -EINVAL;
 		}
 	}
 
+    //将 key_attrs 中对应的 ovs_key_attr 从 a 中取出来赋值给 match->key
 	err = ovs_key_from_nlattrs(match, key_attrs, a, false, log);
 	if (err)
 		return err;
@@ -1122,11 +1339,13 @@ int ovs_nla_get_match(struct sw_flow_match *match,
 			nla_mask = newmask;
 		}
 
+        //解析 nla_mask 写入 a, ovs_key_attr 保持在 mask_attrs
 		err = parse_flow_mask_nlattrs(nla_mask, a, &mask_attrs, log);
 		if (err)
 			goto free_newmask;
 
 		/* Always match on tci. */
+        //match->mask->key.eth.tci = 0xffff;
 		SW_FLOW_KEY_PUT(match, eth.tci, htons(0xffff), true);
 
 		if (mask_attrs & 1ULL << OVS_KEY_ATTR_ENCAP) {
@@ -1168,11 +1387,13 @@ int ovs_nla_get_match(struct sw_flow_match *match,
 			}
 		}
 
+        //将 mask_attrs 中对应的 ovs_key_attr  从 a 中取出来赋值给 match
 		err = ovs_key_from_nlattrs(match, mask_attrs, a, true, log);
 		if (err)
 			goto free_newmask;
 	}
 
+    //对 match 进行有效性检查
 	if (!match_validate(match, key_attrs, mask_attrs, log))
 		err = -EINVAL;
 
@@ -1201,6 +1422,10 @@ static size_t get_ufid_len(const struct nlattr *attr, bool log)
 /* Initializes 'flow->ufid', returning true if 'attr' contains a valid UFID,
  * or false otherwise.
  */
+/*
+ * sfid->ufid_len = nla_len(ufid)
+ * sfid->ufid = nla_data(ufid)
+ */
 bool ovs_nla_get_ufid(struct sw_flow_id *sfid, const struct nlattr *attr,
 		      bool log)
 {
@@ -1211,11 +1436,20 @@ bool ovs_nla_get_ufid(struct sw_flow_id *sfid, const struct nlattr *attr,
 	return sfid->ufid_len;
 }
 
+//计算 flow key 的 id 即 sfid
+//如果 a[OVS_FLOW_ATTR_UFID] = NULL, new_flow->unmasked_key = key
+//否则
+//      new_flow->id->ufid_len = nla_len(a[OVS_FLOW_ATTR_UFID])
+//      new_flow->id->ufid = nla_data([OVS_FLOW_ATTR_UFID])
 int ovs_nla_get_identifier(struct sw_flow_id *sfid, const struct nlattr *ufid,
 			   const struct sw_flow_key *key, bool log)
 {
 	struct sw_flow_key *new_key;
 
+    /*
+     * sfid->ufid_len = nla_len(ufid)
+     * sfid->ufid = nla_data(ufid)
+     */
 	if (ovs_nla_get_ufid(sfid, ufid, log))
 		return 0;
 
@@ -1531,6 +1765,7 @@ int ovs_nla_put_mask(const struct sw_flow *flow, struct sk_buff *skb)
 
 #define MAX_ACTIONS_BUFSIZE	(32 * 1024)
 
+//分配 sw_flow_actions 空间
 static struct sw_flow_actions *nla_alloc_flow_actions(int size, bool log)
 {
 	struct sw_flow_actions *sfa;
@@ -1564,6 +1799,14 @@ void ovs_nla_free_flow_actions(struct sw_flow_actions *sf_acts)
 	call_rcu(&sf_acts->rcu, rcu_free_acts_callback);
 }
 
+/*
+ * 为 sfa 扩展 attr_len 长度的空间, 返回扩展空间的首地址
+ *
+ * 在 sfs 现有长度基础上增加 attr_len 长度:
+ * 如果空间不够, 就将原来空间扩大 2 倍, 如果扩大 2 被超出了 action 的阈值, 检查 action 的阈值长度
+ * 是否能满足要求
+ * 如果空间足够返回 sfs 扩展首地址
+ */
 static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa,
 				       int attr_len, bool log)
 {
@@ -1579,6 +1822,7 @@ static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa,
 
 	new_acts_size = ksize(*sfa) * 2;
 
+    //新增加的长度大于 action 的阈值
 	if (new_acts_size > MAX_ACTIONS_BUFSIZE) {
 		if ((MAX_ACTIONS_BUFSIZE - next_offset) < req_size)
 			return ERR_PTR(-EMSGSIZE);
@@ -1657,6 +1901,7 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 				  int depth, struct sw_flow_actions **sfa,
 				  __be16 eth_type, __be16 vlan_tci, bool log);
 
+//TODO
 static int validate_and_copy_sample(const struct nlattr *attr,
 				    const struct sw_flow_key *key, int depth,
 				    struct sw_flow_actions **sfa,
@@ -1823,6 +2068,7 @@ static bool validate_masked(u8 *data, int len)
 	return true;
 }
 
+//
 static int validate_set(const struct nlattr *a,
 			const struct sw_flow_key *flow_key,
 			struct sw_flow_actions **sfa,
@@ -1984,6 +2230,7 @@ static int validate_set(const struct nlattr *a,
 	return 0;
 }
 
+//遍历 attr 所有元素, 加入 a, a[OVS_USERSPACE_ATTR_PID] 不能为 NULL 或 0
 static int validate_userspace(const struct nlattr *attr)
 {
 	static const struct nla_policy userspace_policy[OVS_USERSPACE_ATTR_MAX + 1] = {
@@ -1994,6 +2241,7 @@ static int validate_userspace(const struct nlattr *attr)
 	struct nlattr *a[OVS_USERSPACE_ATTR_MAX + 1];
 	int error;
 
+    //遍历 attr 所有元素, 加入 a
 	error = nla_parse_nested(a, OVS_USERSPACE_ATTR_MAX,
 				 attr, userspace_policy);
 	if (error)
@@ -2006,12 +2254,14 @@ static int validate_userspace(const struct nlattr *attr)
 	return 0;
 }
 
+//将 from 附加到 sfa 的尾部
 static int copy_action(const struct nlattr *from,
 		       struct sw_flow_actions **sfa, bool log)
 {
 	int totlen = NLA_ALIGN(from->nla_len);
 	struct nlattr *to;
 
+    //为 sfa 扩展 attr_len 长度的空间, 返回扩展空间的首地址
 	to = reserve_sfa_size(sfa, from->nla_len, log);
 	if (IS_ERR(to))
 		return PTR_ERR(to);
@@ -2020,6 +2270,7 @@ static int copy_action(const struct nlattr *from,
 	return 0;
 }
 
+//遍历 attr 每个元素, 验证每个元素的有效性, 并初始化 eth_type, vlan_tci
 static int __ovs_nla_copy_actions(const struct nlattr *attr,
 				  const struct sw_flow_key *key,
 				  int depth, struct sw_flow_actions **sfa,
@@ -2061,6 +2312,7 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 			return -EINVAL;
 
 		case OVS_ACTION_ATTR_USERSPACE:
+            //遍历 a 所有元素, 确保 a[OVS_USERSPACE_ATTR_PID] 不能为 NULL 或 0
 			err = validate_userspace(a);
 			if (err)
 				return err;
@@ -2137,6 +2389,7 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 			break;
 
 		case OVS_ACTION_ATTR_SET:
+            //
 			err = validate_set(a, key, sfa,
 					   &skip_copy, eth_type, false, log);
 			if (err)
@@ -2144,6 +2397,7 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 			break;
 
 		case OVS_ACTION_ATTR_SET_MASKED:
+            //
 			err = validate_set(a, key, sfa,
 					   &skip_copy, eth_type, true, log);
 			if (err)
@@ -2163,6 +2417,7 @@ static int __ovs_nla_copy_actions(const struct nlattr *attr,
 			return -EINVAL;
 		}
 		if (!skip_copy) {
+            //将 a 附加到 sfa 的尾部, 如果空间不够返回错误
 			err = copy_action(a, sfa, log);
 			if (err)
 				return err;
@@ -2186,6 +2441,7 @@ int ovs_nla_copy_actions(const struct nlattr *attr,
 	if (IS_ERR(*sfa))
 		return PTR_ERR(*sfa);
 
+    //
 	err = __ovs_nla_copy_actions(attr, key, 0, sfa, key->eth.type,
 				     key->eth.tci, log);
 	if (err)

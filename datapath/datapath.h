@@ -57,6 +57,7 @@ struct dp_stats_percpu {
 	u64 n_missed;
 	u64 n_lost;
 	u64 n_mask_hit;
+    //主要为了保证上述 64 位的读原子性
 	struct u64_stats_sync syncp;
 };
 
@@ -176,6 +177,7 @@ static inline void ovs_dp_set_net(struct datapath *dp, struct net *net)
 
 struct vport *ovs_lookup_vport(const struct datapath *dp, u16 port_no);
 
+//在 dp->ports[port_no % 1024] 中找到端口号为 port_no 的 vport, 找不到返回 NULL
 static inline struct vport *ovs_vport_rcu(const struct datapath *dp, int port_no)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
@@ -188,6 +190,7 @@ static inline struct vport *ovs_vport_ovsl_rcu(const struct datapath *dp, int po
 	return ovs_lookup_vport(dp, port_no);
 }
 
+//在 dp->ports[port_no % DP_VPORT_HASH_BUCKETS] 中找到端口号为 port_no 的 vport, 找不到返回 NULL
 static inline struct vport *ovs_vport_ovsl(const struct datapath *dp, int port_no)
 {
 	ASSERT_OVSL();

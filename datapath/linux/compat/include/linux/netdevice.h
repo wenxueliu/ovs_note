@@ -68,11 +68,14 @@ void rpl_netdev_rx_handler_unregister(struct net_device *dev);
 #endif
 
 #ifndef HAVE_DEV_GET_BY_INDEX_RCU
+//遍历 net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 所有元素, 找到 dev->ifindex = ifindex 的 dev
 static inline struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
 {
 	struct net_device *dev;
 
 	read_lock(&dev_base_lock);
+    //遍历 net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 所有元素,
+    //找到 dev->ifindex = ifindex 的 dev
 	dev = __dev_get_by_index(net, ifindex);
 	read_unlock(&dev_base_lock);
 

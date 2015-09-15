@@ -62,6 +62,7 @@ static u16 range_n_bytes(const struct sw_flow_key_range *range)
 	return range->end - range->start;
 }
 
+//将 src 与 mask 掩码后的赋值给 dst
 void ovs_flow_mask_key(struct sw_flow_key *dst, const struct sw_flow_key *src,
 		       const struct sw_flow_mask *mask)
 {
@@ -80,6 +81,16 @@ void ovs_flow_mask_key(struct sw_flow_key *dst, const struct sw_flow_key *src,
 		*d++ = *s++ & *m++;
 }
 
+/*
+ * 从 flow_cache 中分配以一条 flow
+ * flow = kmem_cache_alloc(flow_cache, GFP_KERNEL);
+ * flow->sf_acts = NULL;
+ * flow->mask = NULL;
+ * flow->id.ufid_len = 0;
+ * flow->id.unmasked_key = NULL;
+ * flow->stats_last_writer = NUMA_NO_NODE;
+ * NOTE: 没有初始化的成员 flow_table, ufid_table, key
+ */
 struct sw_flow *ovs_flow_alloc(void)
 {
 	struct sw_flow *flow;
@@ -121,6 +132,7 @@ int ovs_flow_tbl_count(const struct flow_table *table)
 	return table->count;
 }
 
+//申请 n_buckets 个链表头, 并且初始化
 static struct flex_array *alloc_buckets(unsigned int n_buckets)
 {
 	struct flex_array *buckets;
@@ -223,6 +235,7 @@ static void mask_array_rcu_cb(struct rcu_head *rcu)
 	kfree(ma);
 }
 
+//为 table->mask_array 分配内存及初始化
 static struct mask_array *tbl_mask_array_alloc(int size)
 {
 	struct mask_array *new;
@@ -267,7 +280,34 @@ static int tbl_mask_array_realloc(struct flow_table *tbl, int size)
 	return 0;
 }
 
-//初始化 flow_table
+/*
+ * 初始化 flow_table
+ * //TBL_MIN_BUCKETS=1024
+ * table->ti = kmalloc(sizeof(*ti), GFP_KERNEL);
+ * table->ti->buckets = alloc_buckets(TBL_MIN_BUCKETS)
+ * table->ti->n_buckets = TBL_MIN_BUCKETS;
+ * table->ti->node_ver = 0;
+ * table->ti->keep_flows = false;
+ * get_random_bytes(&table->ti->hash_seed, sizeof(u32));
+ *
+ * //TBL_MIN_BUCKETS=1024
+ * table->ufid_ti = kmalloc(sizeof(*ti), GFP_KERNEL)
+ * table->ufid_ti->buckets = alloc_buckets(new_size);
+ * table->ufid_ti->n_buckets = TBL_MIN_BUCKETS;
+ * table->ufid_ti->node_ver = 0;
+ * table->ufid_ti->keep_flows = false;
+ * get_random_bytes(&table->ufid_ti->hash_seed, sizeof(u32));
+ *
+ * //MASK_ARRAY_SIZE_MIN=16
+ * table->mask_array = new  kzalloc(sizeof(struct mask_array) +
+ * 	      sizeof(struct sw_flow_mask *) * MASK_ARRAY_SIZE_MIN, GFP_KERNEL);
+ * table->mask_array->count = 0
+ * table->mask_array->max = MASK_ARRAY_SIZE_MIN
+ *
+ * table->last_rehash = jiffies
+ * table->count = 0;
+ * table->ufid_count = 0;
+ */
 int ovs_flow_tbl_init(struct flow_table *table)
 {
 	struct table_instance *ti, *ufid_ti;

@@ -41,6 +41,7 @@ struct internal_dev {
 
 static struct vport_ops ovs_internal_vport_ops;
 
+//return (char *)dev + ALIGN(sizeof(struct net_device), NETDEV_ALIGN)
 static struct internal_dev *internal_dev_priv(struct net_device *netdev)
 {
 	return netdev_priv(netdev);
@@ -201,7 +202,16 @@ static void do_setup(struct net_device *netdev)
 	eth_hw_addr_random(netdev);
 }
 
-//根据params 分配一个 vport, 并将其私有数据对应的 dev 注册为一个网络设备(类似网卡)
+//1. 根据 params 分配一个 vport 并初始化数据成员
+//
+//2. 将其私有数据对应的 dev 注册为一个网络设备(类似网卡), 并初始化
+//  * 私有数据大小为 sizeof(struct internal_dev)
+//  * dev->name = parms->name
+//  * dev->name_assign_type = name_assign_type;
+//  * 调用 do_setup(dev)
+//3. 注册私有数据中的网络设备, 并设置为混杂模式, 加入内核协议栈, 处理数据包
+//
+//NOTE: 没有初始化的 hash_node, err_stats, detach_list
 static struct vport *internal_dev_create(const struct vport_parms *parms)
 {
 	struct vport *vport;
@@ -209,7 +219,9 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 	struct internal_dev *internal_dev;
 	int err;
 
-    //分配一个 vport 对象, 其中私有数据为 struct netdev_vport
+    //分配一个 vport 对象, 并初始化部分数据成员, 其中私有数据为 struct netdev_vport
+    //没有初始化的 hash_node, err_stats, detach_list. 
+    //注 : hash_node 在 ovs_vport_add 中初始化
 	vport = ovs_vport_alloc(sizeof(struct netdev_vport),
 				&ovs_internal_vport_ops, parms);
 	if (IS_ERR(vport)) {
@@ -220,6 +232,30 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 	netdev_vport = netdev_vport_priv(vport);
 
     //分配一个 net_device 对象, 其中的私有数据为 struct internal_dev
+    /**
+     *      alloc_netdev_mqs - allocate network device
+     *      @sizeof_priv:           size of private data to allocate space for
+     *      @name:                  device name format string
+     *      @name_assign_type:      origin of device name
+     *      @setup:                 callback to initialize device
+     *      @txqs:                  the number of TX subqueues to allocate
+     *      @rxqs:                  the number of RX subqueues to allocate
+     *
+     *      Allocates a struct net_device with private data area for driver use
+     *      and performs basic initialization.  Also allocates subqueue structs
+     *      for each queue on the device.
+     *
+     *  #define alloc_netdev(sizeof_priv, name, name_assign_type, setup) \
+     *          alloc_netdev_mqs(sizeof_priv, name, name_assign_type, setup, 1, 1)
+     *
+     *  创建一个 net_device 对象 dev :
+     *  * 私有数据大小为 sizeof(struct internal_dev)
+     *  * dev->name = parms->name
+     *  * dev->name_assign_type = name_assign_type;
+     *  * 调用 do_setup(dev)
+     *  * dev->nd_net->net = vport->dp->net
+     *  详细参考内核代码 alloc_netdev_mqs()
+     */
 	netdev_vport->dev = alloc_netdev(sizeof(struct internal_dev),
 					 parms->name, NET_NAME_UNKNOWN, do_setup);
 	if (!netdev_vport->dev) {
@@ -227,7 +263,9 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 		goto error_free_vport;
 	}
 
+    //netdev_vport->dev->nd_net->net = vport->dp->net
 	dev_net_set(netdev_vport->dev, ovs_dp_get_net(vport->dp));
+    //vport->priv_data->dev->priv_data
 	internal_dev = internal_dev_priv(netdev_vport->dev);
 	internal_dev->vport = vport;
 
@@ -244,7 +282,7 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
     //设置混杂模式
 	dev_set_promiscuity(netdev_vport->dev, 1);
 	rtnl_unlock();
-    //允许上层设备调用netdev_vport 的 hard_start_xmit routine
+    //允许上层设备调用 netdev_vport 的 hard_start_xmit routine
     //__QUEUE_STATE_DRV_XOFF is used by drivers to stop the transmit queue.
     //clear_bit(__QUEUE_STATE_DRV_XOFF, netdev_vport->dev->tx[0]->state)
 	netif_start_queue(netdev_vport->dev);
@@ -347,6 +385,7 @@ int ovs_is_internal_dev(const struct net_device *netdev)
 	return netdev->netdev_ops == &internal_dev_netdev_ops;
 }
 
+//netdev_priv(netdev)->vport
 struct vport *ovs_internal_dev_get_vport(struct net_device *netdev)
 {
 	if (!ovs_is_internal_dev(netdev))
@@ -364,7 +403,8 @@ int ovs_internal_dev_rtnl_link_register(void)
 	if (err < 0)
 		return err;
 
-    //将 ovs_internal_vport_ops 加入 vport.c 中的 vport_ops_list 中
+    //将 ovs_internal_vport_ops 加入 vport.c 中的 vport_ops_list 中, 方便后续
+    //vswitchd 通过 netlink 创建 vport
 	err = ovs_vport_ops_register(&ovs_internal_vport_ops);
 	if (err < 0)
 		rtnl_link_unregister(&internal_dev_link_ops);
