@@ -1,4 +1,49 @@
 
+###net 与 net_device 通过 ifindex 关联, 通过 net,ifindex 定位 net_device
+
+net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 下保持了
+ifindex = ifindex+N*NETDEV_HASHENTRIES  的 net_device
+
+###net_device 与 vport关联通过私有数据关联, 通过 net_device 定位 vport
+
+netdev_priv(netdev)->vport = vport
+
+net_device 的私有数据可以参考内核接口 alloc_netdev_mqs()
+
+###vprot 与 datapath 直接关联, 通过 vport 定位 dp
+
+vport->dp = datapath
+
+通常在创建 vport 的时候直接指定 dp, 因为 vport 必须属于一个 datapath
+
+###datapath 与 vprot 直接关联, 通过 dp 定位 vport
+
+datapath->ports[port_no % DP_VPORT_HASH_BUCKETS] = vport (vport 在 datapath 中的 port_no 的端口号)
+
+通常在创建 vport 的时候将 vport->dp_hash_node 加入 datapath->ports[vport->port_no % DP_VPORT_HASH_BUCKETS] 中
+
+###dev_table 与 vport 关联
+
+dev_table[jhash(name,net)] 找到 vport, name = net = vport->dp->net, name = vport->ops->get_name(vport)
+
+NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
+
+因此, 既可以通过 net, ifindex 就可以找到 vport, datapath, 也可以通过 dev_table 可以找到 vport, datapath
+事实上, 在创建 vport 的时候用 net,ifindex, 在查询两种均可
+
+
+###OVS 中创建一个新的 vport 的过程
+
+通过 skb->sk->net, ovs_header->dp_ifindex 找到已经存在的 vport, 然后在 vport->dp
+找到 datapath, 然后将 datapath 赋值给新创建的 vport, 因此, 我们可以认为将一个 vport
+加入一个已经存在的 vport 所属的 datapath 中
+
+
+
+
+
+
+
 ##datapath 需要解决的问题
 
 * 内核模块的构建过程
@@ -17,11 +62,6 @@
 * 如何与 ovsdb 交互
 * 当 table_miss 后, vswitch 是如何决断的
 * 当 table_miss 后, 是否可以直接将包发送出去还是, 必须通过 datapath 发送, 如果发送, 方式是怎么样的 ?
-
-
-
-
-
 
 
 
@@ -83,8 +123,6 @@ openvswitch-y= *.c //*.c 为 openvswitch_sources 下的所有 *.c 文件
 ###Kbuild.in
 
 ccflags-y：$(CC)的编译选项添加这里，宏开关也在这里添加
-
-
 
 
 
@@ -404,7 +442,7 @@ struct ovs_net {
 
     1. 为一个 struct sk_buff 对象 reply 分配内存, 并根据 info 初始化该对象
     2. 为一个 struct datapath 对象 dp 分配内存, 并初始化
-    3. 将 info 修改 replay 对象属性, 并将消息返回给发消息者
+    3. 将 info 修改 replay 对象属性, 并将消息应答给发消息者 vswitchd
 
     其中2:
         dp->net = skb->sk->sk_net
@@ -416,6 +454,50 @@ struct ovs_net {
         dp->list_node  加入链表 dp->net[ovs_net_id - 1]
 
 
+    其中3 返回给 vswitch 的信息包含
+
+        ovs_header->dp_ifindex = 0
+        OVS_DP_ATTR_NAME  : ovs_vport_ovsl_rcu(dp, OVSP_LOCAL)->ops->get_name(ovs_vport_ovsl_rcu(dp, OVSP_LOCAL))
+        OVS_DP_ATTR_STATS : dp_stats
+        OVS_DP_ATTR_MEGAFLOW_STATS : dp_megaflow_stats
+        OVS_DP_ATTR_USER_FEATURES  : dp->user_features
+        其中
+        dp_megaflow_stats->n_masks = dp->table->mask_array->count
+        dp_megaflow_stats->n_mask_hit = 所有 cpu 的 n_mask_hit
+        dp_stats->n_flows = dp->table
+        dp_stats->n_hist : 所有 cpu 的 n_hit
+        dp_stats->n_missed : 所有 cpu 的 n_missed
+        dp_stats->n_lost : 所有 cpu 的 n_lost
+
+###static int ovs_dp_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+
+    通过 skb->sk->net info->userhdr, info->attrs 找到待删除的 dp
+    销毁 dp 下的每个端口
+    向发送者通知删除操作
+
+static struct datapath *lookup_datapath(struct net *net,
+					const struct ovs_header *ovs_header,
+					struct nlattr *a[OVS_DP_ATTR_MAX + 1])
+
+    如果 info->attrs[OVS_DP_ATTR_NAME] = NULL
+    遍历 skb->sk-net->dev_index_head[info->userhdr->ifindex & (NETDEV_HASHENTRIES - 1)] 所有元素,
+    找到 dev->ifindex = ifindex 的 dev, 返回 netdev_priv(dev)->vport->dp
+    否则
+    遍历 dev_table[jhash(name, strlen(name), (unsigned long) net) & (VPORT_HASH_BUCKETS - 1)] 的所有 vport,
+    找到 vport->ops->get_name(vport）= name, vport->dp->net = net 的 vport, 返回 vport->dp
+
+static int ovs_dp_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+    遍历 skb->sk->net->gen->ptr[ovs_net_id -1]->dps 中所有 dp, 将索引大于 cb->agrs[0] 的统计加入 skb
+
+static int ovs_dp_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    通过 skb->sk->net info->userhdr, info->attrs 找到待删除的 dp
+    只能修改 dp->user_features
+    向发送者通知统计消息
+
+
 int ovs_flow_tbl_init(struct flow_table *table)
 
     初始化 flow_table 结构体
@@ -425,15 +507,15 @@ int ovs_flow_tbl_init(struct flow_table *table)
 					  MC_HASH_ENTRIES, __alignof__(struct mask_cache_entry));
 
     //TBL_MIN_BUCKETS=1024
-    table->ti = kmalloc(sizeof(*ti), GFP_KERNEL) table_instance_alloc();
+    table->ti = kmalloc(sizeof(*ti), GFP_KERNEL);
     table->ti->buckets = alloc_buckets(TBL_MIN_BUCKETS)
-	table->ti->n_buckets = new_size;
+	table->ti->n_buckets = TBL_MIN_BUCKETS;
 	table->ti->node_ver = 0;
 	table->ti->keep_flows = false;
 	get_random_bytes(&table->ti->hash_seed, sizeof(u32));
 
     //TBL_MIN_BUCKETS=1024
-    table->ufid_ti = kmalloc(sizeof(*ti), GFP_KERNEL) 
+    table->ufid_ti = kmalloc(sizeof(*ti), GFP_KERNEL)
 	table->ufid_ti->buckets = alloc_buckets(new_size);
 	table->ufid_ti->n_buckets = TBL_MIN_BUCKETS;
 	table->ufid_ti->node_ver = 0;
@@ -451,20 +533,7 @@ int ovs_flow_tbl_init(struct flow_table *table)
 	table->ufid_count = 0;
 
 
-static struct table_instance *table_instance_alloc(int new_size)
-
-    初始化一个 table_instance 结构体, 返回结构体的指针 ti
-
-    ti->buckets = alloc_buckets(new_size)
-    ti->n_buckets = new_size
-
-    alloc_buckets(unsigned int n_buckets)
-
-    flex_array_alloc(sizeof(struct hlist_head), n_buckets, GFP_KERNEL) 分配 new_size 个 hlist_head
-
-
-    #define flex_array_alloc rpl_flex_array_alloc
-
+//待完善, 具体参考内核
 struct flex_array *rpl_flex_array_alloc(int element_size, unsigned int
         total,gfp_t flags)
 
@@ -498,8 +567,72 @@ static int ovs_dp_cmd_fill_info(struct datapath *dp, struct sk_buff *skb,
     nla_put_u32(skb, OVS_DP_ATTR_USER_FEATURES, dp->user_features)
 	genlmsg_end(skb, ovs_header);
 
+--------------------------------------------------------
 
 --------------------------------------------------------
+
+###static int ovs_vport_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+    1. 确保 vport 所在的 datapath 存在
+    2. 如果没有给定端口号, 从头开始找到空闲的端口号 port_no.
+        如果给定端口号, 确保端口号 port_no 与已有的端口号 port_no 不存在.
+    3. 创建一个 vport 并初始化各个数据成员, 包括私有数据
+    4. 将信息应答给请求者(vswitchd)
+
+    创建 vport 的参数
+
+        parms.name = nla_data(a[OVS_VPORT_ATTR_NAME]);
+        parms.type = nla_get_u32(a[OVS_VPORT_ATTR_TYPE]);
+        parms.options = a[OVS_VPORT_ATTR_OPTIONS];
+        parms.dp = dp;
+        parms.port_no = port_no;
+        parms.upcall_portids = a[OVS_VPORT_ATTR_UPCALL_PID];
+
+static int ovs_vport_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    设置 vport 的属性, 包括:
+
+    OVS_VPORT_ATTR_OPTIONS : info->attrs[OVS_VPORT_ATTR_OPTIONS]
+    OVS_VPORT_ATTR_UPCALL_PID : info->attrs[OVS_VPORT_ATTR_UPCALL_PID]
+
+
+static int ovs_vport_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+    1. 从 net,name 找到 dp, 进而找到 vport 或 从 net,dpifindex 找到 dp, 进而找到 vport
+    2. 删除 vport (OVSP_LOCAL 的端口不可以删除)
+    3. 发送消息给发送者(vswitchd)
+
+static int ovs_vport_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+    获取指定 vport 的属性信息, 应答给请求者(vswitchd)
+
+static int ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+    数字 dp->ports[] 索引 cb->agrs[0] 开始, 跳过前 cb->args[1] 个 vport,
+    剩余的 vport 属性信息(见下)写入 skb
+
+    OVS_VPORT_ATTR_PORT_NO : vport->port_no
+    OVS_VPORT_ATTR_TYPE : vport->ops->type
+    OVS_VPORT_ATTR_NAME : vport->ops->get_name(vport)
+    OVS_VPORT_ATTR_STATS : vport_stats
+    OVS_VPORT_ATTR_UPCALL_PID:ids->n_ids * sizeof(u32), (void *) ids->ids
+    OVS_VPORT_ATTR_OPTIONS:vport->ops->get_options(vport, skb)
+
+--------------------------------------------------------
+
+static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+
+
+
+
+--------------------------------------------------------
+
+
+
+
+
+
 
 u32 ovs_vport_find_upcall_portid(const struct vport *vport, struct sk_buff *skb)
 
@@ -1509,9 +1642,9 @@ int ovs_vport_ops_register(struct vport_ops *ops)
     1. 初始化 vport, 其私有数据为 sizeof(struct netdev_vport)
     2. 初始化 vport 的私有数据为一个 struct net_device 设备 netdev_vport. 启动函数为 do_setup
     3. 初始化 netdev_vport 的私有数据为一个 struct internal_dev 对象 internal_dev. 其 vport 指向 1 初始化的 vport
-    4. 如果 vport->port_no = OVSP_LOCAL, netdev_vport->dev 增加特性 NETIF_F_NETNS_LOCAL(具体含义待理解);
+    4. 如果 vport->port_no = OVSP_LOCAL, netdev_vport->dev 增加特性 NETIF_F_NETNS_LOCAL(目前的命名空间);
     5. 注册 netdev_vport 到网络驱动中, 并设置为混杂模式
-    6. 允许上层设备调用netdev_vport 的 hard_start_xmit routine
+    6. 允许上层设备调用 netdev_vport 的 hard_start_xmit routine
 
     其中2 包括:
     netdev_vport->name = params->name
