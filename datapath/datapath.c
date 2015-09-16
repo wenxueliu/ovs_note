@@ -606,6 +606,16 @@ out:
  //        void *                  user_ptr[2];
  //        struct sock *           dst_sk;
  //};
+ //
+
+
+/*
+ * 给 packet 分配 NET_IP_ALIGN + nla_len(a[OVS_PACKET_ATTR_PACKET]) 的空间
+ * 初始化 a[OVS_PACKET_ATTR_PACKET]
+ *
+ *
+ *
+ */
 static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 {
 	struct ovs_header *ovs_header = info->userhdr;
@@ -631,8 +641,10 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	err = -ENOMEM;
 	if (!packet)
 		goto err;
+    //保留 NET_IP_ALIGN 大小的空间在 head, 即 packet->data += NET_IP_ALIGN
 	skb_reserve(packet, NET_IP_ALIGN);
 
+    //将 a[OVS_PACKET_ATTR_PACKET] 拷贝到packet->data 开始的地方
 	nla_memcpy(__skb_put(packet, len), a[OVS_PACKET_ATTR_PACKET], len);
 
 	skb_reset_mac_header(packet);
@@ -653,11 +665,13 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	if (IS_ERR(flow))
 		goto err_kfree_skb;
 
+    //从 packet 中提取包信息到 flow->key
 	err = ovs_flow_key_extract_userspace(a[OVS_PACKET_ATTR_KEY], packet,
 					     &flow->key, log);
 	if (err)
 		goto err_flow_free;
 
+    //将 a[OVS_PACKET_ATTR_ACTIONS] 初始化 acts
 	err = ovs_nla_copy_actions(a[OVS_PACKET_ATTR_ACTIONS],
 				   &flow->key, &acts, log);
 	if (err)
@@ -674,6 +688,7 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	if (!dp)
 		goto err_unlock;
 
+    //找到输入端口
 	input_vport = ovs_vport_rcu(dp, flow->key.phy.in_port);
 	if (!input_vport)
 		input_vport = ovs_vport_rcu(dp, OVSP_LOCAL);
@@ -685,6 +700,7 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	sf_acts = rcu_dereference(flow->sf_acts);
 
 	local_bh_disable();
+    //
 	err = ovs_execute_actions(dp, packet, sf_acts, &flow->key);
 	local_bh_enable();
 	rcu_read_unlock();
@@ -1044,8 +1060,22 @@ static struct sk_buff *ovs_flow_cmd_build_info(const struct sw_flow *flow,
 
 
 /*
- * match->key = info->attrs[OVS_FLOW_ATTR_KEY]
- * match->mask = info->attrs[OVS_FLOW_ATTR_MASK]
+ * 1. 为新建流表 new_flow 分配内存空间
+ * 2. 初始化临时变量 match, key, mask
+ * 3. a[OVS_FLOW_ATTR_KEY] 初始化 match->key, a[OVS_FLOW_ATTR_MASK] 初始化 match->mask
+ * 4. 将 key 与 mask 掩码后的赋值给 new_flow->key
+ * 5. 用 a[OVS_FLOW_ATTR_UFID] 初始化 new_flow->id
+ * 6. 用 a[OVS_FLOW_ATTR_ACTIONS] 初始化 acts
+ * 7. 如果 new_flow->id->ufid_len != 0, 从 dp->table->ufid_ti->buckets 中查找 new_flow->id->ufid 对应的流表是否存在
+ * 8. 如果 new_flow->id->ufid_len == 0, 遍历 dp->table->mask_array 中的每一个 mask, 从 dp->table->ti->buckets 中查找匹配 flow->key=key & mask, flow->mask = mask 的流表项
+ * 9. 正常情况下, 新创建的流表是不存在的:
+ *      * 将 mask 加入 table->mask_array 中
+ *      * 将 flow->flow_table->node[table->ti->node_ver] 插入 table->ti->buckets 中的一个链表中
+ *      * 如果 flow->id->ufid_len != 0 , 将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 table->ufid_ti->buckets 中的一个链表中
+ * 10. 异常情况是, 新创建的流表已经存在
+ *      * 如果配置中不允许重复的流表, 向发送者发送错误消息
+ *      * 如果配置允许重复的流表, 如果是 ufid 重复, 发送错误消息, 如果是 key 重复, 简单的用新的 action 代替原理的 action
+ *
  *
  */
 static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
@@ -1091,9 +1121,10 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
      */
 	ovs_match_init(&match, &key, &mask);
     /*
-     * 1. 解析 a[OVS_FLOW_ATTR_KEY] 保存在中间变量 tmp_key 中, 变量 key_attrs 标记已经解析的 ovs_key_attr
+     * a[OVS_FLOW_ATTR_KEY] 初始化 match->key, a[OVS_FLOW_ATTR_MASK] 初始化 match->mask
+     * 1. 解析 a[OVS_FLOW_ATTR_KEY] 保存在中间变量 tmp_key 中, 已经解析的 ovs_key_attr 标记保存在变量 key_attrs
      * 2. 将 key_attrs 中对应的 ovs_key_attr 从 tmp_key 中取出来赋值给 match->key
-     * 3. 解析 a[OVS_FLOW_ATTR_MASK] 保存在中间变量 tmp_mask 中, 变量 mask_attrs 标记已经解析的 ovs_key_attr
+     * 3. 解析 a[OVS_FLOW_ATTR_MASK] 保存在中间变量 tmp_mask 中, 已经解析的 ovs_key_attr 标记保持变量 mask_attrs
      * 4. 将 mask_attrs 中对应的 ovs_key_attr 从 tmp_mask 中取出来赋值给 match->mask->key
      * 5. 对 match 进行有效性检查
      */
@@ -1103,11 +1134,12 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 		goto err_kfree_flow;
 
     //将 key 与 mask 掩码后的赋值给 new_flow->key
+    //注: 此时的 key, mask 已经是被 ovs_nla_get_match() 赋值的 key, mask
 	ovs_flow_mask_key(&new_flow->key, &key, &mask);
 
 	/* Extract flow identifier. */
 
-    //计算 new_flow->id
+    //初始化 new_flow->id
     //如果 a[OVS_FLOW_ATTR_UFID] = NULL, new_flow->unmasked_key = key
     //否则
     //      new_flow->id->ufid_len = nla_len(a[OVS_FLOW_ATTR_UFID])
@@ -1118,6 +1150,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 		goto err_kfree_flow;
 
 	/* Validate actions. */
+    //TODO
 	error = ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS], &new_flow->key,
 				     &acts, log);
 	if (error) {
@@ -1125,6 +1158,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 		goto err_kfree_flow;
 	}
 
+    //初始化应答消息
 	reply = ovs_flow_cmd_alloc_info(acts, &new_flow->id, info, false,
 					ufid_flags);
 	if (IS_ERR(reply)) {
@@ -1133,6 +1167,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	ovs_lock();
+    //获取 datapath
 	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
 	if (unlikely(!dp)) {
 		error = -ENODEV;
@@ -1140,13 +1175,24 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	/* Check if this is a duplicate flow */
-	if (ovs_identifier_is_ufid(&new_flow->id))
+	if (ovs_identifier_is_ufid(&new_flow->id)) {
+        // 从 dp->table->ufid_ti->buckets 中查找 new_flow->id->ufid 对应的流表是否存在
+        //TODO 这里流表查询算法可以有提升空间
 		flow = ovs_flow_tbl_lookup_ufid(&dp->table, &new_flow->id);
-	if (!flow)
+    }
+	if (!flow) {
+        // 遍历 dp->table->mask_array 中的每一个 mask, 从 dp->table->ti->buckets 中查找匹配 flow->key=key & mask, flow->mask = mask 的流表项
+        //TODO 这里流表查询算法可以有提升空间
 		flow = ovs_flow_tbl_lookup(&dp->table, &key);
+    }
 	if (likely(!flow)) {
+        //初始化 sf_acts
 		rcu_assign_pointer(new_flow->sf_acts, acts);
 
+
+        // 1. 将 mask 加入 table->mask_array 中
+        // 2. 将 flow->flow_table->node[table->ti->node_ver] 插入 table->ti->buckets 中的一个链表中
+        // 3. 如果 flow->id 存在, 将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 table->ufid_ti->buckets 中的一个链表中
 		/* Put flow in bucket. */
 		error = ovs_flow_tbl_insert(&dp->table, new_flow, &mask);
 		if (unlikely(error)) {
@@ -1181,8 +1227,12 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 		/* The flow identifier has to be the same for flow updates.
 		 * Look for any overlapping flow.
 		 */
+        //如果 flow->id->ufid_len != 0, flow->key 与 match->key 是否完全一致
+        //否则 flow->unmasked_key 与 match->key 是否完全一致
 		if (unlikely(!ovs_flow_cmp(flow, &match))) {
+            //flow->id->ufid_len == 0
 			if (ovs_identifier_is_key(&flow->id))
+                // 在 tbl->buckets 中找到与 match->key 精确匹配的 flow
 				flow = ovs_flow_tbl_lookup_exact(&dp->table,
 								 &match);
 			else /* UFID matches but key is different */
@@ -1193,6 +1243,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 			}
 		}
 		/* Update actions. */
+        //更新 actions
 		old_acts = ovsl_dereference(flow->sf_acts);
 		rcu_assign_pointer(flow->sf_acts, acts);
 
@@ -1227,6 +1278,7 @@ error:
 }
 
 /* Factor out action copy to avoid "Wframe-larger-than=1024" warning. */
+//将 a 初始化 acts, 返回 acts
 static struct sw_flow_actions *get_flow_actions(const struct nlattr *a,
 						const struct sw_flow_key *key,
 						const struct sw_flow_mask *mask,
@@ -1236,6 +1288,7 @@ static struct sw_flow_actions *get_flow_actions(const struct nlattr *a,
 	struct sw_flow_key masked_key;
 	int error;
 
+    //masked_key = key & mask
 	ovs_flow_mask_key(&masked_key, key, mask);
 	error = ovs_nla_copy_actions(a, &masked_key, &acts, log);
 	if (error) {
@@ -1270,6 +1323,21 @@ static struct sw_flow_actions *get_flow_actions(const struct nlattr *a,
  //        void *                  user_ptr[2];
  //        struct sock *           dst_sk;
  //};
+
+
+/*
+ * 1. 用 a[OVS_FLOW_ATTR_UFID] 初始化临时变量 sfid, 如果 sfid->ufid_len != 0, ufid_present = true
+ * 2. 初始化临时变量 match, key, mask
+ * 3. 用 a[OVS_FLOW_ATTR_KEY] 给 match->key 赋值, a[OVS_FLOW_ATTR_MASK] 给 match->mask 赋值
+ * 4. 如果 a[OVS_FLOW_ATTR_ACTIONS] != NULL, 初始化临时变量 acts
+ * 5. 如果 ufid_present = true, 从 dp->table->ufid_ti->buckets 中查找 ufid 的流表
+ *    否则 从 dp->table->ti->buckets 中查找 match->key 的流表 flow, 如果 flow & flow->id->ufid_len = 0 & flow->unmasked_key = match->key 返回 flow
+ * 6. 从 5 中找到的 flow, flow->sf_acts = acts
+ * 7. 应答给发送者
+ *
+ *
+ *
+ */
 static int ovs_flow_cmd_set(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1303,6 +1371,7 @@ static int ovs_flow_cmd_set(struct sk_buff *skb, struct genl_info *info)
 
 	/* Validate actions. */
 	if (a[OVS_FLOW_ATTR_ACTIONS]) {
+        //用 a[OVS_FLOW_ATTR_ACTIONS] 初始化 acts
 		acts = get_flow_actions(a[OVS_FLOW_ATTR_ACTIONS], &key, &mask,
 					log);
 		if (IS_ERR(acts)) {
@@ -1405,6 +1474,10 @@ error:
  //        void *                  user_ptr[2];
  //        struct sock *           dst_sk;
  //};
+
+/*
+ * 略
+ */
 static int ovs_flow_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1486,6 +1559,18 @@ unlock:
  //        void *                  user_ptr[2];
  //        struct sock *           dst_sk;
  //};
+ /*
+  *
+  *
+  *
+  * 1. 用 a[OVS_FLOW_ATTR_UFID] 初始化临时变量 ufid, 如果 ufid->ufid_len != 0, ufid_present = true
+  * 2. 初始化临时变量 match, key
+  * 3. 用 a[OVS_FLOW_ATTR_KEY] 给 match->key 赋值
+  * 4. 如果 ufid_present = true, 从 dp->table->ufid_ti->buckets 中查找 ufid 的流表
+  *    否则 从 dp->table->ti->buckets 中查找 match->key 的流表 flow, 如果 flow & flow->id->ufid_len = 0 & flow->unmasked_key = match->key 返回 flow
+  * 5. 如果 4 找到匹配的流表, 从 dp->table 中删除找到的 flow
+  *    否则返回错误消息给发送者
+  */
 static int ovs_flow_cmd_del(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr **a = info->attrs;
@@ -1523,14 +1608,19 @@ static int ovs_flow_cmd_del(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (ufid_present)
+        //从 dp->table->ufid_ti->buckets 中查找 ufid 的流表
 		flow = ovs_flow_tbl_lookup_ufid(&dp->table, &ufid);
 	else
+        //从 dp->table->ti->buckets 中查找 match->key 的流表 flow, 如果 flow & flow->id->ufid_len = 0 & flow->unmasked_key = match->key 返回 flow
 		flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
 	if (unlikely(!flow)) {
 		err = -ENOENT;
 		goto unlock;
 	}
 
+    // 1. 从 table->ti->bucket 中删除 flow->flow_table.node[table->ti->node_ver]
+    // 2. 从 table->ufid_ti->bucket 中删除 flow->ufid_table.node[table->ufid_ti->node_ver]
+    // 3. flow->mask 引用计数减一或删除
 	ovs_flow_tbl_remove(&dp->table, flow);
 	ovs_unlock();
 
@@ -1562,6 +1652,12 @@ unlock:
 	return err;
 }
 
+/*
+ * 从 skb->sk->net, genlmsg_data(nlmsg_data(cb->nlh))->dp_ifindex 找到 dp,
+ * 遍历 dp->table->ti->buckets, bucket 从 cb->args[0] 开始, 每个 bucket
+ * 的索引从 cb->args[1] 开始, 直到遍历完所有的 flow, 每个 flow 都加入 skb
+ *
+ */
 static int ovs_flow_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	struct nlattr *a[__OVS_FLOW_ATTR_MAX];
@@ -1585,12 +1681,15 @@ static int ovs_flow_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
 	}
 
 	ti = rcu_dereference(dp->table.ti);
+    //bucket 从 cb->args[0] 开始, 每个 bucket 的索引从 cb->args[1] 开始,
+    //直到遍历完所有的 flow, 每个 flow 都加入 skb
 	for (;;) {
 		struct sw_flow *flow;
 		u32 bucket, obj;
 
 		bucket = cb->args[0];
 		obj = cb->args[1];
+        // 找到 ti->buckets 中索引为 bucket, 链表索引为 last 的 flow
 		flow = ovs_flow_tbl_dump_next(ti, &bucket, &obj);
 		if (!flow)
 			break;

@@ -1423,6 +1423,8 @@ static size_t get_ufid_len(const struct nlattr *attr, bool log)
  * or false otherwise.
  */
 /*
+ * 用 attr 初始化 sfid,　并返回 sfid_len
+ *
  * sfid->ufid_len = nla_len(ufid)
  * sfid->ufid = nla_data(ufid)
  */
@@ -1483,6 +1485,11 @@ u32 ovs_nla_get_ufid_flags(const struct nlattr *attr)
  * extracted from the packet itself.
  */
 
+/*
+ *  1. 解析 attr 保持在 a 中
+ *  2. key 初始化 match.key
+ *  3. 用 a 根据 attrs 中指定的类型初始化 match
+ */
 int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 			      struct sw_flow_key *key,
 			      bool log)
@@ -1492,6 +1499,7 @@ int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 	u64 attrs = 0;
 	int err;
 
+    //解析 attr 保持在 a 中
 	err = parse_flow_nlattrs(attr, a, &attrs, log);
 	if (err)
 		return -EINVAL;
@@ -1502,6 +1510,7 @@ int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 	memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
 	key->phy.in_port = DP_MAX_PORTS;
 
+    //用 a 根据 attrs 中指定的类型初始化 match
 	return metadata_from_nlattrs(&match, &attrs, a, false, log);
 }
 

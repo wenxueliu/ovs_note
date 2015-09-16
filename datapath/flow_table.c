@@ -54,7 +54,9 @@
 #define MC_HASH_ENTRIES		(1u << MC_HASH_SHIFT)
 #define MC_HASH_SEGS		((sizeof(uint32_t) * 8) / MC_HASH_SHIFT)
 
+//新建流表都从 flow_cache 分配的内存中获取
 static struct kmem_cache *flow_cache;
+//NUMA 节点的统计信息从 flow_stats_cache 分配的内存中获取
 struct kmem_cache *flow_stats_cache __read_mostly;
 
 static u16 range_n_bytes(const struct sw_flow_key_range *range)
@@ -207,6 +209,7 @@ static void __table_instance_destroy(struct table_instance *ti)
 	kfree(ti);
 }
 
+//分配 new_size 个 flex_array 给 table->ti->buckets, 并初始化
 static struct table_instance *table_instance_alloc(int new_size)
 {
 	struct table_instance *ti = kmalloc(sizeof(*ti), GFP_KERNEL);
@@ -252,6 +255,8 @@ static struct mask_array *tbl_mask_array_alloc(int size)
 	return new;
 }
 
+//tbl->mask_array 的空间重新分配大小为 size, 并将旧数据拷贝到新的 masks 中. 
+//主要用于 tbl 空间扩容.
 static int tbl_mask_array_realloc(struct flow_table *tbl, int size)
 {
 	struct mask_array *old;
@@ -265,6 +270,7 @@ static int tbl_mask_array_realloc(struct flow_table *tbl, int size)
 	if (old) {
 		int i, count = 0;
 
+        //仅将不为 null 的赋值到 new
 		for (i = 0; i < old->max; i++) {
 			if (ovsl_dereference(old->masks[i]))
 				new->masks[count++] = old->masks[i];
@@ -406,6 +412,12 @@ void ovs_flow_tbl_destroy(struct flow_table *table)
 	table_instance_destroy(ti, ufid_ti, false);
 }
 
+/*
+ * 找到 ti->buckets 中索引为 bucket, 链表索引为 last 的 flow
+ *
+ *
+ * TODO:这里遍历的代价太大, 待优化
+ */
 struct sw_flow *ovs_flow_tbl_dump_next(struct table_instance *ti,
 				       u32 *bucket, u32 *last)
 {
@@ -440,6 +452,7 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
 				(hash & (ti->n_buckets - 1)));
 }
 
+// flow->flow_table.node[ti->node_ver] 加入 ti->buckets[jhash_1word(jhash(flow->key, flow->mask->range->end - flow->mask->range->start, 0), ti->hash_seed) & (ti->n_buckets - 1)] 的链表中
 static void table_instance_insert(struct table_instance *ti,
 				  struct sw_flow *flow)
 {
@@ -449,6 +462,7 @@ static void table_instance_insert(struct table_instance *ti,
 	hlist_add_head_rcu(&flow->flow_table.node[ti->node_ver], head);
 }
 
+//将 flow->ufid_table.node[ti->node_ver] 加入 ti->buckets[jhash_1word(ti->hash_seed, flow->ufid_table.hash)] 中
 static void ufid_table_instance_insert(struct table_instance *ti,
 				       struct sw_flow *flow)
 {
@@ -458,6 +472,8 @@ static void ufid_table_instance_insert(struct table_instance *ti,
 	hlist_add_head_rcu(&flow->ufid_table.node[ti->node_ver], head);
 }
 
+// 将 old 的每个 buckets 中的每个链表中的值拷贝到 new 中, new->node_ver 为 old->node_ver
+// 注: 如果 ufid 为 true, 根据 ufid 查找 bucket 拷贝
 static void flow_table_copy_flows(struct table_instance *old,
 				  struct table_instance *new, bool ufid)
 {
@@ -487,15 +503,22 @@ static void flow_table_copy_flows(struct table_instance *old,
 	old->keep_flows = true;
 }
 
+/*
+ * 分配 n_buckets 个 flex_array 给 new_ti, 并初始化
+ * 将 ti 的每个 buckets 中的每个链表中的值拷贝到 new_ti 中, new_ti->node_ver 为 ti->node_ver
+ * 注: 如果 ufid 为 true, 根据 ufid 查找 bucket 拷贝
+ */
 static struct table_instance *table_instance_rehash(struct table_instance *ti,
 						    int n_buckets, bool ufid)
 {
 	struct table_instance *new_ti;
 
+    //分配 n_buckets 个 flex_array 给 new_ti, 并初始化
 	new_ti = table_instance_alloc(n_buckets);
 	if (!new_ti)
 		return NULL;
 
+    //将 old 的每个 buckets 中的每个链表中的值拷贝到 new 中, new->node_ver 为 old->node_ver
 	flow_table_copy_flows(ti, new_ti, ufid);
 
 	return new_ti;
@@ -531,6 +554,7 @@ err_free_ti:
 	return -ENOMEM;
 }
 
+//返回流表的 hash 值 = jhash2(key + mask->range->start, mask->range->end - mask->range->start)
 static u32 flow_hash(const struct sw_flow_key *key,
 		     const struct sw_flow_key_range *range)
 {
@@ -570,6 +594,7 @@ static bool cmp_key(const struct sw_flow_key *key1,
 	return diffs == 0;
 }
 
+//flow->key 与 keys 是否完全一致
 static bool flow_cmp_masked_key(const struct sw_flow *flow,
 				const struct sw_flow_key *key,
 				const struct sw_flow_key_range *range)
@@ -577,6 +602,7 @@ static bool flow_cmp_masked_key(const struct sw_flow *flow,
 	return cmp_key(&flow->key, key, range->start, range->end);
 }
 
+//比较 flow->id.unmasked_key = match-key, 返回 true, 否则返回false
 static bool ovs_flow_cmp_unmasked_key(const struct sw_flow *flow,
 				      const struct sw_flow_match *match)
 {
@@ -588,6 +614,14 @@ static bool ovs_flow_cmp_unmasked_key(const struct sw_flow *flow,
 	return cmp_key(flow->id.unmasked_key, key, key_start, key_end);
 }
 
+/*
+ * 在 ti->buckets 中找到 flow->key = unmasked 掩码 mask 和 flow->mask = mask 的 flow.
+ * 1. unmasked 与 mask 掩码之后的 key 为 mask_key
+ * 2. hash = jhash2(key + mask->range->start, mask->range->end - mask->range->start)
+ * 3. 在 ti->buckets[jhash_1word(hash, ti->hash_seed) & ti->n_buckets] 中找符合条件的 flow
+ *
+ * 两条流表不仅 key 要相等, mask 也要相等
+ */
 static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
 					  const struct sw_flow_key *unmasked,
 					  const struct sw_flow_mask *mask,
@@ -598,6 +632,7 @@ static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
 	u32 hash;
 	struct sw_flow_key masked_key;
 
+    //masked_key 是 unmasked 与 mask 掩码后的 key
 	ovs_flow_mask_key(&masked_key, unmasked, mask);
 	hash = flow_hash(&masked_key, &mask->range);
 	head = find_bucket(ti, hash);
@@ -613,6 +648,12 @@ static struct sw_flow *masked_flow_lookup(struct table_instance *ti,
 /* Flow lookup does full lookup on flow table. It starts with
  * mask from index passed in *index.
  */
+/*
+ * 遍历 ma 中的每一个 mask, 从 ti 中查找匹配 flow->key=key & mask, flow->mask = mask 的流表项目
+ *
+ * 优先确认 ma->masks[*index] 是否符号条件, 如果不符合, 遍历 ma 中的 masks 的每个元素 mask,
+ * 从 ti 中找到 flow->key= key & mask, flow->mask = mask
+ */
 static struct sw_flow *flow_lookup(struct flow_table *tbl,
 				   struct table_instance *ti,
 				   const struct mask_array *ma,
@@ -627,6 +668,7 @@ static struct sw_flow *flow_lookup(struct flow_table *tbl,
 	if (*index < ma->max) {
 		mask = rcu_dereference_ovsl(ma->masks[*index]);
 		if (mask) {
+            // 在 ti->buckets 中找到 flow->key = key & mask 和 flow->mask = mask 的 flow.
 			flow = masked_flow_lookup(ti, key, mask, n_mask_hit);
 			if (flow)
 				return flow;
@@ -642,6 +684,7 @@ static struct sw_flow *flow_lookup(struct flow_table *tbl,
 		if (!mask)
 			continue;
 
+        // 在 ti->buckets 中找到 flow->key = key 掩码 mask 和 flow->mask = mask 的 flow.
 		flow = masked_flow_lookup(ti, key, mask, n_mask_hit);
 		if (flow) { /* Found */
 			*index = i;
@@ -716,17 +759,34 @@ struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl,
 	return flow;
 }
 
+/*
+ * 遍历 tbl->mask_array 中的每一个 mask, 从 tlb->ti 中查找匹配 flow->key=key & mask, flow->mask = mask 的流表项
+ *
+ * 优先确认 tbl->mask_array->masks[*index] 是否符号条件, 如果不符合, 遍历 tbl->mask_array 中的 masks 的每个元素 mask,
+ * 从 tlb->ti 中找到 flow->key= key & mask, flow->mask = mask
+ */
 struct sw_flow *ovs_flow_tbl_lookup(struct flow_table *tbl,
 				    const struct sw_flow_key *key)
 {
 	struct table_instance *ti = rcu_dereference_ovsl(tbl->ti);
 	struct mask_array *ma = rcu_dereference_ovsl(tbl->mask_array);
+    //目前用处似乎没有体现除了
 	u32 __always_unused n_mask_hit;
 	u32 index = 0;
 
 	return flow_lookup(tbl, ti, ma, key, &n_mask_hit, &index);
 }
 
+/*
+ * 在 tbl->buckets 中找到与 match->key 精确匹配的 flow
+ *
+ *
+ * 遍历 tbl->ti->masks 的每个元素 mask,
+ * 在 ti->buckets 中找到 flow->key = matach-key & mask 和 flow->mask = mask 的 flow.
+ * 如果 flow->id->ufid_len = 0 & flow->unmasked_key == match-key, 返回 flow,
+ * 否则返回 NULL
+ *
+ */
 struct sw_flow *ovs_flow_tbl_lookup_exact(struct flow_table *tbl,
 					  const struct sw_flow_match *match)
 {
@@ -743,8 +803,16 @@ struct sw_flow *ovs_flow_tbl_lookup_exact(struct flow_table *tbl,
 		mask = ovsl_dereference(ma->masks[i]);
 		if (!mask)
 			continue;
+        /*
+        * 在 ti->buckets 中找到 flow->key = match->key & mask 和 flow->mask = mask 的 flow.
+        * 1. unmasked 与 mask 掩码之后的 key 为 mask_key
+        * 2. hash = jhash2(key + mask->range->start, mask->range->end - mask->range->start)
+        * 3. 在 ti->buckets[jhash_1word(hash, ti->hash_seed) & ti->n_buckets] 中找符合条件的 flow
+        *
+        * 两条流表不仅 key 要相等, mask 也要相等
+        */
 		flow = masked_flow_lookup(ti, match->key, mask, &n_mask_hit);
-		if (flow && ovs_identifier_is_key(&flow->id) &&
+		If (flow && ovs_identifier_is_key(&flow->id) &&
 		    ovs_flow_cmp_unmasked_key(flow, match))
 			return flow;
 	}
@@ -765,14 +833,27 @@ static bool ovs_flow_cmp_ufid(const struct sw_flow *flow,
 	return !memcmp(flow->id.ufid, sfid->ufid, sfid->ufid_len);
 }
 
+/*
+ * 如果 flow->id->ufid_len != 0, flow->key 与 match->key 是否完全一致
+ * 否则 flow->unmasked_key 与 match->key 是否完全一致
+ */
 bool ovs_flow_cmp(const struct sw_flow *flow, const struct sw_flow_match *match)
 {
 	if (ovs_identifier_is_ufid(&flow->id))
+        //flow->key 与 match->key 是否完全一致
 		return flow_cmp_masked_key(flow, match->key, &match->range);
 
+    //flow->unmasked_key 与 match->key 是否完全一致
 	return ovs_flow_cmp_unmasked_key(flow, match);
 }
 
+/*
+ * 从 tbl->ufid_ti->buckets 中查找 ufid 对应的流表是否存在
+ *
+ * 遍历 tbl->ufid_ti->buckets[jhash_1word(jhash(ufid->ufid, ufid->ufid_len, 0), ti->hash_seed)] 中每一个元素 flow, 
+ * 找到满足 flow->ufid = ufid, 返回 flow; 找不到返回 NULL
+ *
+ */
 struct sw_flow *ovs_flow_tbl_lookup_ufid(struct flow_table *tbl,
 					 const struct sw_flow_id *ufid)
 {
@@ -781,9 +862,13 @@ struct sw_flow *ovs_flow_tbl_lookup_ufid(struct flow_table *tbl,
 	struct hlist_head *head;
 	u32 hash;
 
+    //计算flow 的 hash: jhash(ufid->ufid, ufid->ufid_len, 0)
 	hash = ufid_hash(ufid);
+    //从 ti->buckets[jhash_1word(hash, ti->hash_seed) & (ti->n_buckets - 1)]
+    //中找到 id 和 ufid 相同的 flow
 	head = find_bucket(ti, hash);
 	hlist_for_each_entry_rcu(flow, head, ufid_table.node[ti->node_ver]) {
+        //BUG:这里 ovs_flow_cmp_ufid() 包含了前面的条件
 		if (flow->ufid_table.hash == hash &&
 		    ovs_flow_cmp_ufid(flow, ufid))
 			return flow;
@@ -799,6 +884,11 @@ int ovs_flow_tbl_num_masks(const struct flow_table *table)
 	return ma->count;
 }
 
+/*
+ * 分配 ti->n_buckets * 2 个 flex_array 给 new_ti, 并初始化
+ * 将 ti 的每个 buckets 中的每个链表中的值拷贝到 new_ti 中, new_ti->node_ver 为 ti->node_ver
+ * 注: 如果 ufid 为 true, 根据 ufid 查找 bucket 拷贝
+ */
 static struct table_instance *table_instance_expand(struct table_instance *ti,
 						    bool ufid)
 {
@@ -823,6 +913,13 @@ static void tbl_mask_array_delete_mask(struct mask_array *ma,
 }
 
 /* Remove 'mask' from the mask list, if it is not needed any more. */
+/*
+ * mask 引用计数减一或删除
+ * 如果 mask != null :
+ * mask 的引用计数减一, 如果该 mask 引用计数为 0, 从 tbl->mask_array 中删除
+ * 如果 mask 数量大于 32 并且容量是实际使用的 3 倍, 进行容量缩减.
+ *
+ */
 static void flow_mask_remove(struct flow_table *tbl, struct sw_flow_mask *mask)
 {
 	if (mask) {
@@ -849,6 +946,11 @@ static void flow_mask_remove(struct flow_table *tbl, struct sw_flow_mask *mask)
 }
 
 /* Must be called with OVS mutex held. */
+/*
+ * 1. 从 table->ti->bucket 中删除 flow->flow_table.node[table->ti->node_ver]
+ * 2. 从 table->ufid_ti->bucket 中删除 flow->ufid_table.node[table->ufid_ti->node_ver]
+ * 3. flow->mask 引用计数减一或删除
+ */
 void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
 {
 	struct table_instance *ti = ovsl_dereference(table->ti);
@@ -865,6 +967,7 @@ void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
 	/* RCU delete the mask. 'flow->mask' is not NULLed, as it should be
 	 * accessible as long as the RCU read lock is held.
 	 */
+    // flow->mask 引用计数减一或删除
 	flow_mask_remove(table, flow->mask);
 }
 
@@ -879,6 +982,7 @@ static struct sw_flow_mask *mask_alloc(void)
 	return mask;
 }
 
+//两个 mask 是否相等
 static bool mask_equal(const struct sw_flow_mask *a,
 		       const struct sw_flow_mask *b)
 {
@@ -890,6 +994,7 @@ static bool mask_equal(const struct sw_flow_mask *a,
 		&& (memcmp(a_, b_, range_n_bytes(&a->range)) == 0);
 }
 
+//遍历 tbl->mask_array 找到 mask[i] = mask 的 sw_flow_mask
 static struct sw_flow_mask *flow_mask_find(const struct flow_table *tbl,
 					   const struct sw_flow_mask *mask)
 {
@@ -909,11 +1014,21 @@ static struct sw_flow_mask *flow_mask_find(const struct flow_table *tbl,
 }
 
 /* Add 'mask' into the mask list, if it is not already there. */
+/*
+ * 将　new 加入 tbl->mask_array 中
+ *
+ * 1. 如果已经存在, 只有修改 ref_count
+ * 2. 如果不存在, 加入 tbl->mask_array 并初始化各个成员. 期间 tbl->mask_array
+ *    空间不够, 还涉及到要空间重分配
+ *
+ * TODO: 假设 mask 不多的情况下通过链表来实现更好
+ */
 static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
 			    const struct sw_flow_mask *new)
 {
 	struct sw_flow_mask *mask;
 
+    //new 是否已经存在与 tbl 中
 	mask = flow_mask_find(tbl, new);
 	if (!mask) {
 		struct mask_array *ma;
@@ -929,9 +1044,11 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
 
 		/* Add mask to mask-list. */
 		ma = ovsl_dereference(tbl->mask_array);
+        //如果 tbl->mask_array 空间已经用完, 重新分配
 		if (ma->count >= ma->max) {
 			int err;
 
+            //tbl->mask_array 空间重分配, 如果不够, 每次多分配 16 个
 			err = tbl_mask_array_realloc(tbl, ma->max +
 							  MASK_ARRAY_SIZE_MIN);
 			if (err) {
@@ -941,6 +1058,7 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
 			ma = ovsl_dereference(tbl->mask_array);
 		}
 
+        //ma->masks 中找到没有分配的 mask
 		for (i = 0; i < ma->max; i++) {
 			struct sw_flow_mask *t;
 
@@ -962,6 +1080,16 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
 }
 
 /* Must be called with OVS mutex held. */
+/*
+ * 将 flow 插入 table->ti->buckets 中的一个链表中
+ *
+ * 1. 初始化 flow->flow_table.hash
+ * 2. flow->flow_table.node[ti->node_ver] 加入 ti->buckets
+ * 3. 如果新插入流表数目导致 table->count 大于 table->ti->buckets, 对 table->ti 进行重分配
+ * 4. 如果当前 jiffies 到 table->last_rehash 超过 600 HZ, 重分配
+ * 5. 更新 table->count, table->last_rehash
+ *
+ */
 static void flow_key_insert(struct flow_table *table, struct sw_flow *flow)
 {
 	struct table_instance *new_ti = NULL;
@@ -969,14 +1097,21 @@ static void flow_key_insert(struct flow_table *table, struct sw_flow *flow)
 
 	flow->flow_table.hash = flow_hash(&flow->key, &flow->mask->range);
 	ti = ovsl_dereference(table->ti);
+    // flow->flow_table.node[ti->node_ver] 加入 ti->buckets[jhash_1word(jhash(flow->key,
+    // flow->mask->range->end - flow->mask->range->start, 0), ti->hash_seed) & (ti->n_buckets - 1)] 的链表中
 	table_instance_insert(ti, flow);
 	table->count++;
 
 	/* Expand table, if necessary, to make room. */
-	if (table->count > ti->n_buckets)
+	if (table->count > ti->n_buckets) {
+        // 分配 ti->n_buckets * 2 个 flex_array 给 new_ti, 并初始化
+        // 将 ti 的每个 buckets 中的每个链表中的值拷贝到 new_ti 中, new_ti->node_ver 为 ti->node_ver
 		new_ti = table_instance_expand(ti, false);
-	else if (time_after(jiffies, table->last_rehash + REHASH_INTERVAL))
+    } else if (time_after(jiffies, table->last_rehash + REHASH_INTERVAL)) {
+        //重新分配 ti->buckets,
+        //??? 为什么?
 		new_ti = table_instance_rehash(ti, ti->n_buckets, false);
+    }
 
 	if (new_ti) {
 		rcu_assign_pointer(table->ti, new_ti);
@@ -987,12 +1122,20 @@ static void flow_key_insert(struct flow_table *table, struct sw_flow *flow)
 }
 
 /* Must be called with OVS mutex held. */
+/*
+ * 将 flow 插入 table->ufid_ti->buckets 中的一个链表中
+ *
+ * 1. 将 flow->ufid_table.node[table->ufid_ti->node_ver] 加入 table->ufid_ti->buckets[jhash_1word(table->ufid_ti->hash_seed, flow->ufid_table.hash)] 中
+ * 2. 如果 table->ufid_count 大于 table->ufid_ti->n_buckets 重分配
+ *
+ */
 static void flow_ufid_insert(struct flow_table *table, struct sw_flow *flow)
 {
 	struct table_instance *ti;
 
 	flow->ufid_table.hash = ufid_hash(&flow->id);
 	ti = ovsl_dereference(table->ufid_ti);
+    //将 flow->ufid_table.node[ti->node_ver] 加入 ti->buckets[jhash_1word(ti->hash_seed, flow->ufid_table.hash)] 中
 	ufid_table_instance_insert(ti, flow);
 	table->ufid_count++;
 
@@ -1000,6 +1143,11 @@ static void flow_ufid_insert(struct flow_table *table, struct sw_flow *flow)
 	if (table->ufid_count > ti->n_buckets) {
 		struct table_instance *new_ti;
 
+        /*
+        * 分配 ti->n_buckets * 2 个 flex_array 给 new_ti, 并初始化
+        * 将 ti 的每个 buckets 中的每个链表中的值拷贝到 new_ti 中, new_ti->node_ver 为 ti->node_ver
+        * 注: 如果 ufid 为 true, 根据 ufid 查找 bucket 拷贝
+        */
 		new_ti = table_instance_expand(ti, true);
 		if (new_ti) {
 			rcu_assign_pointer(table->ufid_ti, new_ti);
@@ -1009,17 +1157,29 @@ static void flow_ufid_insert(struct flow_table *table, struct sw_flow *flow)
 }
 
 /* Must be called with OVS mutex held. */
+/*
+ *
+ * 1. 将 mask 加入 table->mask_array 中
+ * 2. 将 flow->flow_table->node[table->ti->node_ver] 插入 table->ti->buckets 中的一个链表中
+ * 3. 如果 flow->id 存在, 将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 table->ufid_ti->buckets 中的一个链表中
+ *
+ */
 int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow,
 			const struct sw_flow_mask *mask)
 {
 	int err;
 
+    // 将 mask 加入 tbl->mask_array 中
 	err = flow_mask_insert(table, flow, mask);
 	if (err)
 		return err;
+
+    // 将 flow->flow_table->node[table->ti->node_ver] 插入 table->ti->buckets 中的一个链表中
 	flow_key_insert(table, flow);
-	if (ovs_identifier_is_ufid(&flow->id))
+	if (ovs_identifier_is_ufid(&flow->id)) {
+        //将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 table->ufid_ti->buckets 中的一个链表中
 		flow_ufid_insert(table, flow);
+    }
 
 	return 0;
 }

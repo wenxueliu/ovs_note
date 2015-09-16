@@ -735,6 +735,10 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 	return key_extract(skb, key);
 }
 
+/*
+ * 解析 attr 保持在 a 中
+ * 从 skb 提取包信息到 key
+ */
 int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 				   struct sk_buff *skb,
 				   struct sw_flow_key *key, bool log)
@@ -742,9 +746,14 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 	int err;
 
 	/* Extract metadata from netlink attributes. */
+	//memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
+	//key->phy.in_port = DP_MAX_PORTS;
 	err = ovs_nla_get_flow_metadata(attr, key, log);
 	if (err)
 		return err;
 
+    /*
+     * 从 skb 提取包信息到 key
+     */
 	return key_extract(skb, key);
 }
