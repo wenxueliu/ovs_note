@@ -1,3 +1,24 @@
+##基本概念
+
+参考 ofproto-provider.h
+
+###ofproto
+
+交换机
+
+###ofport
+
+端口
+
+###rule
+
+流表
+
+###ofgroup
+
+组表
+
+
 ovs-vsctl set Open_vSwitch . other-config:n-handler-threads=1 other-config:n-revalidator-threads=1
 ovs-vsctl --no-wait set Open_vSwitch .  other_config:n-handler-threads=1
 ovs-vsctl get bridge br0  other-config:flow-eviction-threshold
