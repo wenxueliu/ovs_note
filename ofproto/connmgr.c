@@ -190,6 +190,7 @@ static struct ofservice *ofservice_lookup(struct connmgr *,
 
 /* Connection manager for an OpenFlow switch. */
 struct connmgr {
+    //交换机
     struct ofproto *ofproto;
     char *name;
     char *local_port_name;
@@ -198,17 +199,17 @@ struct connmgr {
     struct hmap controllers;     /* All OFCONN_PRIMARY controllers. */
     struct ovs_list all_conns;   /* All controllers. */
     uint64_t master_election_id; /* monotonically increasing sequence number
-                                  * for master election */
-    bool master_election_id_defined;
+                                  * for master election , defautl 0*/
+    bool master_election_id_defined; /* default false */
 
     /* OpenFlow listeners. */
     struct hmap services;       /* Contains "struct ofservice"s. */
     struct pvconn **snoops;
-    size_t n_snoops;
+    size_t n_snoops;            /* the number of snoops */
 
     /* Fail open. */
     struct fail_open *fail_open;
-    enum ofproto_fail_mode fail_mode;
+    enum ofproto_fail_mode fail_mode; /* default OFPROTO_FAIL_SECURE */
 
     /* In-band control. */
     struct in_band *in_band;
@@ -232,6 +233,7 @@ connmgr_create(struct ofproto *ofproto,
 {
     struct connmgr *mgr;
 
+    //没有对 mgr 的内存清零
     mgr = xmalloc(sizeof *mgr);
     mgr->ofproto = ofproto;
     mgr->name = xstrdup(name);
@@ -554,8 +556,7 @@ connmgr_set_controllers(struct connmgr *mgr,
      * cover a smaller amount of code, if that yielded some benefit. */
     ovs_mutex_lock(&ofproto_mutex);
 
-    /* Create newly configured controllers and services.
-     * Create a name to ofproto_controller mapping in 'new_controllers'. */
+    /* Create newly configured controllers and services.  * Create a name to ofproto_controller mapping in 'new_controllers'. */
     shash_init(&new_controllers);
     for (i = 0; i < n_controllers; i++) {
         const struct ofproto_controller *c = &controllers[i];

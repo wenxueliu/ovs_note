@@ -1684,6 +1684,12 @@ ofproto_run(struct ofproto *p)
         VLOG_ERR_RL(&rl, "%s: run failed (%s)", p->name, ovs_strerror(error));
     }
 
+    /*
+     * Executes all "rule_execute" operations queued up in ofproto->rule_executes,
+     * by passing them to the ofproto provider. 
+     *
+     * ofproto/ofproto.c
+     */
     run_rule_executes(p);
 
     /* Restore the eviction group heap invariant occasionally. */
@@ -1765,6 +1771,7 @@ ofproto_run(struct ofproto *p)
         p->change_seq = new_seq;
     }
 
+    //与控制器交换
     connmgr_run(p->connmgr, handle_openflow);
 
     return error;
