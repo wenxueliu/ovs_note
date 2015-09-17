@@ -610,10 +610,10 @@ out:
 
 
 /*
- * 给 packet 分配 NET_IP_ALIGN + nla_len(a[OVS_PACKET_ATTR_PACKET]) 的空间
- * 初始化 a[OVS_PACKET_ATTR_PACKET]
- *
- *
+ * 用 info->attrs[OVS_PACKET_ATTR_PACKET] 构造一个 skb 数据包 packet
+ * 用 info->attrs[OVS_PACKET_ATTR_KEY] 和 packet 初始化一条 ovs_flow_key 类型 flow->key 的各个字段
+ * 用 info->attrs[OVS_PACKET_ATTR_ACTIONS] 初始化 flow->sf_acts
+ * 根据 flow->sf_acts 中的 actions 对 packet 进行修改, 然后发送到 flow->sf_acts 中指定的出口
  *
  */
 static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
@@ -644,9 +644,10 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
     //保留 NET_IP_ALIGN 大小的空间在 head, 即 packet->data += NET_IP_ALIGN
 	skb_reserve(packet, NET_IP_ALIGN);
 
-    //将 a[OVS_PACKET_ATTR_PACKET] 拷贝到packet->data 开始的地方
+    //将 a[OVS_PACKET_ATTR_PACKET] 拷贝到 packet->data 开始的地方
 	nla_memcpy(__skb_put(packet, len), a[OVS_PACKET_ATTR_PACKET], len);
 
+    //a[OVS_PACKET_ATTR_PACKET] 包含包的头信息
 	skb_reset_mac_header(packet);
 	eth = eth_hdr(packet);
 
@@ -665,7 +666,7 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	if (IS_ERR(flow))
 		goto err_kfree_skb;
 
-    //从 packet 中提取包信息到 flow->key
+    //解析 a[OVS_PACKET_ATTR_KEY] 填充 flow->key 物理链路层的属性, 解析 packet 填充 flow->key 数据链路层以上的属性
 	err = ovs_flow_key_extract_userspace(a[OVS_PACKET_ATTR_KEY], packet,
 					     &flow->key, log);
 	if (err)
@@ -679,6 +680,7 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 
 	rcu_assign_pointer(flow->sf_acts, acts);
 	OVS_CB(packet)->egress_tun_info = NULL;
+    //来源于 a[OVS_PACKET_ATTR_KEY]
 	packet->priority = flow->key.phy.priority;
 	packet->mark = flow->key.phy.skb_mark;
 
@@ -700,7 +702,7 @@ static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
 	sf_acts = rcu_dereference(flow->sf_acts);
 
 	local_bh_disable();
-    //
+    // 根据 sf_acts 中的 actions 对 packet 进行修改, 然后发送到 sf_acts 中指定的出口
 	err = ovs_execute_actions(dp, packet, sf_acts, &flow->key);
 	local_bh_enable();
 	rcu_read_unlock();

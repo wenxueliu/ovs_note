@@ -458,6 +458,19 @@ invalid:
  *      on output, then just past the IP header, if one is present and
  *      of a correct length, otherwise the same as skb->network_header.
  *      For other key->eth.type values it is left untouched.
+ *
+ *  从 skb 中提取包信息初始化 key
+ *  key->eth.src
+ *  key->eth.dst
+ *  key->ipv4.addr.src
+ *  key->ipv4.addr.dst
+ *  key->ip.proto
+ *  key->ip.tos
+ *  key->ip.ttl
+ *  key->tp.src
+ *  key->tp.dst
+ *  key->tp.flags
+ *
  */
 static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 {
@@ -736,8 +749,7 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
 }
 
 /*
- * 解析 attr 保持在 a 中
- * 从 skb 提取包信息到 key
+ * 解析 attr 填充 key 的物理链路层属性, 解析 skb 填充 key 数据链路层以上的属性
  */
 int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 				   struct sk_buff *skb,
@@ -746,8 +758,16 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
 	int err;
 
 	/* Extract metadata from netlink attributes. */
-	//memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
-	//key->phy.in_port = DP_MAX_PORTS;
+	// memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
+	// key->phy.in_port = DP_MAX_PORTS(默认);
+    // key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    // key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    // key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    // key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    // key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    // key->tun_key = ipv4_tun_from_nlattr()
+    // 这里的属性是在 skb 中不包含的, 因此都是物理链路层的信息, 而 skb
+    // 只包含数据链路层的信息
 	err = ovs_nla_get_flow_metadata(attr, key, log);
 	if (err)
 		return err;

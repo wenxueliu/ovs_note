@@ -878,6 +878,22 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
 }
 
 /* Execute a list of actions against 'skb'. */
+/*
+ *
+ *  遍历 attr = key->sf_acts->actions,  判断每个 nla_type(attr)
+ *  OVS_ACTION_ATTR_OUTPUT          : do_output(dp, out_skb, nla_get_u32(a));
+ *  OVS_ACTION_ATTR_USERSPACE       : output_userspace(dp, skb, key, a, attr, len);
+ *  OVS_ACTION_ATTR_HASH            : execute_hash(skb, key, a);
+ *  OVS_ACTION_ATTR_PUSH_MPLS       : push_mpls(skb, key, nla_data(a));
+ *  OVS_ACTION_ATTR_POP_MPLS        : pop_mpls(skb, key, nla_get_be16(a));
+ *  OVS_ACTION_ATTR_PUSH_VLAN       : push_vlan(skb, key, nla_data(a));
+ *  OVS_ACTION_ATTR_POP_VLAN        : pop_vlan(skb, key);
+ *  OVS_ACTION_ATTR_RECIRC          : execute_recirc(dp, skb, key, a, rem);
+ *  OVS_ACTION_ATTR_SET             : execute_set_action(skb, key, nla_data(a));
+ *  OVS_ACTION_ATTR_SET_MASKED      : execute_masked_set_action(skb, key, nla_data(a));
+ *  OVS_ACTION_ATTR_SET_TO_MASKED   : execute_masked_set_action(skb, key, nla_data(a));
+ *  OVS_ACTION_ATTR_SAMPLE:         : sample(dp, skb, key, a, attr, len);
+ */
 static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			      struct sw_flow_key *key,
 			      const struct nlattr *attr, int len)

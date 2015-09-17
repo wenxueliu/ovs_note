@@ -1488,7 +1488,17 @@ u32 ovs_nla_get_ufid_flags(const struct nlattr *attr)
 /*
  *  1. 解析 attr 保持在 a 中
  *  2. key 初始化 match.key
- *  3. 用 a 根据 attrs 中指定的类型初始化 match
+ *  3. 用 a 根据 attrs 中指定的类型初始化 match->key
+ *  返回 0
+ *
+ *  memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
+ *  key->phy.in_port = DP_MAX_PORTS;
+ *  key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+ *  key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+ *  key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+ *  key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+ *  key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+ *  key->tun_key = ipv4_tun_from_nlattr()
  */
 int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 			      struct sw_flow_key *key,
@@ -1499,7 +1509,7 @@ int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 	u64 attrs = 0;
 	int err;
 
-    //解析 attr 保持在 a 中
+    //解析 attr 保持在 a 中, 已经解析的属性放在 attrs
 	err = parse_flow_nlattrs(attr, a, &attrs, log);
 	if (err)
 		return -EINVAL;
@@ -1510,7 +1520,13 @@ int ovs_nla_get_flow_metadata(const struct nlattr *attr,
 	memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
 	key->phy.in_port = DP_MAX_PORTS;
 
-    //用 a 根据 attrs 中指定的类型初始化 match
+    //用 a 根据 attrs 中指定的类型初始化 match-key
+    // match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    // match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    // match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    // match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    // match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    // match->key->tun_key = ipv4_tun_from_nlattr()
 	return metadata_from_nlattrs(&match, &attrs, a, false, log);
 }
 
