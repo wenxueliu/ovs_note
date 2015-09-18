@@ -22,6 +22,7 @@
 #include "netdev-dpdk.h"
 #include "util.h"
 
+//由于 size = 0, data = NULL, base = NULL 没有初始化,　不可直接调用, 而是通过 ofbuf_new()
 static void
 ofpbuf_init__(struct ofpbuf *b, size_t allocated, enum ofpbuf_source source)
 {
@@ -136,6 +137,17 @@ ofpbuf_reinit(struct ofpbuf *b, size_t size)
 
 /* Creates and returns a new ofpbuf with an initial capacity of 'size'
  * bytes. */
+/*
+ * void *p = (void *)xmalloc(size)
+ * b->base = p
+ * b->data = p
+ * b->size = 0
+ * b->allocated = size
+ * b->header = NULL
+ * b->msg = NULL
+ * b->list_node = OVS_LIST_POISON
+ * b->source = OFPBUF_MALLOC
+ */
 struct ofpbuf *
 ofpbuf_new(size_t size)
 {
@@ -220,6 +232,16 @@ ofpbuf_copy__(struct ofpbuf *b, uint8_t *new_base,
 
 /* Reallocates 'b' so that it has exactly 'new_headroom' and 'new_tailroom'
  * bytes of headroom and tailroom, respectively. */
+/*
+ * new_b = xrealloc(b->base, new_headroom + b->size + new_tailroom)
+ * new_b->allocated = new_headroom + b->size + new_tailroom
+ * new_b->data = new_b + new_headroom
+ *
+ * b->header = (char *) new_data + (char *) b->header - (char *) b->data
+ * b->msg = (char *) new_data + (char *) b->msg - (char *) b->data;
+ * b->data = new_data
+ */
+//TODO 仔细分析各种情况
 static void
 ofpbuf_resize__(struct ofpbuf *b, size_t new_headroom, size_t new_tailroom)
 {

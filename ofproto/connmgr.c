@@ -60,6 +60,7 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 struct ofconn {
 /* Configuration that persists from one connection to the next. */
 
+    //list 元素, connmgr->all_conns 的成员
     struct ovs_list node;       /* In struct connmgr's "all_conns" list. */
     struct hmap_node hmap_node; /* In struct connmgr's "controllers" map. */
 
@@ -72,17 +73,18 @@ struct ofconn {
 /* State that should be cleared from one connection to the next. */
 
     /* OpenFlow state. */
-    enum ofp12_controller_role role;           /* Role. */
-    enum ofputil_protocol protocol; /* Current protocol variant. */
-    enum nx_packet_in_format packet_in_format; /* OFPT_PACKET_IN format. */
+    enum ofp12_controller_role role;                /* Role. default OFPCR12_ROLE_EQUAL*/
+    enum ofputil_protocol protocol;                 /* Current protocol variant. default OFPUTIL_P_NONE*/
+    enum nx_packet_in_format packet_in_format;      /* OFPT_PACKET_IN format. default NXPIF_OPENFLOW10*/
 
     /* OFPT_PACKET_IN related data. */
-    struct rconn_packet_counter *packet_in_counter; /* # queued on 'rconn'. */
+    struct rconn_packet_counter *packet_in_counter; /* # queued on 'rconn'. default {.ref_cnt = 1, .n_bytes=0, .n_packets=0 }*/
 #define N_SCHEDULERS 2
     struct pinsched *schedulers[N_SCHEDULERS];
-    struct pktbuf *pktbuf;         /* OpenFlow packet buffers. */
-    int miss_send_len;             /* Bytes to send of buffered packets. */
-    uint16_t controller_id;     /* Connection controller ID. */
+    struct pktbuf *pktbuf;                          /* OpenFlow packet buffers. */
+    /* 如果 table_miss 发送给 controller 的长度 ofconn->type == OFCONN_PRIMARY ? OFP_DEFAULT_MISS_SEND_LEN : 0*/
+    int miss_send_len;                              /* Bytes to send of buffered packets. */
+    uint16_t controller_id;                         /* Connection controller ID. default 0*/
 
     /* Number of OpenFlow messages queued on 'rconn' as replies to OpenFlow
      * requests, and the maximum number before we stop reading OpenFlow
@@ -94,14 +96,14 @@ struct ofconn {
      *
      * A 1-bit enables sending an asynchronous message for one possible reason
      * that the message might be generated, a 0-bit disables it. */
-    uint32_t master_async_config[OAM_N_TYPES]; /* master, other */
-    uint32_t slave_async_config[OAM_N_TYPES];  /* slave */
+    uint32_t master_async_config[OAM_N_TYPES];      /* master, other */
+    uint32_t slave_async_config[OAM_N_TYPES];       /* slave */
 
     /* Flow table operation logging. */
-    int n_add, n_delete, n_modify; /* Number of unreported ops of each kind. */
-    long long int first_op, last_op; /* Range of times for unreported ops. */
-    long long int next_op_report;    /* Time to report ops, or LLONG_MAX. */
-    long long int op_backoff;        /* Earliest time to report ops again. */
+    int n_add, n_delete, n_modify;                  /* Number of unreported ops of each kind. defautl 0*/
+    long long int first_op, last_op;                /* Range of times for unreported ops. default LLONG_MIN */
+    long long int next_op_report;                   /* Time to report ops, default LLONG_MAX. */
+    long long int op_backoff;                       /* Earliest time to report ops again. defautl LLONG_MIN */
 
 /* Flow monitors (e.g. NXST_FLOW_MONITOR). */
 
@@ -1262,6 +1264,8 @@ ofconn_create(struct connmgr *mgr, struct rconn *rconn, enum ofconn_type type,
 
     hmap_init(&ofconn->bundles);
 
+    //TODO:ofconn->schedulers 没有初始化, 即 ofconn->schedulers[0] = NULL, ofconn->schedulers[1] = NULL;
+    //TODO:ofconn->pktbuf = NULL 而不是 ofconn->pktbuf = pktbuf_create();
     ofconn_flush(ofconn);
 
     return ofconn;
@@ -1269,6 +1273,7 @@ ofconn_create(struct connmgr *mgr, struct rconn *rconn, enum ofconn_type type,
 
 /* Clears all of the state in 'ofconn' that should not persist from one
  * connection to the next. */
+//TODO:没有清除 bundles
 static void
 ofconn_flush(struct ofconn *ofconn)
     OVS_REQUIRES(ofproto_mutex)
@@ -1276,6 +1281,7 @@ ofconn_flush(struct ofconn *ofconn)
     struct ofmonitor *monitor, *next_monitor;
     int i;
 
+    // 记录日志, 初始化 ofconn->next_op_report = LLONG_MAX
     ofconn_log_flow_mods(ofconn);
 
     ofconn->role = OFPCR12_ROLE_EQUAL;
@@ -1477,6 +1483,9 @@ ofconn_wait(struct ofconn *ofconn)
     }
 }
 
+/*
+ * 记录日志, 初始化 ofconn->next_op_report = LLONG_MAX
+ */
 static void
 ofconn_log_flow_mods(struct ofconn *ofconn)
 {

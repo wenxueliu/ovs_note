@@ -735,6 +735,11 @@ rconn_recv_wait(struct rconn *rc)
     ovs_mutex_unlock(&rc->mutex);
 }
 
+/*
+ * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员, b->list_node 加入 rc->txq 链表尾
+ * 否则 直接释放 b 的内存
+ *
+ */
 static int
 rconn_send__(struct rconn *rc, struct ofpbuf *b,
            struct rconn_packet_counter *counter)
@@ -1022,6 +1027,9 @@ rconn_packet_counter_create(void)
     return c;
 }
 
+/*
+ * c->ref_cnt 引用计数减一, 如果 c->ref_cnt 和 c->n_packets 为 0, 释放 c
+ */
 void
 rconn_packet_counter_destroy(struct rconn_packet_counter *c)
 {
@@ -1123,6 +1131,7 @@ try_send(struct rconn *rc)
     list_remove(&msg->list_node);
     msg->header = NULL;
 
+    //发送失败, 将 msg 重新加入 rc->txq 头
     retval = vconn_send(rc->vconn, msg);
     if (retval) {
         msg->header = counter;
@@ -1134,6 +1143,8 @@ try_send(struct rconn *rc)
         return retval;
     }
     COVERAGE_INC(rconn_sent);
+    //发送成功, 减少 conter 貌似这里的意义不大
+    //counter 应该一直为 NULL
     if (counter) {
         rconn_packet_counter_dec(counter, n_bytes);
     }
@@ -1289,6 +1300,7 @@ close_monitor(struct rconn *rc, size_t idx, int retval)
     rc->monitors[idx] = rc->monitors[--rc->n_monitors];
 }
 
+//将 b 发送给所有的 rc->monitors
 static void
 copy_to_monitor(struct rconn *rc, const struct ofpbuf *b)
     OVS_REQUIRES(rc->mutex)
