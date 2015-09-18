@@ -1,6 +1,9 @@
 
 ## 控制器连接管理
 
+* PACKET_IN 默认发送长度是 128 字节
+* Slave 角色只能得到端口变化状态
+
 ###数据结构
 
 /* Connection manager for an OpenFlow switch. */
@@ -38,6 +41,7 @@ struct connmgr {
 struct ofconn {
 /* Configuration that persists from one connection to the next. */
 
+    //list 元素, connmgr->all_conns 的成员
     struct ovs_list node;       /* In struct connmgr's "all_conns" list. */
     struct hmap_node hmap_node; /* In struct connmgr's "controllers" map. */
 
@@ -50,15 +54,16 @@ struct ofconn {
 /* State that should be cleared from one connection to the next. */
 
     /* OpenFlow state. */
-    enum ofp12_controller_role role;           /* Role. */
-    enum ofputil_protocol protocol; /* Current protocol variant. */
-    enum nx_packet_in_format packet_in_format; /* OFPT_PACKET_IN format. */
+    enum ofp12_controller_role role;                /* Role.  default OFPCR12_ROLE_EQUAL*/
+    enum ofputil_protocol protocol;                 /* Current protocol variant. default OFPUTIL_P_NONE*/
+    enum nx_packet_in_format packet_in_format;      /* OFPT_PACKET_IN format. default NXPIF_OPENFLOW10*/
 
     /* OFPT_PACKET_IN related data. */
     struct rconn_packet_counter *packet_in_counter; /* # queued on 'rconn'. */
 #define N_SCHEDULERS 2
     struct pinsched *schedulers[N_SCHEDULERS];
     struct pktbuf *pktbuf;         /* OpenFlow packet buffers. */
+    /* 如果 table_miss 发送给 controller 的长度 ofconn->type == OFCONN_PRIMARY ? OFP_DEFAULT_MISS_SEND_LEN : 0*/
     int miss_send_len;             /* Bytes to send of buffered packets. */
     uint16_t controller_id;     /* Connection controller ID. */
 
@@ -78,7 +83,7 @@ struct ofconn {
     /* Flow table operation logging. */
     int n_add, n_delete, n_modify; /* Number of unreported ops of each kind. */
     long long int first_op, last_op; /* Range of times for unreported ops. */
-    long long int next_op_report;    /* Time to report ops, or LLONG_MAX. */
+    long long int next_op_report;    /* Time to report ops, default LLONG_MAX. */
     long long int op_backoff;        /* Earliest time to report ops again. */
 
 /* Flow monitors (e.g. NXST_FLOW_MONITOR). */
@@ -368,8 +373,7 @@ struct pvconn_class {
      * full connection name provided by the user, e.g. "ptcp:1234".  This name
      * is useful for error messages but must not be modified.
      *
-     * 'allowed_versions' is the OpenFlow protocol versions that may
-     * be negotiated for a session.
+     * 'allowed_versions' is the OpenFlow protocol versions that may * be negotiated for a session.
      *
      * 'suffix' is a copy of 'name' following the colon and may be modified.
      * 'dscp' is the DSCP value that the new connection should use in the IP
@@ -637,3 +641,279 @@ enum state {
     S_IDLE = 1 << 4
     S_DISCONNECTED = 1 << 5
 }
+
+###Openflow 连接
+
+
+static struct ofconn * ofconn_create(struct connmgr *mgr, struct rconn *rconn, enum ofconn_type type, bool enable_async_msgs)
+
+    为 ofconn 分配内存, 并全部初始化为 0
+    ofconn->connmgr 指向 mgr
+    ofconn 加入 mgr->all_conns
+    初始化 ofconn->monitors, ofconn->updates, ofconn->bundles
+
+注: ofconn->hmap_node = NULL
+    ofconn->band      = 0
+    ofconn->pktbuf    = NULL
+    ofconn->schedulers 没有初始化, 即 ofconn->schedulers[0] = NULL, ofconn->schedulers[1] = NULL;
+    ofconn->pktbuf = NULL 而不是 ofconn->pktbuf = pktbuf_create();
+    ofconn->monitor_paused = 0
+
+static void ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg,
+            struct rconn_packet_counter *counter)
+
+
+    rconn_send(ofconn->rconn, msg, counter);
+    如果 ofconn->rconn 处于连接状态, 将 msg 发送给 ofconn->rconn->monitors 的每一个成员, msg->list_node 
+        加入 ofconn->rconn->txq 链表尾, 如果ofconn->rconn->txq 只有 msg->list_node 调用 vconn_send(rc->vconn, msg)
+
+    否则 直接释放 b 的内存
+
+
+
+###连接监控
+
+/* Flow monitors (NXST_FLOW_MONITOR). */
+
+/* A counter incremented when something significant happens to an OpenFlow
+ * rule.
+ *
+ *     - When a rule is added, its 'add_seqno' and 'modify_seqno' are set to
+ *       the current value (which is then incremented).
+ *
+ *     - When a rule is modified, its 'modify_seqno' is set to the current
+ *       value (which is then incremented).
+ *
+ * Thus, by comparing an old value of monitor_seqno against a rule's
+ * 'add_seqno', one can tell whether the rule was added before or after the old
+ * value was read, and similarly for 'modify_seqno'.
+ *
+ * 32 bits should normally be sufficient (and would be nice, to save space in
+ * each rule) but then we'd have to have some special cases for wraparound.
+ *
+ * We initialize monitor_seqno to 1 to allow 0 to be used as an invalid
+ * value. */
+
+/* A flow monitor managed by NXST_FLOW_MONITOR and related requests. */
+struct ofmonitor {
+    struct ofconn *ofconn;      /* Owning 'ofconn'. */
+    struct hmap_node ofconn_node; /* In ofconn's 'monitors' hmap. */
+    uint32_t id;                    //唯一标记一个 ofmonitor 对象
+
+    enum nx_flow_monitor_flags flags;
+
+    /* Matching. */
+    ofp_port_t out_port;
+    uint8_t table_id;
+    struct minimatch match;
+};
+
+/* 'flags' bits in struct nx_flow_monitor_request. */
+enum nx_flow_monitor_flags {
+    /* When to send updates. */
+    NXFMF_INITIAL = 1 << 0,     /* Initially matching flows. */
+    NXFMF_ADD = 1 << 1,         /* New matching flows as they are added. */
+    NXFMF_DELETE = 1 << 2,      /* Old matching flows as they are removed. */
+    NXFMF_MODIFY = 1 << 3,      /* Matching flows as they are changed. */
+
+    /* What to include in updates. */
+    NXFMF_ACTIONS = 1 << 4,     /* If set, actions are included. */
+    NXFMF_OWN = 1 << 5,         /* If set, include own changes in full. */
+};
+
+/* Compressed match. */
+
+/* A sparse representation of a "struct match".
+ *
+ * 'flows' is used for allocating both 'flow' and 'mask' with one
+ * miniflow_alloc() call.
+ *
+ * There are two invariants:
+ *
+ *   - The same invariant as "struct match", that is, a 1-bit in the 'flow'
+ *     must correspond to a 1-bit in 'mask'.
+ *
+ *   - 'flow' and 'mask' have the same 'map'.  This implies that 'flow' and
+ *     'mask' have the same part of "struct flow" at the same offset into
+ *     'values', which makes minimatch_matches_flow() faster.
+ */
+struct minimatch {
+    union {
+        struct {
+            struct miniflow *flow;
+            struct minimask *mask;
+        };
+        struct miniflow *flows[2];
+    };
+};
+
+/* A sparse representation of a "struct flow".
+ *
+ * A "struct flow" is fairly large and tends to be mostly zeros.  Sparse
+ * representation has two advantages.  First, it saves memory and, more
+ * importantly, minimizes the number of accessed cache lines.  Second, it saves
+ * time when the goal is to iterate over only the nonzero parts of the struct.
+ *
+ * The map members hold one bit for each uint64_t in a "struct flow".  Each
+ * 0-bit indicates that the corresponding uint64_t is zero, each 1-bit that it
+ * *may* be nonzero (see below how this applies to minimasks).
+ *
+ * The values indicated by 'tnl_map' and 'pkt_map' always follow the miniflow
+ * in memory.  The user of the miniflow is responsible for always having enough
+ * storage after the struct miniflow corresponding to the number of 1-bits in
+ * maps.
+ *
+ * Elements in values array are allowed to be zero.  This is useful for "struct
+ * minimatch", for which ensuring that the miniflow and minimask members have
+ * same maps allows optimization.  This allowance applies only to a miniflow
+ * that is not a mask.  That is, a minimask may NOT have zero elements in its
+ * values.
+ *
+ * A miniflow is always dynamically allocated so that the maps are followed by
+ * at least as many elements as there are 1-bits in maps. */
+struct miniflow {
+    uint64_t tnl_map;
+    uint64_t pkt_map;
+    /* Followed by:
+     *     uint64_t values[n];
+     * where 'n' is miniflow_n_values(miniflow). */
+};
+
+/* Abstract nx_flow_monitor_request. */
+struct ofputil_flow_monitor_request {
+    uint32_t id;
+    enum nx_flow_monitor_flags flags;
+    ofp_port_t out_port;
+    uint8_t table_id;
+    struct match match;
+};
+
+**ofmonitor 中 id 唯一标记一个 ofmonitor 对象**
+
+enum ofperr ofmonitor_create(const struct ofputil_flow_monitor_request *request,
+                 struct ofconn *ofconn, struct ofmonitor **monitorp)
+
+    用 参数初始化 ofmonitor 对象 m
+    monitorp 指向初始化后的 ofmonitor 对象 m
+
+void ofmonitor_destroy(struct ofmonitor *m)
+
+    如果 m 不为 NULL, 释放 m->match-flow 所指内存, 将 m 从它所属的 ofconn 中删除, 释放 m 内存
+
+void ofmonitor_report(struct connmgr *mgr, struct rule *rule,
+                 enum nx_flow_update_event event,
+                 enum ofp_flow_removed_reason reason,
+                 const struct ofconn *abbrev_ofconn, ovs_be32 abbrev_xid,
+                 const struct rule_actions *old_actions)
+
+    如果 event 是 ADD, rule->add_seqno 和 rule->modify_seqno 都加 1
+    如果 event 是 MODIFY, rule->modify_seqno 都加 1
+    如果 event 是 MODIFY, rule->modify_seqno 都加 1
+
+
+
+
+###链路数据包缓存
+
+headroom 保持　struct rconn_packet_counter 统计信息
+
+/* Buffer for holding arbitrary data.  An ofpbuf is automatically reallocated
+ * as necessary if it grows too large for the available memory.
+ *
+ * 'header' and 'msg' conventions:
+ *
+ * OpenFlow messages: 'header' points to the start of the OpenFlow
+ *    header, while 'msg' is the OpenFlow msg bofy.
+ *    When parsing, the 'data' will move past these, as data is being
+ *    pulled from the OpenFlow message.
+ *
+ *    Caution: buffer manipulation of 'struct ofpbuf' must always update
+ *             the 'header' and 'msg' pointers.
+ *
+ *
+ * Actions: When encoding OVS action lists, the 'header' is used
+ *    as a pointer to the beginning of the current action (see ofpact_put()).
+ *
+ * rconn: Reuses 'header' as a private pointer while queuing.
+ *
+ * opfbuf 将内核的 skb 数据结构搬到的用户空间.
+ */
+struct ofpbuf {
+    void *base;                 /* First byte of allocated space. */
+    void *data;                 /* First byte actually in use. */
+    uint32_t size;              /* Number of bytes in use. */
+    uint32_t allocated;         /* Number of bytes allocated. */
+
+    void *header;               /* OpenFlow header. */
+    void *msg;                  /* message's body */
+    struct ovs_list list_node;  /* Private list element for use by owner. */
+    enum ofpbuf_source source;  /* Source of memory allocated as 'base'. */
+};
+
+enum OVS_PACKED_ENUM ofpbuf_source {
+    OFPBUF_MALLOC,              /* Obtained via malloc(). */
+    OFPBUF_STACK,               /* Un-movable stack space or static buffer. */
+    OFPBUF_STUB,                /* Starts on stack, may expand into heap. */
+};
+
+/* Creates and returns a new ofpbuf with an initial capacity of 'size'
+ * bytes.
+ */
+struct ofpbuf * ofpbuf_new(size_t size)
+
+    struct ofpbuf *b = new malloc(sizeof *b)
+    void *p = (void *)xmalloc(size)
+    b->base = p
+    b->data = p
+    b->size = 0
+    b->allocated = size
+    b->header = NULL
+    b->msg = NULL
+    b->list_node = OVS_LIST_POISON
+    b->source = OFPBUF_MALLOC
+
+struct ofpbuf * ofpbuf_new_with_headroom(size_t size, size_t headroom)
+
+    ofpbuf_new(size+headroom)
+    b->data = (char*)b->data + size;
+
+static inline void *ofpbuf_end(const struct ofpbuf *b)
+
+    return (char *) b->base + b->allocated;
+
+static inline void *ofpbuf_tail(const struct ofpbuf *b)
+
+    return (char *) b->data + b->size;
+
+static inline size_t ofpbuf_headroom(const struct ofpbuf *b)
+
+    return (char*)b->data - (char*)b->base;
+
+void ofpbuf_reserve(struct ofpbuf *b, size_t size)
+
+    //保证有足够内存的接触上
+    b->data = (char*)b->data + size;
+
+void *ofpbuf_put(struct ofpbuf *b, const void *p, size_t size)
+
+    将 p　开始的的　size 数据放在 b->tail 后面
+
+struct ofpbuf *ofpbuf_clone_data_with_headroom(const void *data, size_t size, size_t headroom)
+
+    struct ofpbuf *b = ofpbuf_new(size + headroom);
+    p->data = p->data + headroom
+    memncpy(p->data, data, size)
+    return b
+
+struct ofpbuf *ofpbuf_clone_with_headroom(const struct ofpbuf *buffer, size_t headroom)
+
+    struct ofpbuf *b = ofpbuf_new(size + headroom);
+    p->data = p->data + headroom
+    memncpy(p->data, data, size)
+    b->header = b->header + b->data - p->data
+    b->msg = p->msg
+    return b
+
+struct ofpbuf *ofpbuf_clone(const struct ofpbuf *buffer)
+
+    ofpbuf_clone_with_headroom(buffer, 0)
