@@ -338,6 +338,20 @@ struct packet {
     ofp_port_t in_port;
 };
 
+struct ofproto_controller {
+    char *target;               /* e.g. "tcp:127.0.0.1" */
+    int max_backoff;            /* Maximum reconnection backoff, in seconds. */
+    int probe_interval;         /* Max idle time before probing, in seconds. */
+    enum ofproto_band band;     /* In-band or out-of-band? */
+    bool enable_async_msgs;     /* Initially enable asynchronous messages? */
+
+    /* OpenFlow packet-in rate-limiting. */
+    int rate_limit;             /* Max packet-in rate in packets per second. */
+    int burst_limit;            /* Limit on accumulating packet credits. */
+
+    uint8_t dscp;               /* DSCP value for controller connection. */
+};
+
 ####services
 
 /* A listener for incoming OpenFlow "service" connections. */
@@ -612,7 +626,8 @@ enum ofproto_packet_in_miss_type {
 
 
 
-##重连
+##稳定的连接
+
 
 /* The connection states have the following meanings:
  *
@@ -642,6 +657,104 @@ enum state {
     S_DISCONNECTED = 1 << 5
 }
 
+rconn 是 reliable connect 的缩写
+
+struct rconn * rconn_create(int probe_interval, int max_backoff, uint8_t dscp, uint32_t allowed_versions)
+
+    probe_interval: 如果 probe_interval 没有收到对端的消息发送 echo request, 如果再过 probe_interval 没有收到对端消息, 重连. 最少 5 s
+    max_backoff : 从 1 s 没有收到对端请求, 之后 2 s 发送请求, 之后 4 s 发送请求... 直到 max_backoff
+    allowed_versions : 允许的版本. 传 0 表示默认版本(1.1,1.2,1.3)
+
+    初始化 rconn 的各个数据成员;
+
+    没有显示初始化:
+        struct vconn *monitors[MAXIMUM_MONITORS]; 为 NULL?
+        int last_error;
+
+void rconn_set_max_backoff(struct rconn *rc, int max_backoff)
+
+    rc->max_backoff = MAX(1, max_backoff);
+    if (rc->state == S_BACKOFF && rc->backoff > max_backoff) {
+        rc->backoff = max_backoff;
+        if (rc->backoff_deadline > time_now() + max_backoff) {
+            rc->backoff_deadline = time_now() + max_backoff;
+        }
+    }
+
+void rconn_connect(struct rconn *rc, const char *target, const char *name)
+
+    rconn_disconnect__(rc);
+    rconn_set_target__(rc, target, name);
+    rc->reliable = true;
+    reconnect(rc);
+
+void rconn_connect_unreliably(struct rconn *rc, struct vconn *vconn, const char *name)
+
+    rconn_disconnect__(rc);
+    rconn_set_target__(rc, vconn_get_name(vconn), name);
+    rc->reliable = false;
+    rc->vconn = vconn;
+    rc->last_connected = time_now();
+    state_transition(rc, S_ACTIVE);
+
+void rconn_reconnect(struct rconn *rc)
+
+    if (rc->state & (S_ACTIVE | S_IDLE)) disconnect(rc, 0);
+
+void rconn_disconnect(struct rconn *rc)
+
+    rconn_disconnect__(rc);
+
+void rconn_destroy(struct rconn *rc)
+
+    销毁 rc
+
+
+void rconn_run(struct rconn *rc)
+
+void rconn_run_wait(struct rconn *rc)
+
+struct ofpbuf *rconn_recv(struct rconn *rc)
+
+void rconn_recv_wait(struct rconn *rc)
+
+int rconn_send(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter)
+
+int rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b,
+                      struct rconn_packet_counter *counter, int queue_limit)
+
+void rconn_add_monitor(struct rconn *rc, struct vconn *vconn)
+
+bool rconn_is_alive(const struct rconn *rconn)
+
+    return rconn->state != S_VOID && rconn->state != S_DISCONNECTED;
+
+bool rconn_is_connected(const struct rconn *rconn)
+
+    return (state & (S_ACTIVE | S_IDLE)) != 0;
+
+static bool rconn_is_admitted__(const struct rconn *rconn)
+
+int rconn_failure_duration(const struct rconn *rconn)
+
+    duration = (rconn_is_admitted__(rconn)
+                ? 0
+                : time_now() - rconn->last_admitted);
+
+static void disconnect(struct rconn *rc, int error)
+
+    if (rc->vconn) {
+        vconn_close(rc->vconn);
+        rc->vconn = NULL;
+    }
+    if (rc->reliable) {
+        rc->backoff_deadline = now + rc->backoff;
+        state_transition(rc, S_BACKOFF);
+    } else {
+        rc->last_disconnected = time_now();
+        state_transition(rc, S_DISCONNECTED);
+    }
+
 ###Openflow 连接
 
 
@@ -658,6 +771,19 @@ static struct ofconn * ofconn_create(struct connmgr *mgr, struct rconn *rconn, e
     ofconn->schedulers 没有初始化, 即 ofconn->schedulers[0] = NULL, ofconn->schedulers[1] = NULL;
     ofconn->pktbuf = NULL 而不是 ofconn->pktbuf = pktbuf_create();
     ofconn->monitor_paused = 0
+
+static void ofconn_destroy(struct ofconn *ofconn)
+
+    释放 ofconn 各个成员的内存
+
+
+static void ofconn_reconfigure(struct ofconn *ofconn, const struct ofproto_controller *c)
+
+    用 c 重新配置 ofconn 的选项
+
+static bool ofconn_may_recv(const struct ofconn *ofconn)
+
+    返回 ofconn 中 rconn 需要应答的包的数目: ofconn->reply_counter->n_packets (不能超过 100)
 
 static void ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg,
             struct rconn_packet_counter *counter)
@@ -917,3 +1043,111 @@ struct ofpbuf *ofpbuf_clone_with_headroom(const struct ofpbuf *buffer, size_t he
 struct ofpbuf *ofpbuf_clone(const struct ofpbuf *buffer)
 
     ofpbuf_clone_with_headroom(buffer, 0)
+
+
+###PACKET_IN 消息
+
+每个 pinsched 中的 queues 中包含 N 个 pinqueue, 每个 pinqueue
+包含很多 ofpbuf 对象, 一个 ofpbuf 就是一个 PACKET_IN 消息
+
+每个 pinqueue->node 被 hash_int(port_no) 后保存在 pinsched->queues 的某一个队列中
+
+token_bucket 中 rate 代表 N packets/msec, 每过 M msec, token + N*M, 但是 token
+不能超过 burst, last_fill 代表上次更新时间. 如果 packet_send 每秒调用的频率大于
+rate, 后续的包就必须加入队列, 而不是直接发送. packet_send() 每次调用, 检查 ps
+如果已经超出速度限制就将包加入 ps 的队列中, 否则直接加入 txq 中, 准备发送, 当
+包的数量超出了 burst 的限制, 就丢掉最长队里的第一个包.
+
+* pinsched_create() 创建 pinsched 对象
+* pinsched_destroy() 销毁 pinsched 对象
+* packet_send() 发送数据包
+
+//PACKET_IN Message Queue
+struct pinqueue {
+    struct hmap_node node;      /* In struct pinsched's 'queues' hmap. */
+    ofp_port_t port_no;         /* Port number. */
+    struct ovs_list packets;    /* Contains "struct ofpbuf"s. */
+    int n;                      /* Number of packets in 'packets'. */
+};
+
+struct pinsched {
+    struct token_bucket token_bucket;
+
+    /* One queue per physical port. */
+    struct hmap queues;         /* Contains "struct pinqueue"s. */
+    unsigned int n_queued;      /* Sum over queues[*].n. default 0*/
+    struct pinqueue *next_txq;  /* Next pinqueue check in round-robin. default NULL*/
+
+    /* Statistics reporting. */
+    unsigned long long n_normal;        /* # txed w/o rate limit queuing. default 0 */
+    unsigned long long n_limited;       /* # queued for rate limiting. default 0 */
+    unsigned long long n_queue_dropped; /* # dropped due to queue overflow. default 0 */
+};
+
+struct pinsched * pinsched_create(int rate_limit, int burst_limit)
+
+    初始化一个发送 PACKET_IN 消息的 pinsched 对象
+
+
+static void pinqueue_destroy(struct pinsched *ps, struct pinqueue *q)
+
+    从 ps->qeues 中删除 q->node
+
+static struct pinqueue *pinqueue_get(struct pinsched *ps, ofp_port_t port_no)
+
+    从 ps->queu 中找到端口号为 port_no 的 pingueue:
+    如果找到, 直接返回
+    如果找不到创建对应的 pinqueue 对象, 并返回
+
+//通过对 packet_in 消息的监控可以发现与控制器的沟通是否正常
+void pinsched_get_stats(const struct pinsched *, struct pinsched_stats *);
+
+
+static void drop_packet(struct pinsched *ps)
+
+    从 ps->queues 中找到一个最长的包 pinqueue, 从 pinqueue 的 packets
+    中丢弃一个第一个包.
+
+static struct ofpbuf * dequeue_packet(struct pinsched *ps, struct pinqueue *q)
+
+    删除 q->packets 第一个数据包. 返回被删除的数据包
+
+static void advance_txq(struct pinsched *ps)
+
+    轮询从 ps->queues 中取出一个 pinqueue 对象
+
+static struct ofpbuf *get_tx_packet(struct pinsched *ps)
+
+    每次调用, 轮询从 ps 取出一个 pinqueue 对象 q, 从 q->packets 中取出第一个数据包, 返回.
+
+static bool get_token(struct pinsched *ps)
+
+    ps->token_bucket->token 大于 1000, 返回 true, 否则返回 false
+
+void pinsched_send(struct pinsched *ps, ofp_port_t port_no, struct ofpbuf *packet, struct ovs_list *txq)
+
+    如果 ps 为 NULL, 将 packet 加入 txq 中准备发送
+    如果 ps 不为 NULL, 但是没有任何被限速的数据包, 并且速率要求范围以内, 将 packet 加入 txq 准备发送
+    如果 ps 不为 NULL, 已经超出速度限制就将包加入 ps 的队列中
+
+void pinsched_run(struct pinsched *ps, struct ovs_list *txq)
+
+    在满足限速的条件下, 从 ps 中取出　50 个数据包加入 txq 中
+
+void pinsched_wait(struct pinsched *ps)
+
+    如果 ps !=NULL && ps->n_queued >0 && ps->token_bucket->token 小于 1000, 睡眠直到满足条件的时间, 单位 ms
+
+void pinsched_get_limits(const struct pinsched *ps, int *rate_limit, int *burst_limit)
+
+    获取 pinsched 的限制速率情况, rate_limit 表示每秒发送的 PACKET_IN 的数目.
+    burst_limit 长时间不发送 PACKET_IN, 再次发送累计可发送的最大值
+
+void pinsched_set_limits(struct pinsched *ps, int rate_limit, int burst_limit)
+
+    设置 ps->token_bucket->rate = rate_limit, ps->token_bucket->burst = burst_limit
+    如果 ps->n_queued 大于 burst_limit, 丢弃一个包
+
+void pinsched_get_stats(const struct pinsched *ps, struct pinsched_stats *stats)
+
+    获取 pinsched 的统计信息
