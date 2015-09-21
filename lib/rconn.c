@@ -369,6 +369,7 @@ rconn_connect_unreliably(struct rconn *rc,
 }
 
 /* If 'rc' is connected, forces it to drop the connection and reconnect. */
+//并没有重连
 void
 rconn_reconnect(struct rconn *rc)
     OVS_EXCLUDED(rc->mutex)

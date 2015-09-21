@@ -34,6 +34,7 @@
 #include "openvswitch/token-bucket.h"
 #include "openvswitch/vconn.h"
 
+//PACKET_IN Message Queue
 struct pinqueue {
     struct hmap_node node;      /* In struct pinsched's 'queues' hmap. */
     ofp_port_t port_no;         /* Port number. */
@@ -66,6 +67,10 @@ advance_txq(struct pinsched *ps)
     ps->next_txq = next ? CONTAINER_OF(next, struct pinqueue, node) : NULL;
 }
 
+/* Removes the front element from 'q->packets' Undefined behavior if
+   'p->packets' is empty before removal. */
+
+//删除 q->packets 第一个数据包. 返回被删除的数据包
 static struct ofpbuf *
 dequeue_packet(struct pinsched *ps, struct pinqueue *q)
 {
@@ -129,6 +134,7 @@ drop_packet(struct pinsched *ps)
     ps->n_queue_dropped++;
 
     longest = NULL;
+    //找到 ps->queues 中最长的队列, 如果有多个一样长的, 随机选择一个
     HMAP_FOR_EACH (q, node, &ps->queues) {
         if (!longest || longest->n < q->n) {
             longest = q;
@@ -181,6 +187,7 @@ get_token(struct pinsched *ps)
     return token_bucket_withdraw(&ps->token_bucket, 1000);
 }
 
+//packet 参数校验
 void
 pinsched_send(struct pinsched *ps, ofp_port_t port_no,
               struct ofpbuf *packet, struct ovs_list *txq)
@@ -203,6 +210,11 @@ pinsched_send(struct pinsched *ps, ofp_port_t port_no,
          * otherwise wasted space. */
         ofpbuf_trim(packet);
 
+        /*
+         * 初始化时 burst * 1000 因此, 这里 ps->n_queued * 1000, 当然这里
+         * ps->n_queued * 1000 溢出的概率并不大
+         *
+         */
         if (ps->n_queued * 1000 >= ps->token_bucket.burst) {
             drop_packet(ps);
         }

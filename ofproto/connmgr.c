@@ -1484,7 +1484,9 @@ ofconn_wait(struct ofconn *ofconn)
 }
 
 /*
- * 记录日志, 初始化 ofconn->next_op_report = LLONG_MAX
+ * 1. 记录日志
+ * 2. ofconn->n_add, ofconn->n_delete, ofconn->n_modify 如果不为0, 清零
+ * 3. 初始化 ofconn->next_op_report = LLONG_MAX
  */
 static void
 ofconn_log_flow_mods(struct ofconn *ofconn)
@@ -1637,6 +1639,7 @@ ofconn_make_name(const struct connmgr *mgr, const char *target)
     return xasprintf("%s<->%s", mgr->name, target);
 }
 
+//应该 fast fail
 static void
 ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
 {
