@@ -369,7 +369,6 @@ rconn_connect_unreliably(struct rconn *rc,
 }
 
 /* If 'rc' is connected, forces it to drop the connection and reconnect. */
-//并没有重连
 void
 rconn_reconnect(struct rconn *rc)
     OVS_EXCLUDED(rc->mutex)
@@ -1144,8 +1143,6 @@ try_send(struct rconn *rc)
         return retval;
     }
     COVERAGE_INC(rconn_sent);
-    //发送成功, 减少 conter 貌似这里的意义不大
-    //counter 应该一直为 NULL
     if (counter) {
         rconn_packet_counter_dec(counter, n_bytes);
     }
