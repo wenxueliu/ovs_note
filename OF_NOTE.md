@@ -628,6 +628,71 @@ enum ofproto_packet_in_miss_type {
 
 ##稳定的连接
 
+前提: 理解 vconn 的使用, 首先理解 STATE 的转变条件
+
+S_VOID: 没有开始连接
+S_CONNECTING : 正在建立连接, 但还没有完成
+S_ACTIVE : 已经建立连接, 距离上次数据交互, 但还没有超过 probe_interval
+S_IDLE : 已经建立连接, 距离上次数据交互超过 probe_interval, 而且 ECHO Request 已经发出, 等待回应
+S_BACKOFF: 对与非正常断开连接, 如果设置了 reliable, 那么就进入该状态, 该状态进行重连,每次递增 2*backoff, 直到重连成功或达到 max_backoff.
+S_DISCONNECTED : 已经端口理解
+
+使用流程:
+
+rconn_create(rc) : 创建并初始化一个可靠连接对象 rc
+rconn_connect() : 进行可靠连接, 即如果遇到错误会进入 BACKOFF 状态重连
+rconn_add_monitor() : 给 rc->monitors 增加一个元素
+
+核心函数简介:
+
+rconn_create(rc) : 创建并初始化一个可靠连接对象 rc
+rconn_destroy(rc) : 销毁可靠连接对象 rc
+rconn_connect() : 进行可靠连接, 即如果遇到错误会进入 BACKOFF 状态重连
+rconn_connect_unreliably() : 进行不可靠连接, 即如果遇到错误直接断开
+rconn_reconnect() : 如果从 ACTIVE 或 IDLE 状态进入 BACKOFF 状态
+rconn_disconnect() : 如果从非 S_VOID 进入 S_VOID
+rconn_run()  : 对应 rc->vconn, rc->monitors 运行 vconn_run, 之后根据 rc->state 调用其之后的状态
+rconn_send() : 将一个数据包加入 rc->txq 队列中
+run_ACTIVE() : 从 rc->txq 中取出一条消息发送出去
+rconn_recv() : 从 rc->vconn 收消息
+rconn_add_monitor() : 给 rc->monitors 增加一个元素
+rconn_is_alive() : rc->state 不是 VOID 和 DISCONNECTED
+rconn_is_connected(): rc->state 是 IDLE 或 ACTIVE
+rconn_is_admitted() : rc->state 首先是 is_connected, 并且 rc->last_admitted > rc->last_connected
+rconn_failure_duration() : 如果处于 rconn_is_admitted(), 否则返回 time_now() - rconn->last_admitted
+rconn_get_version() : rc->vconn 的版本
+elapsed_in_this_state() : 处于当前状态的时间多久了
+rconn_reconnect() : 如果是rc->reliable = true, rc->state 进入 BACKOFF 状态
+timeout_$STATE : 获取各个状态的超时时间
+
+
+run_$STATE : 各个状态需要的动作
+
+    rc->state = S_VOID : run_VOID()
+    rc->state = S_BACKOFF : run_BACKOFF()
+    rc->state = S_CONNECTING: run_CONNECTING()
+    rc->state = S_ACTIVE : run_ACTIVE()
+    rc->state = S_IDLE : run_IDLE()
+    rc->state = S_DISCONNECTED: run_DISCONNECTED()
+
+注:
+
+可靠连接和不可靠连接的主要区别: 可靠连接状态切换 S_VOID -> S_CONNECTING 或 S_VOID -> S_BACKOFF,
+而不可靠连接状态切换 S_VOID -> S_ACTIVE. 因此, 可靠连接会在进行连接时进行验证, 而不可靠连接直接认为连接是可用的.
+
+一次成功的连接需要 vconn_open --> vconn_connect
+
+/* A wrapper around vconn that provides queuing and optionally reliability.
+ *
+ * An rconn maintains a message transmission queue of bounded length specified
+ * by the caller.  The rconn does not guarantee reliable delivery of
+ * queued messages: all queued messages are dropped when reconnection becomes
+ * necessary.
+ *
+ * An rconn optionally provides reliable communication, in this sense: the
+ * rconn will re-connect, with exponential backoff, when the underlying vconn
+ * disconnects.
+ */
 
 /* The connection states have the following meanings:
  *
@@ -674,6 +739,7 @@ struct rconn * rconn_create(int probe_interval, int max_backoff, uint8_t dscp, u
 void rconn_set_max_backoff(struct rconn *rc, int max_backoff)
 
     rc->max_backoff = MAX(1, max_backoff);
+    如果 max_backoff 小于 rc->backoff, 那么, 就设置 rc->backoff = max_backoff;
     if (rc->state == S_BACKOFF && rc->backoff > max_backoff) {
         rc->backoff = max_backoff;
         if (rc->backoff_deadline > time_now() + max_backoff) {
@@ -683,12 +749,17 @@ void rconn_set_max_backoff(struct rconn *rc, int max_backoff)
 
 void rconn_connect(struct rconn *rc, const char *target, const char *name)
 
+    首先 rc->state 恢复到 S_VOID, 初始化 rc->reliable = true, 然后调用 vconn_open() 进行连接,
+    如果成功状态进入 CONNECTING, 失败进入 BACKOFF
+
     rconn_disconnect__(rc);
     rconn_set_target__(rc, target, name);
     rc->reliable = true;
     reconnect(rc);
 
 void rconn_connect_unreliably(struct rconn *rc, struct vconn *vconn, const char *name)
+
+    首先 rc->state 恢复到 S_VOID, 然后进行初始化 rc->reliable = false, 状态直接转变为 S_ACTIVE
 
     rconn_disconnect__(rc);
     rconn_set_target__(rc, vconn_get_name(vconn), name);
@@ -699,41 +770,162 @@ void rconn_connect_unreliably(struct rconn *rc, struct vconn *vconn, const char 
 
 void rconn_reconnect(struct rconn *rc)
 
-    if (rc->state & (S_ACTIVE | S_IDLE)) disconnect(rc, 0);
+    如果从 ACTIVE 或 IDLE 状态进入 BACKOFF 状态
+
+static void rconn_disconnect__(struct rconn *rc)
+
+    从非 S_VOID 状态恢复为 S_VOID
+
+    rc->vconn = NULL;
+    rc->target = "void"
+    rc->name = "void"
+    rc->reliable = false;
+    rc->backoff = 0;
+    rc->backoff_deadline = TIME_MIN;
+    rc->state = S_VOID
+    rc->state_entered = time_now()
 
 void rconn_disconnect(struct rconn *rc)
 
-    rconn_disconnect__(rc);
+    加锁版 rconn_disconnect__(rc)
 
 void rconn_destroy(struct rconn *rc)
 
     销毁 rc
 
+static void reconnect(struct rconn *rc)
+
+    调用 vconn_open(rc->target, rc->allowed_versions, rc->dscp, &rc->vconn) 进行连接
+    如果成功, rc->state 进入 CONNECTING
+    如果失败, rc->state 进入 BACKOFF
+
+    注: 并没有断开连接后重连, 如果是正常的返回时间很慢是否会得到期望的结果
+
+static void run_BACKOFF(struct rconn *rc)
+
+    处于任何 rc->state 的状态下超时, 都进行重连
+
+    if (timed_out(rc)) reconnect(rc);
+
+static void run_CONNECTING(struct rconn *rc)
+
+    调用 vconn_connect(rc->vconn) 进行连接
+    如果成功, rc->state 进入 ACTIVE.
+    如果失败, rc->state 进入 BACKOFF 状态
+
+static void do_tx_work(struct rconn *rc)
+
+    从 rc->txq 链表中依次取出数据包, 调用 try_send() 发送数据包之. 每次发送都更新 rc->last_activity
+    如果 rc->txq 中的数据发送完了, 立即调用 poll_immediate_wake() 唤醒 poll接受数据包
+
+static int try_send(struct rconn *rc)
+
+    从 rc->txq 中取出一个消息 msg, 调用 vconn_send(rc->vconn, msg) 发送,
+    如果发送成功, 从 rc->txq 中删除该消息, 更新 rconn_packet_counter;
+    如果失败, 将该消息重新放入 rc->txq 中
+
+static void run_ACTIVE(struct rconn *rc)
+
+    如果 rc->state 超时, 转换到 IDLE, 发送 echo request 请求
+    否则, 调用 do_tx_work 从 rc->txq 中取出一个数据包发送
+
+static void run_IDLE(struct rconn *rc)
+
+    如果 rc->state 超时, 对于可靠的连接进入 BACKOFF 状态, 对应不可靠连接, 直接断开
+    否则, 调用 do_tx_work 从 rc->txq 中取出一个数据包发送
 
 void rconn_run(struct rconn *rc)
 
+    如果 rc-vconn 不为 NULL, 调用 vconn_run(rc->vconn), 如果发送失败, 断开连接;
+    遍历每个 rc->monitors　元素 rc->monitors[i], 调用 vconn_run(rc->monitors[i]),
+        如果 vconn_recv(rc->monitors[i] ,msg) 失败, 删除该 monitor;
+        否则 删除 msg
+
+    之后运行 rc->state 之后的函数
+    rc->state = S_VOID : run_VOID()
+    rc->state = S_BACKOFF : run_BACKOFF()
+    rc->state = S_CONNECTING: run_CONNECTING()
+    rc->state = S_ACTIVE : run_ACTIVE()
+    rc->state = S_IDLE : run_IDLE()
+    rc->state = S_DISCONNECTED: run_DISCONNECTED()
+
+    注: 正常是在 rconn_connect 之后调用该函数, 之后会自动调用 run_CONNECTING
+    完成连接, run_ACTIVE() 发送数据包
+
 void rconn_run_wait(struct rconn *rc)
 
-struct ofpbuf *rconn_recv(struct rconn *rc)
+    //待进一步确认
+    如果 rc-vconn 不为 NULL, 调用 vconn_run_wait(rc->vconn), 如果发送成功, 调用 vconn_wait(rc->vconn, WAIT_SEND);
+    遍历每个 rc->monitors　元素 rc->monitors[i], 调用 vconn_run_wait(rc->monitors[i]);vconn_recv_wait(rc->monitors[i]);
+
+    如果 rc->state 没有超时, 睡眠等待到超时时间.
+
+struct ofpbuf * rconn_recv(struct rconn *rc)
+
+    如果 rc->state 是 S_ACTIVE 或 S_IDLE,  调用 vconn_recv(rc->vconn, &buffer)
+    成功: 拷贝 buffer 到所有的 rc->monitors, rc->state 变为 ACTIVE
+    否则: 更加是否是可靠地连接, 断开或重连
 
 void rconn_recv_wait(struct rconn *rc)
 
+     如果 rc->vconn 不为 NULL,  vconn_wait(rc->vconn, WAIT_RECV);
+
+static void copy_to_monitor(struct rconn *rc, const struct ofpbuf *b)
+
+    克隆数据包 b 为 clone, 遍历 rc->monitors 每个元素, 调用 vconn_send(rc->monitor[i], clone)
+
+static void close_monitor(struct rconn *rc, size_t idx, int retval)
+
+static int rconn_send__(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter)
+
+    如果 rc 处于IDLE, ACTIVE 状态, rc->monitors 的每一个成员调用 vconn_send(rc->monitors[i], b),
+        b->list_node 加入 rc->txq 链表尾, 如果　rc->txq 中只有 b, 直接发送
+    否则 直接释放 b 的内存
+
+
 int rconn_send(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter)
 
-int rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b,
-                      struct rconn_packet_counter *counter, int queue_limit)
+    加锁版的 rconn_send__()
+
+int rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter, int queue_limit)
+
+    如果 counter->packets < queue_limit, 将 b 加入 rc->txq 等待发送
+    否则删除 b
 
 void rconn_add_monitor(struct rconn *rc, struct vconn *vconn)
 
-bool rconn_is_alive(const struct rconn *rconn)
+    如果 rc->n_monitors < ARRAY_SIZE(rc->monitors), 将 vconn 加入 rc->monitors,
 
-    return rconn->state != S_VOID && rconn->state != S_DISCONNECTED;
+static bool timed_out(const struct rconn *rc)
 
-bool rconn_is_connected(const struct rconn *rconn)
+    rc 处于 rc->state 的时间是否超时;
 
-    return (state & (S_ACTIVE | S_IDLE)) != 0;
+    比如在 S_IDLE 状态, 如果 time_now() >= rc->state_entred + rc->probe_interval, 我们就认为处于 IDLE 的超时了
+    再 S_ACTIVE, 如果 time_now() > rc->last_activity - rc->state_entered + rc->probe_interval 我们就认为处于 ACTIVE 超时了.
 
-static bool rconn_is_admitted__(const struct rconn *rconn)
+    return time_now() >= sat_add(rc->state_entered, timeout(rc));
+
+static unsigned int timeout(const struct rconn *rc)
+
+    rc->state = S_VOID : UINT_MAX
+    rc->state = S_BACKOFF : rc->backoff
+    rc->state = S_CONNECTING: max(1,rc->backoff)
+    rc->state = S_ACTIVE : rc->probe_interval ? MAX(rc->last_activity, rc->state_entered) + rc->probe_interval - rc->state_entered : UINT_MAX;
+    rc->state = S_IDLE : rc->probe_interval
+    rc->state = S_DISCONNECTED: UINT_MAX
+
+static void state_transition(struct rconn *rc, enum state state)
+
+    rc->state = state
+    rc->state_entered = time_now()
+    根据具体条件修改如下值
+    rc->total_time_connected
+    rc->probably_admitted
+    rc->seqno
+
+static void rconn_set_target__(struct rconn *rc, const char *target, const char *name)
+
+    重置 rc->target, rc->name, 如果 name = NULL, rc->name = rc->target
 
 int rconn_failure_duration(const struct rconn *rconn)
 
@@ -743,10 +935,10 @@ int rconn_failure_duration(const struct rconn *rconn)
 
 static void disconnect(struct rconn *rc, int error)
 
-    if (rc->vconn) {
-        vconn_close(rc->vconn);
-        rc->vconn = NULL;
-    }
+    释放 rc->vconn
+    如果是稳定链路(rc->reliable=true), 转换 rc->state 到 S_BACKOFF
+    否则转换 rc->state 状态到 S_DISCONNECTED
+
     if (rc->reliable) {
         rc->backoff_deadline = now + rc->backoff;
         state_transition(rc, S_BACKOFF);
@@ -754,6 +946,12 @@ static void disconnect(struct rconn *rc, int error)
         rc->last_disconnected = time_now();
         state_transition(rc, S_DISCONNECTED);
     }
+
+static void flush_queue(struct rconn *rc)
+
+    丢掉 rc->txq 中的所有数据包, 调用  poll_immediate_wake();
+
+
 
 ###Openflow 连接
 
