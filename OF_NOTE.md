@@ -449,7 +449,7 @@ enum ofproto_fail_mode {
 
 struct in_band {
     struct ofproto *ofproto;
-    int queue_id;
+    int queue_id;               /* default -1 */
 
     /* Remote information. */
     time_t next_remote_refresh; /* Refresh timer. */
@@ -507,7 +507,7 @@ void connmgr_destroy(struct connmgr *mgr)
     调用 fail_open_destroy(mgr->fail_open)
 
 
-void connmgr_run(struct connmgr *mgr, void (*handle_openflow)(struct ofconn *, const struct ofpbuf *ofp_msg))
+void connmgr_run(struct connmgr *mgr, void ( *handle_openflow)(struct ofconn *, const struct ofpbuf *ofp_msg))
 
 
 void connmgr_wait(struct connmgr *mgr)
@@ -521,8 +521,14 @@ struct ofproto * ofconn_get_ofproto(const struct ofconn *ofconn)
 
     返回 ofconn->connmgr->ofproto;
 
+static bool ofmonitor_may_resume(const struct ofconn *ofconn)
+
+    ofconn->monitor_paused != 0 && ofconn->monitor_counter->n_packets = 0
 
 static void ofmonitor_run(struct connmgr *mgr)
+
+    遍历 mgr->all_conns 的所有 ofconn, 遍历 ofconn->monitors 的每个 monitor, 根据 monitor->table 找到流表, 根据
+    monitor->match 找到对应的 rules, 将 rules 加入 ofconn->rconn->txq 中等待发送
 
     LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
         if (ofmonitor_may_resume(ofconn)) {
@@ -530,6 +536,105 @@ static void ofmonitor_run(struct connmgr *mgr)
             ofmonitor_resume(ofconn);
         }
     }
+
+static void ofmonitor_resume(struct ofconn *ofconn)
+
+    遍历 ofconn->monitors 的每个 monitor, 根据 monitor->table 找到流表, 根据
+    monitor->match 找到对应的 rules, 将 rules 加入 ofconn->rconn->txq 中等待发送
+    1. 遍历 ofconn->monitors 中的每一个 ofmonitor m
+    2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+    3. 遍历 rules 每个元素加入 msgs 中
+    4. 遍历 msgs 中的每一个元素 msg, 如果 ofconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors
+    的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+
+
+static void ofmonitor_wait(struct connmgr *mgr)
+
+    LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
+        if (ofmonitor_may_resume(ofconn)) {
+            poll_immediate_wake();
+        }
+    }
+
+void ofmonitor_flush(struct connmgr *mgr)
+
+    遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+    如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员,
+    msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+
+void ofmonitor_report(struct connmgr *mgr, struct rule *rule, enum nx_flow_update_event event, enum ofp_flow_removed_reason reason,
+                 const struct ofconn *abbrev_ofconn, ovs_be32 abbrev_xid,
+                 const struct rule_actions *old_actions)
+
+    遍历 mgr 下每一个 ofconn, 对 ofconn->ofmonitor 中的 monitor,
+    如果
+    1. event 在 monitro->flags
+    2. rule->table_id = monitor->table_id && monitor->table_id = 0xff
+    3. actions 中有 out_port
+    应满足这样的 rule, 如果 ofconn->updates 为 null, 先加入简要更新规则, 将 rule 加入 ofconn->updates
+
+bool connmgr_wants_packet_in_on_miss(struct connmgr *mgr)
+
+    从 mgr->all_conns 中找到 controller_id = 0 并且 OF 版本小于 1.3 的 ofconn,
+    返回 true. 否则返回 false
+
+
+static void schedule_packet_in(struct ofconn *, struct ofproto_packet_in, enum ofp_packet_in_reason wire_reason);
+
+    发送一个异步消息
+
+void connmgr_send_port_status(struct connmgr *mgr, struct ofconn *source, const struct ofputil_phy_port *pp, uint8_t reason)
+
+    遍历 mgr->all_conns, 如果 OF 版本大于 1.5 发送端口状态消息
+
+void connmgr_send_flow_removed(struct connmgr *mgr, const struct ofputil_flow_removed *fr)
+
+    遍历 mgr->all_conns, 发送流表删除消息
+
+static enum ofp_packet_in_reason wire_reason(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
+
+    获取发送 PACKET_IN 时的 reason
+
+void connmgr_send_packet_in(struct connmgr *mgr, const struct ofproto_packet_in *pin)
+
+    遍历  mgr->all_conns, 根据条件发送 PACKET_IN 消息
+
+
+static void schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin, enum ofp_packet_in_reason wire_reason)
+
+    1. 计算 buffer_id
+    2. 构造 PACKET_IN 消息, 发送
+
+void connmgr_set_fail_mode(struct connmgr *mgr, enum ofproto_fail_mode fail_mode)
+
+    设置 mgr->fail_mode 并更新 mgr->fail_open, 并检查 mgr 是否存在 controller
+
+int connmgr_get_max_probe_interval(const struct connmgr *mgr)
+
+    返回 mgr->controllers 所有 ofconn 中 probe_interval 最大值
+
+int connmgr_failure_duration(const struct connmgr *mgr)
+
+    返回 mgr->controllers 所有 ofconn 中 probe_interval 最大值
+
+static void update_fail_open(struct connmgr *mgr)
+
+    返回 mgr->controllers  所有 ofconn 中 failure  最小值
+
+
+static void update_in_band_remotes(struct connmgr *mgr)
+
+    用 mgr->controllers 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
+
+static void add_snooper(struct connmgr *, struct vconn *);
+
+    1. 从 connmgr->all_conns 的 ofconn 中找到 ofconn->type = OFCONN_PRIMARY 并且
+    ofconn->role 最大(即权限越接近MASTER)的 ofconn.
+
+
+
+
 
 
 ### in_band
@@ -548,8 +653,6 @@ void in_band_wait(struct in_band *);
 bool in_band_must_output_to_local_port(const struct flow *);
 
 int in_band_count_rules(const struct in_band *);
-
-
 
 
 ### PACKET_IN 消息
@@ -1241,10 +1344,6 @@ enum vconn_wait_type {
     WAIT_SEND
 };
 
-####使用简介
-
-
-
 ####使用流程
 
 * 建立连接
@@ -1274,9 +1373,6 @@ vconn_bundle_transact(vconn, requests, flags...)
 vconn_close(vconn) : 关闭连接
 pvconn_close() : 关闭监听
 
-
-
-
 ####源码分析
 
 注: 这部分代码非常直观明了, 因此包含了精简后的源码.有时候比文字更好说明问题
@@ -1300,9 +1396,12 @@ int vconn_open(const char *name, uint32_t allowed_versions, uint8_t dscp, struct
 
 void vconn_run(struct vconn *vconn)
 
+    正常情况下保证 vconn 已经建立连接或发生错误
+
     if (vconn->state == VCS_CONNECTING || vconn->state == VCS_SEND_HELLO || vconn->state == VCS_RECV_HELLO)
         vconn_connect(vconn);
 
+    //这里判断为 false, 因此与 vconn_connect 相同
     if (vconn->vclass->run)
         (vconn->vclass->run)(vconn);
 
@@ -1429,7 +1528,7 @@ static void vcs_send_error(struct vconn *vconn)
 
 int vconn_connect(struct vconn *vconn)
 
-    从 vconn->state 当前状态开始建立连接.
+    从 vconn->state 当前状态开始建立连接直到完成或出错. 至此已经发送 HELLO 请求和收到 HELLO 应答
 
     do {
         last_state = vconn->state;
@@ -1465,7 +1564,7 @@ int vconn_connect(struct vconn *vconn)
 
 int vconn_recv(struct vconn *vconn, struct ofpbuf **msgp)
 
-    建立连接并接受对端的消息, 将消息保存在 msgp 中l
+    建立连接并接受对端的消息, 将消息保存在 msgp 中
 
     retval = vconn_connect(vconn);
     成功:
@@ -1776,8 +1875,6 @@ void pvconn_init(struct pvconn *pvconn, const struct pvconn_class *class, const 
 
 
 
-
-
 ##可靠的连接
 
 对 vconn 进行状态维护, 使得具有稳定的连接, 也体现了分层的思想, vconn 专注连接, 而 rconn 进行连接的状态管理和统计
@@ -1993,9 +2090,12 @@ static void run_IDLE(struct rconn *rc)
 
 void rconn_run(struct rconn *rc)
 
-    如果 rc-vconn 不为 NULL, 调用 vconn_run(rc->vconn), 如果发送失败, 断开连接;
-    遍历每个 rc->monitors　元素 rc->monitors[i], 调用 vconn_run(rc->monitors[i]),
-        如果 vconn_recv(rc->monitors[i] ,msg) 失败, 删除该 monitor;
+    rc->vconn 与 rc->monitors 都完成与对端的连接建立, 从 rc->txq 依次取出所有数据包发送出去
+
+    如果 rc-vconn 不为 NULL, rc-vconn 与对端建立连接或断开连接;
+    遍历每个 rc->monitors　元素 rc->monitors[i], rc->monitors[i] 与对端建立连接或断开连接,
+    如果建立连接, 非阻塞收对端消息.
+        如果失败, 删除该 monitor;
         否则 删除 msg
 
     之后运行 rc->state 之后的函数
@@ -2009,9 +2109,12 @@ void rconn_run(struct rconn *rc)
     注: 正常是在 rconn_connect 之后调用该函数, 之后会自动调用 run_CONNECTING
     完成连接, run_ACTIVE() 发送数据包
 
+    注:正常情况 vconn_run()　保证 rc-vconn 已经建立连接, 并且发送 HELLO 请求和接受到 HELLO 应答
+
 void rconn_run_wait(struct rconn *rc)
 
-    //待进一步确认
+    保证连接已经完成, 其他什么也不做
+
     如果 rc-vconn 不为 NULL, 调用 vconn_run_wait(rc->vconn), 如果发送成功, 调用 vconn_wait(rc->vconn, WAIT_SEND);
     遍历每个 rc->monitors　元素 rc->monitors[i], 调用 vconn_run_wait(rc->monitors[i]);vconn_recv_wait(rc->monitors[i]);
 
@@ -2131,6 +2234,26 @@ static void ofconn_destroy(struct ofconn *ofconn)
 
     释放 ofconn 各个成员的内存
 
+static void ofconn_flush(struct ofconn *ofconn)
+
+    重置 ofconn 部分成员
+
+    ofconn->role : OFPCR12_ROLE_EQUAL;
+    ofconn->protocol : OFPUTIL_P_NONE);
+    ofconn->packet_in_format = NXPIF_OPENFLOW10;
+    ofconn->packet_in_counter = rconn_packet_counter_create();
+    ofconn->schedulers[i] = pinsched_create(rate, burst);
+    ofconn->pktbuf = pktbuf_create();
+    ofconn->miss_send_len = (ofconn->type == OFCONN_PRIMARY ? OFP_DEFAULT_MISS_SEND_LEN : 0);
+    ofconn->controller_id = 0;
+    ofconn->reply_counter = rconn_packet_counter_create();
+    ofconn->n_add = 0
+    ofconn->n_delete = 0
+    ofconn->n_modify = 0;
+    ofconn->first_op = ofconn->last_op = LLONG_MIN;
+    ofconn->next_op_report = LLONG_MAX;
+    ofconn->op_backoff = LLONG_MIN;
+    ofconn->monitor_counter = rconn_packet_counter_create();
 
 static void ofconn_reconfigure(struct ofconn *ofconn, const struct ofproto_controller *c)
 
@@ -2138,17 +2261,64 @@ static void ofconn_reconfigure(struct ofconn *ofconn, const struct ofproto_contr
 
 static bool ofconn_may_recv(const struct ofconn *ofconn)
 
-    返回 ofconn 中 rconn 需要应答的包的数目: ofconn->reply_counter->n_packets (不能超过 100)
+    如果 ofconn->reply_counter->n_packets < OFCONN_REPLY_MAX(100) 返回 true, 否则 false
+
+static void ofconn_run(struct ofconn *ofconn, void ( *handle_openflow)(struct ofconn *, const struct ofpbuf *ofp_msg))
+
+    建立连接, 将 schedulers 中的数据包发送出去, 处理接受的的包
+
+    1. 在满足速率限制的前提下, 从 ofconn->schedulers 每个元素中取 50 个元素加入 ofconn->rconn->txq 中;
+    2. ofconn->rconn 中的 vconn 与 monitors 与对端完成连接建立, 并将 ofconn->rconn-txq 中的数据包发送给对端
+    3. 接受对端的数据包, 调用 handle_openflow 进行处理. 在等待应答的包大于100 或已经接收到 50 个包返回
 
 static void ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg,
             struct rconn_packet_counter *counter)
 
-
     rconn_send(ofconn->rconn, msg, counter);
-    如果 ofconn->rconn 处于连接状态, 将 msg 发送给 ofconn->rconn->monitors 的每一个成员, msg->list_node 
-        加入 ofconn->rconn->txq 链表尾, 如果ofconn->rconn->txq 只有 msg->list_node 调用 vconn_send(rc->vconn, msg)
+    如果 ofconn->rconn 处于连接状态, 将 msg 发送给 ofconn->rconn->monitors 的每一个成员, msg->list_node
+    加入 ofconn->rconn->txq 链表尾, 如果 ofconn->rconn->txq 只有 msg->list_node 调用 vconn_send(rc->vconn, msg)
 
     否则 直接释放 b 的内存
+
+static void ofconn_wait(struct ofconn *ofconn)
+
+    1. 如果 ofconn->schedulers 每个元素 token_bucket 中的 tocken 没有超过 1000 就休眠
+    2. 如果待应答的包没有超过 100, poll.event = POLLIN
+    3. 休眠指定时间
+
+static bool ofconn_receives_async_msg(const struct ofconn *ofconn, enum ofputil_async_msg_type type, unsigned int reason)
+
+    Returns true if 'ofconn' should receive asynchronous messages of the given
+    OAM_* 'type' and 'reason', which should be a OFPR_* value for OAM_PACKET_IN,
+    a OFPPR_* value for OAM_PORT_STATUS, or an OFPRR_* value for
+    OAM_FLOW_REMOVED.  Returns false if the message should not be sent on
+    'ofconn'.
+
+static bool ofconn_wants_packet_in_on_miss(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
+
+    对于 OF版本 1.3+ 返回 false　表面该包应该被丢掉, 对于 <1.3 返回 true
+    表面包应该被转发到 controller
+
+static void ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
+
+    遍历 ofconn->schedulers,
+    如果 ofconn->schedulers[i] 为 NULL, 创建并设置 rate, burst;
+    如果已经创建, 直接设置 rate, burst
+
+static void ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg, struct rconn_packet_counter *counter)
+
+    如果 rc 处于连接状态, 将 msg 发送给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾
+    否则 直接释放 msg 的内存
+
+
+static void do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
+
+    将 txq 列表每个元素加入 ofconn->rconn->tx 中, 等待发送
+
+
+
+
+
 
 
 
