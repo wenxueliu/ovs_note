@@ -721,6 +721,9 @@ find_controller_by_target(struct connmgr *mgr, const char *target)
     return NULL;
 }
 
+/*
+ * 用 mgr->controllers 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
+ */
 static void
 update_in_band_remotes(struct connmgr *mgr)
 {
@@ -770,6 +773,10 @@ update_in_band_remotes(struct connmgr *mgr)
     free(addrs);
 }
 
+/*
+ * 如果 mgr 配置 controller 而且 fail_mode = OFPROTO_FAIL_STANDALONE ; mgr->fail_open 才有意义
+ * 否则 mgr->fail_open = NULL
+ */
 static void
 update_fail_open(struct connmgr *mgr)
     OVS_EXCLUDED(ofproto_mutex)
@@ -1414,6 +1421,7 @@ ofconn_reconfigure(struct ofconn *ofconn, const struct ofproto_controller *c)
 
 /* Returns true if it makes sense for 'ofconn' to receive and process OpenFlow
  * messages. */
+//等待应答包数超过 100 返回 false, 低于 100 返回 true
 static bool
 ofconn_may_recv(const struct ofconn *ofconn)
 {
@@ -1429,6 +1437,7 @@ ofconn_run(struct ofconn *ofconn,
     struct connmgr *mgr = ofconn->connmgr;
     size_t i;
 
+    //1. 在满足速率限制的前提下, 从 ofconn->schedulers 每个元素中取 50 个元素加入 ofconn->rconn->txq 中;
     for (i = 0; i < N_SCHEDULERS; i++) {
         struct ovs_list txq;
 
@@ -1436,9 +1445,11 @@ ofconn_run(struct ofconn *ofconn,
         do_send_packet_ins(ofconn, &txq);
     }
 
+    //2. ofconn->rconn 中的 vconn 与 monitors 与对端完成连接建立, 并将 ofconn->rconn-txq 中的数据包发送给对端
     rconn_run(ofconn->rconn);
 
     /* Limit the number of iterations to avoid starving other tasks. */
+    //3. 接受对端的数据包, 调用 handle_openflow 进行处理. 在等待应答的包大于100 或已经接收到 50 个包返回
     for (i = 0; i < 50 && ofconn_may_recv(ofconn); i++) {
         struct ofpbuf *of_msg = rconn_recv(ofconn->rconn);
         if (!of_msg) {
@@ -1471,10 +1482,13 @@ ofconn_wait(struct ofconn *ofconn)
 {
     int i;
 
+    //1. 如果 ofconn->schedulers 每个元素 token_bucket 中的 tocken 没有超过 1000 就休眠
     for (i = 0; i < N_SCHEDULERS; i++) {
         pinsched_wait(ofconn->schedulers[i]);
     }
+    //目前什么也不做
     rconn_run_wait(ofconn->rconn);
+    //2. 如果待应答的包没有超过 100, poll.event = POLLIN
     if (ofconn_may_recv(ofconn)) {
         rconn_recv_wait(ofconn->rconn);
     }
@@ -1639,7 +1653,6 @@ ofconn_make_name(const struct connmgr *mgr, const char *target)
     return xasprintf("%s<->%s", mgr->name, target);
 }
 
-//应该 fast fail
 static void
 ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
 {
@@ -1661,6 +1674,11 @@ ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
     }
 }
 
+/*
+ * 如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾
+ * 否则 直接释放 b 的内存
+ *
+ */
 static void
 ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg,
             struct rconn_packet_counter *counter)
@@ -1801,6 +1819,9 @@ connmgr_send_packet_in(struct connmgr *mgr,
     }
 }
 
+/*
+ * 将 txq 列表每个元素加入 ofconn->rconn->tx 中, 等待发送
+ */
 static void
 do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
 {
@@ -1859,6 +1880,7 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
         pin.up.packet_len = controller_max_len;
     }
 
+    //将 ofputil_encode_packet_in() 加入 txq
     /* Make OFPT_PACKET_IN and hand over to packet scheduler. */
     pinsched_send(ofconn->schedulers[pin.up.reason == OFPR_NO_MATCH ? 0 : 1],
                   pin.up.flow_metadata.flow.in_port.ofp_port,
@@ -1866,6 +1888,7 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
                                            ofconn_get_protocol(ofconn),
                                            ofconn->packet_in_format),
                   &txq);
+    //将 txq 加入 ofconn->rconn->txq 中
     do_send_packet_ins(ofconn, &txq);
 }
 
@@ -1879,6 +1902,7 @@ connmgr_get_fail_mode(const struct connmgr *mgr)
     return mgr->fail_mode;
 }
 
+//设置 mgr->fail_mode 并更新 mgr->fail_open, 并检查 mgr 是否存在 controller
 /* Sets the failure handling mode for 'mgr' to 'fail_mode' (either
  * OFPROTO_FAIL_SECURE or OFPROTO_FAIL_STANDALONE). */
 void
@@ -1970,6 +1994,10 @@ static bool any_extras_changed(const struct connmgr *,
 /* Sets the 'n' TCP port addresses in 'extras' as ones to which 'mgr''s
  * in-band control should guarantee access, in the same way that in-band
  * control guarantees access to OpenFlow controllers. */
+/*
+ * 如果没有改变, 直接返回
+ * 如果有改变, 删除原来的, 用新的初始化
+ */
 void
 connmgr_set_extra_in_band_remotes(struct connmgr *mgr,
                                   const struct sockaddr_in *extras, size_t n)
@@ -2326,6 +2354,11 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
     }
 }
 
+/*
+ * 遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+ * 如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员,
+ * msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+ */
 void
 ofmonitor_flush(struct connmgr *mgr)
     OVS_REQUIRES(ofproto_mutex)
@@ -2340,6 +2373,9 @@ ofmonitor_flush(struct connmgr *mgr)
 
             ofconn_send(ofconn, msg, ofconn->monitor_counter);
             n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
+            //如果当前 monitor 都在运行, 而 n_bytes 大于 128 K, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, 
+            //msg->list_node 加入 ofconn->rconn->txq 链表尾
+            //TODO: WHY ?
             if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {
                 struct ofpbuf *pause;
 
@@ -2353,6 +2389,16 @@ ofmonitor_flush(struct connmgr *mgr)
     }
 }
 
+/*
+ * 遍历 ofconn->monitors 的每个 monitor, 根据 monitor->table 找到流表, 根据
+ * monitor->match 找到对应的 rules, 将 rules 加入 ofconn->rconn->txq 中等待发送
+ * 1. 遍历 ofconn->monitors 中的每一个 ofmonitor m
+ * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+ *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+ * 3. 遍历 rules 每个元素加入 msgs 中
+ * 4. 遍历 msgs 中的每一个元素 msg, 如果 ofconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors
+ *   的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+ */
 static void
 ofmonitor_resume(struct ofconn *ofconn)
     OVS_REQUIRES(ofproto_mutex)
@@ -2363,21 +2409,30 @@ ofmonitor_resume(struct ofconn *ofconn)
     struct ovs_list msgs;
 
     rule_collection_init(&rules);
+    /*
+     * 1. 遍历 ofconn->monitors 中的每一个 ofmonitor m
+     * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+     *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+     */
     HMAP_FOR_EACH (m, ofconn_node, &ofconn->monitors) {
         ofmonitor_collect_resume_rules(m, ofconn->monitor_paused, &rules);
     }
 
     list_init(&msgs);
+    //3. 遍历 rules 每个元素加入 msgs 中
     ofmonitor_compose_refresh_updates(&rules, &msgs);
 
     resumed = ofpraw_alloc_xid(OFPRAW_NXT_FLOW_MONITOR_RESUMED, OFP10_VERSION,
                                htonl(0), 0);
     list_push_back(&msgs, &resumed->list_node);
+    //4. 遍历 msgs 中的每一个元素 msg, 如果 ofconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors
+    //的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
     ofconn_send_replies(ofconn, &msgs);
 
     ofconn->monitor_paused = 0;
 }
 
+//ofconn->monitor_paused != 0 && ofconn->monitor_counter->n_packets = 0
 static bool
 ofmonitor_may_resume(const struct ofconn *ofconn)
     OVS_REQUIRES(ofproto_mutex)

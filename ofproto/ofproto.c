@@ -5447,6 +5447,7 @@ handle_barrier_request(struct ofconn *ofconn, const struct ofp_header *oh)
     return 0;
 }
 
+//将 rule 加入 msgs
 static void
 ofproto_compose_flow_refresh_update(const struct rule *rule,
                                     enum nx_flow_monitor_flags flags,
@@ -5480,6 +5481,7 @@ ofproto_compose_flow_refresh_update(const struct rule *rule,
     ofputil_append_flow_update(&fu, msgs);
 }
 
+//遍历 rules 每个元素加入 msgs 中
 void
 ofmonitor_compose_refresh_updates(struct rule_collection *rules,
                                   struct ovs_list *msgs)
@@ -5496,6 +5498,14 @@ ofmonitor_compose_refresh_updates(struct rule_collection *rules,
     }
 }
 
+//对于 rule 满足
+//1. 不是隐藏的
+//2. ACTION 包含 out_port
+//3. rule->add_seq > seqno 或 modify_seqno > seqno
+//4. 在 m->flags 的监控范围之内
+// 加入 rules
+//
+// 初始化 rule->monitor_flags
 static void
 ofproto_collect_ofmonitor_refresh_rule(const struct ofmonitor *m,
                                        struct rule *rule, uint64_t seqno,
@@ -5534,6 +5544,11 @@ ofproto_collect_ofmonitor_refresh_rule(const struct ofmonitor *m,
     rule->monitor_flags |= update | (m->flags & NXFMF_ACTIONS);
 }
 
+/*
+ * 1. 将 m->match 克隆到 target->match
+ * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+ *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+ */
 static void
 ofproto_collect_ofmonitor_refresh_rules(const struct ofmonitor *m,
                                         uint64_t seqno,
@@ -5544,7 +5559,12 @@ ofproto_collect_ofmonitor_refresh_rules(const struct ofmonitor *m,
     const struct oftable *table;
     struct cls_rule target;
 
+    //1. 将 m->match 克隆到 target->match
     cls_rule_init_from_minimatch(&target, &m->match, 0);
+    /*
+     * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+     * 遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+     */
     FOR_EACH_MATCHING_TABLE (table, m->table_id, ofproto) {
         struct rule *rule;
 

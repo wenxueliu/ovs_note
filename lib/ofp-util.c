@@ -6025,6 +6025,7 @@ ofputil_start_flow_update(struct ovs_list *replies)
     list_push_back(replies, &msg->list_node);
 }
 
+//将 update 加入 replies
 void
 ofputil_append_flow_update(const struct ofputil_flow_update *update,
                            struct ovs_list *replies)

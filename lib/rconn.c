@@ -703,6 +703,7 @@ rconn_recv(struct rconn *rc)
         int error = vconn_recv(rc->vconn, &buffer);
         if (!error) {
             copy_to_monitor(rc, buffer);
+            //作用?
             if (rc->probably_admitted || is_admitted_msg(buffer)
                 || time_now() - rc->last_connected >= 30) {
                 rc->probably_admitted = true;
@@ -736,7 +737,7 @@ rconn_recv_wait(struct rconn *rc)
 }
 
 /*
- * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员, b->list_node 加入 rc->txq 链表尾
+ * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员, b->list_node 加入 rc->txq 链表尾, 等待发送
  * 否则 直接释放 b 的内存
  *
  */
@@ -784,6 +785,11 @@ rconn_send__(struct rconn *rc, struct ofpbuf *b,
  * There is no rconn_send_wait() function: an rconn has a send queue that it
  * takes care of sending if you call rconn_run(), which will have the side
  * effect of waking up poll_block(). */
+/*
+ * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员, b->list_node 加入 rc->txq 链表尾, 等待发送
+ * 否则 直接释放 b 的内存
+ *
+ */
 int
 rconn_send(struct rconn *rc, struct ofpbuf *b,
            struct rconn_packet_counter *counter)

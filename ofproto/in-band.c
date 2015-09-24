@@ -89,7 +89,7 @@ struct in_band_rule {
 
 struct in_band {
     struct ofproto *ofproto;
-    int queue_id;
+    int queue_id;               /* default -1 */
 
     /* Remote information. */
     time_t next_remote_refresh; /* Refresh timer. */
@@ -417,6 +417,15 @@ in_band_wait(struct in_band *in_band)
     poll_timer_wait_until(wakeup * 1000);
 }
 
+/*
+ *
+ * 初始化 in_band 各个数据成员, 但不包含 remotes, n_remotes, local_mac,
+ *
+ * 注
+ * 1. local_netdev 的类型是 internal
+ * 2. 借助 in_band_set_remotes 初始化 remotes, n_remotes
+ *
+ */
 int
 in_band_create(struct ofproto *ofproto, const char *local_name,
                struct in_band **in_bandp)
@@ -487,6 +496,7 @@ any_addresses_changed(struct in_band *ib,
     return false;
 }
 
+//用 addresses 初始化 in_band 的 remotes
 void
 in_band_set_remotes(struct in_band *ib,
                     const struct sockaddr_in *addresses, size_t n)
