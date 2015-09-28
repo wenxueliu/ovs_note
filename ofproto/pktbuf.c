@@ -38,6 +38,11 @@ COVERAGE_DEFINE(pktbuf_reuse_error);
  * is an index into an array of buffers.  The cookie distinguishes between
  * different packets that have occupied a single buffer.  Thus, the more
  * buffers we have, the lower-quality the cookie... */
+
+/* @id : buffer_id, 低 0-7 位为 buffer number, 第 9-31 是 cookie id
+ * cookie 是 id 与 buffer 是否对应的标志
+ */
+
 #define PKTBUF_BITS     8
 #define PKTBUF_MASK     (PKTBUF_CNT - 1)
 #define PKTBUF_CNT      (1u << PKTBUF_BITS)
@@ -168,6 +173,14 @@ pktbuf_get_null(void)
  * The L3 header of a returned packet will be 32-bit aligned.
  *
  * On failure, stores NULL in in '*bufferp' and UINT16_MAX in '*in_port'. */
+
+/* 如果 id 中的 cookie 与 ofconn->pkgbuf 中的 cookie 对应, 那么
+ *
+ *      bufferp = ofconn->pktbuf->packet[id & PKTBUF_MASK]->buff,
+ *      in_port = ofconn->pktbuf->packet[id & PKTBUF_MASK]->in_port
+ *
+ * @id : buffer_id, 低 0-7 位为 buffer number, 第 9-31 是 cookie id
+ */
 enum ofperr
 pktbuf_retrieve(struct pktbuf *pb, uint32_t id, struct dp_packet **bufferp,
                 ofp_port_t *in_port)

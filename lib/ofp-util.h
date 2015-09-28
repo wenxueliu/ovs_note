@@ -846,7 +846,7 @@ struct ofputil_role_request {
 struct ofputil_role_status {
     enum ofp12_controller_role role;
     enum ofp14_controller_role_reason reason;
-    uint64_t generation_id;
+    uint64_t generation_id;                 /* master_election_id */
 };
 
 enum ofperr ofputil_decode_role_message(const struct ofp_header *,

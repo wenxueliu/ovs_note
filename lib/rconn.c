@@ -737,7 +737,7 @@ rconn_recv_wait(struct rconn *rc)
 }
 
 /*
- * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员, b->list_node 加入 rc->txq 链表尾, 等待发送
+ * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员所对应的连接, b->list_node 加入 rc->txq 链表尾, 等待发送
  * 否则 直接释放 b 的内存
  *
  */
@@ -891,12 +891,16 @@ rconn_is_alive(const struct rconn *rconn)
 }
 
 /* Returns true if 'rconn' is connected, false otherwise. */
+//rconn->state = S_IDLE || S_ACTIVE
 bool
 rconn_is_connected(const struct rconn *rconn)
 {
     return is_connected_state(rconn->state);
 }
 
+
+//rconn->state = S_IDLE || S_ACTIVE 并且 rconn->last_admitted >= rconn->last_connected
+//判断当前 rconn 是否一直被控制器管理, 即 rconn 和对端已经建立连接, 并且上次接受控制消息的时间在建立连接之后
 static bool
 rconn_is_admitted__(const struct rconn *rconn)
     OVS_REQUIRES(rconn->mutex)
@@ -923,6 +927,9 @@ rconn_is_admitted(const struct rconn *rconn)
 /* Returns 0 if 'rconn' is currently connected and considered to have been
  * accepted by the peer's admission-control policy, otherwise the number of
  * seconds since 'rconn' was last in such a state. */
+
+//如果控制器一直监管交换机　返回 0;
+//如果当前控制器已经不再接管交换机, 返回上次管理时间到现在的时间
 int
 rconn_failure_duration(const struct rconn *rconn)
     OVS_EXCLUDED(rconn->mutex)
@@ -1304,7 +1311,7 @@ close_monitor(struct rconn *rc, size_t idx, int retval)
     rc->monitors[idx] = rc->monitors[--rc->n_monitors];
 }
 
-//将 b 发送给所有的 rc->monitors
+//将 b 发送给所有的 rc->monitors 所对应的连接
 static void
 copy_to_monitor(struct rconn *rc, const struct ofpbuf *b)
     OVS_REQUIRES(rc->mutex)
@@ -1348,6 +1355,8 @@ is_connected_state(enum state state)
  * uses to determine whether a switch is admissible, true if the message is one
  * that would typically be used only after the controller has admitted the
  * switch. */
+
+//b 是否是控制器已经接管交换机的消息. 根据 b 的类型是否是已经建立连接后的消息来判断当前控制器是否已经接管交换机.
 static bool
 is_admitted_msg(const struct ofpbuf *b)
 {

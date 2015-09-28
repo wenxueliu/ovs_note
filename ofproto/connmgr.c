@@ -279,6 +279,7 @@ connmgr_destroy(struct connmgr *mgr)
     }
     ovs_mutex_unlock(&ofproto_mutex);
 
+    //不需要销毁每个 controllers 对象 ?
     hmap_destroy(&mgr->controllers);
 
     HMAP_FOR_EACH_SAFE (ofservice, next_ofservice, node, &mgr->services) {
@@ -307,6 +308,15 @@ connmgr_destroy(struct connmgr *mgr)
  * 'handle_openflow' for each message received on an OpenFlow connection,
  * passing along the OpenFlow connection itself and the message that was sent.
  * 'handle_openflow' must not modify or free the message. */
+/*
+ * 最主要的就是将包发送出去, 然后调用回调函数处理应答. 此外, connmgr 中其他运行起来
+ * 1. 更新 in_band 对象
+ * 2. 遍历 all_conns 中每一个元素 ofconn, 将 ofconn->schedulers 中的包发送出去, 用 handle_openflow 处理对方应答
+ * 3. 如果该 ofconn 的 monitor 有被设置为停止的, 唤醒.
+ * 4. 如果激活而且有其他控制连接, 断了连接时间超过 next_bogus_packet_in, 发送伪造 PACKET_IN, 否则, 等待 2s; 否则设置不在发送伪造包
+ * 5. 遍历 mgr->services, 如果有请求,　就创建对应的 ofconn 连接, 没有就跳过
+ * 6. 遍历 mgr->n_snoops, 如果收到请求, 加入角色最高的 ofconn 的 monitor
+ */
 void
 connmgr_run(struct connmgr *mgr,
             void (*handle_openflow)(struct ofconn *,
@@ -317,6 +327,7 @@ connmgr_run(struct connmgr *mgr,
     struct ofservice *ofservice;
     size_t i;
 
+    //1. 更新 in_band 对象
     if (mgr->in_band) {
         if (!in_band_run(mgr->in_band)) {
             in_band_destroy(mgr->in_band);
@@ -324,17 +335,23 @@ connmgr_run(struct connmgr *mgr,
         }
     }
 
+    //2. 遍历 all_conns 中每一个元素 ofconn, 将 ofconn->schedulers 中的包发送出去, 用 handle_openflow 处理对方应答
     LIST_FOR_EACH_SAFE (ofconn, next_ofconn, node, &mgr->all_conns) {
         ofconn_run(ofconn, handle_openflow);
     }
+
+    //3. 如果该 ofconn 的 monitor 有被设置为停止的, 唤醒.
     ofmonitor_run(mgr);
 
     /* Fail-open maintenance.  Do this after processing the ofconns since
      * fail-open checks the status of the controller rconn. */
+    //4. 如果激活而且有其他控制连接, 断了连接时间超过 next_bogus_packet_in, 发送伪造 PACKET_IN, 否则, 等待 2s
+    //否则设置不在发送伪造包
     if (mgr->fail_open) {
         fail_open_run(mgr->fail_open);
     }
 
+    //遍历 mgr->services, 如果有请求,　就创建对应的 ofconn 连接, 没有就跳过
     HMAP_FOR_EACH (ofservice, node, &mgr->services) {
         struct vconn *vconn;
         int retval;
@@ -363,6 +380,7 @@ connmgr_run(struct connmgr *mgr,
         }
     }
 
+    //遍历 mgr->n_snoops, 如果收到请求, 加入角色最高的 ofconn 的 monitor
     for (i = 0; i < mgr->n_snoops; i++) {
         struct vconn *vconn;
         int retval;
@@ -404,6 +422,7 @@ connmgr_wait(struct connmgr *mgr)
 
 /* Adds some memory usage statistics for 'mgr' into 'usage', for use with
  * memory_report(). */
+//计算当前 mgr 中的连接数和包数(已经发送, 未发送和在缓冲区(buffer_id)的)
 void
 connmgr_get_memory_usage(const struct connmgr *mgr, struct simap *usage)
 {
@@ -542,6 +561,11 @@ connmgr_free_controller_info(struct shash *info)
 
 /* Changes 'mgr''s set of controllers to the 'n_controllers' controllers in
  * 'controllers'. */
+
+/*
+ * 遍历 controllers 中每个元素 controller, 加入 mgr 的 controllers 或 ofservice 中, 删除旧的 controller
+ * 以及 ofservice.
+ */
 void
 connmgr_set_controllers(struct connmgr *mgr,
                         const struct ofproto_controller *controllers,
@@ -559,6 +583,11 @@ connmgr_set_controllers(struct connmgr *mgr,
     ovs_mutex_lock(&ofproto_mutex);
 
     /* Create newly configured controllers and services.  * Create a name to ofproto_controller mapping in 'new_controllers'. */
+    //遍历 controllers 中所有 controller, 
+    //如果是连接控制器的
+    //  如果不存在就建立连接并加入 mgr->controllers 中; 如果存在但是版本不一致就删掉旧的, 增加新的
+    //如果是接受 ovsdb 连接的
+    //  如果不存在就
     shash_init(&new_controllers);
     for (i = 0; i < n_controllers; i++) {
         const struct ofproto_controller *c = &controllers[i];
@@ -578,6 +607,7 @@ connmgr_set_controllers(struct connmgr *mgr,
                 ofconn_destroy(ofconn);
             }
             if (add) {
+                //增加一个新的 ofconn 到 mgr->controllers, 建立连接
                 add_controller(mgr, c->target, c->dscp, allowed_versions);
             }
         } else if (!pvconn_verify_name(c->target)) {
@@ -594,6 +624,7 @@ connmgr_set_controllers(struct connmgr *mgr,
                 add = true;
             }
             if (add) {
+                //将 ofservice 加入 mgr->services
                 ofservice_create(mgr, c->target, allowed_versions, c->dscp);
             }
         } else {
@@ -607,6 +638,7 @@ connmgr_set_controllers(struct connmgr *mgr,
 
     /* Delete controllers that are no longer configured.
      * Update configuration of all now-existing controllers. */
+    //删除其他非 controllers 中的 ofconn
     HMAP_FOR_EACH_SAFE (ofconn, next_ofconn, hmap_node, &mgr->controllers) {
         const char *target = ofconn_get_target(ofconn);
         struct ofproto_controller *c;
@@ -623,6 +655,7 @@ connmgr_set_controllers(struct connmgr *mgr,
 
     /* Delete services that are no longer configured.
      * Update configuration of all now-existing services. */
+    //删除其他非 controllers 中的 ofservice
     HMAP_FOR_EACH_SAFE (ofservice, next_ofservice, node, &mgr->services) {
         const char *target = pvconn_get_name(ofservice->pvconn);
         struct ofproto_controller *c;
@@ -641,8 +674,11 @@ connmgr_set_controllers(struct connmgr *mgr,
 
     ovs_mutex_unlock(&ofproto_mutex);
 
+    //用 mgr->controllers 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
     update_in_band_remotes(mgr);
+    // 如果 mgr 配置 controller 而且 fail_mode = OFPROTO_FAIL_STANDALONE ; mgr->fail_open 才有意义; 否则 mgr->fail_open = NULL
     update_fail_open(mgr);
+    //更新后 mgr->controller 由 null 变为 nonull, 或 nonull 变为 null; 刷新所有流表
     if (had_controllers != connmgr_has_controllers(mgr)) {
         ofproto_flush_flows(mgr->ofproto);
     }
@@ -664,6 +700,8 @@ connmgr_reconnect(const struct connmgr *mgr)
  *
  * A "snoop" is a pvconn to which every OpenFlow message to or from the most
  * important controller on 'mgr' is mirrored. */
+
+//删除 mgr->snoops  中的旧元素, 将 snoops 增加进去
 int
 connmgr_set_snoops(struct connmgr *mgr, const struct sset *snoops)
 {
@@ -690,6 +728,8 @@ connmgr_has_snoops(const struct connmgr *mgr)
 
 /* Creates a new controller for 'target' in 'mgr'.  update_controller() needs
  * to be called later to finish the new ofconn's configuration. */
+
+//增加一个新的 ofconn 到 mgr->controllers, 建立连接
 static void
 add_controller(struct connmgr *mgr, const char *target, uint8_t dscp,
                uint32_t allowed_versions)
@@ -707,6 +747,7 @@ add_controller(struct connmgr *mgr, const char *target, uint8_t dscp,
     free(name);
 }
 
+//查找 mgr->controllers 中是否存在 target 的 ofconn
 static struct ofconn *
 find_controller_by_target(struct connmgr *mgr, const char *target)
 {
@@ -722,7 +763,7 @@ find_controller_by_target(struct connmgr *mgr, const char *target)
 }
 
 /*
- * 用 mgr->controllers 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
+ * 用 mgr->controllers 中 ofconn->type = OFPROTO_IN_BAND 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
  */
 static void
 update_in_band_remotes(struct connmgr *mgr)
@@ -766,6 +807,7 @@ update_in_band_remotes(struct connmgr *mgr)
          * We will destroy mgr->in_band after it's done with that. */
     }
     if (mgr->in_band) {
+        //清除旧的 remotes, 用 addresses 初始化 in_band 的 remotes
         in_band_set_remotes(mgr->in_band, addrs, n_addrs);
     }
 
@@ -774,8 +816,9 @@ update_in_band_remotes(struct connmgr *mgr)
 }
 
 /*
- * 如果 mgr 配置 controller 而且 fail_mode = OFPROTO_FAIL_STANDALONE ; mgr->fail_open 才有意义
- * 否则 mgr->fail_open = NULL
+ * 如果 mgr 配置 controller 而且 fail_mode = OFPROTO_FAIL_STANDALONE ; 创建 mgr->fail_open.
+ * 否则 删除 mgr->fail_open, mgr->fail_open = NULL
+ * 注: 由上可知 mgr->fail_open 只有在 fail_mode = OFPROTO_FAIL_STANDALONE 才有用
  */
 static void
 update_fail_open(struct connmgr *mgr)
@@ -792,6 +835,7 @@ update_fail_open(struct connmgr *mgr)
     }
 }
 
+//删除 pvonnsp 中的 n_pvconnsp 个旧元素, 将 sset 增加进去
 static int
 set_pvconns(struct pvconn ***pvconnsp, size_t *n_pvconnsp,
             const struct sset *sset)
@@ -922,6 +966,7 @@ ofconn_get_role(const struct ofconn *ofconn)
     return ofconn->role;
 }
 
+//发送 role 角色状态信息. 1.4 协议才支持.
 void
 ofconn_send_role_status(struct ofconn *ofconn, uint32_t role, uint8_t reason)
 {
@@ -940,6 +985,7 @@ ofconn_send_role_status(struct ofconn *ofconn, uint32_t role, uint8_t reason)
 
 /* Changes 'ofconn''s role to 'role'.  If 'role' is OFPCR12_ROLE_MASTER then
  * any existing master is demoted to a slave. */
+//如果 role 是 MASTER 角色, 覆盖已经存在的 MASTER 角色. 否则直接 ofconn->role = role
 void
 ofconn_set_role(struct ofconn *ofconn, enum ofp12_controller_role role)
 {
@@ -956,6 +1002,7 @@ ofconn_set_role(struct ofconn *ofconn, enum ofp12_controller_role role)
     ofconn->role = role;
 }
 
+//设置发送给控制器 PACKET_IN 消息的原因是 OFPR_INVALID_TTL
 void
 ofconn_set_invalid_ttl_to_controller(struct ofconn *ofconn, bool enable)
 {
@@ -967,6 +1014,7 @@ ofconn_set_invalid_ttl_to_controller(struct ofconn *ofconn, bool enable)
     }
 }
 
+//控制器获取 PACKET_IN 消息的原因是否是 OFPR_INVALID_TTL
 bool
 ofconn_get_invalid_ttl_to_controller(struct ofconn *ofconn)
 {
@@ -1005,6 +1053,7 @@ void
 ofconn_set_protocol(struct ofconn *ofconn, enum ofputil_protocol protocol)
 {
     ofconn->protocol = protocol;
+    //取消一些 1.4 版本之前不支持的功能
     if (!(protocol & OFPUTIL_P_OF14_UP)) {
         uint32_t *master = ofconn->master_async_config;
         uint32_t *slave = ofconn->slave_async_config;
@@ -1155,6 +1204,14 @@ ofconn_send_error(const struct ofconn *ofconn,
 }
 
 /* Same as pktbuf_retrieve(), using the pktbuf owned by 'ofconn'. */
+
+/* 如果 id 中的 cookie 与 ofconn->pkgbuf 中的 cookie 对应, 那么
+ *
+ *      bufferp = ofconn->pktbuf->packet[id & PKTBUF_MASK]->buff,
+ *      in_port = ofconn->pktbuf->packet[id & PKTBUF_MASK]->in_port
+ *
+ * @id : buffer_id, 低 0-7 位为 buffer number, 第 9-31 是 cookie id
+ */
 enum ofperr
 ofconn_pktbuf_retrieve(struct ofconn *ofconn, uint32_t id,
                        struct dp_packet **bufferp, ofp_port_t *in_port)
@@ -1548,6 +1605,16 @@ ofconn_log_flow_mods(struct ofconn *ofconn)
  * a OFPPR_* value for OAM_PORT_STATUS, or an OFPRR_* value for
  * OAM_FLOW_REMOVED.  Returns false if the message should not be sent on
  * 'ofconn'. */
+
+/*
+ * 是否可以发送异步消息
+ *
+ * 发送异步消息的条件:
+ * ofconn->protocol != OFPUTIL_P_NONE
+ * ofconn->rconn->state = S_ACTIVE | S_IDLE
+ * ofconn->type == OFCONN_SERVICE && ofconn->miss_send_len !=0 或 ofconn->type = OFCONN_PRIMARY
+ * (async_config[type] & 1<<reason) != 0
+ */
 static bool
 ofconn_receives_async_msg(const struct ofconn *ofconn,
                           enum ofputil_async_msg_type type,
@@ -1591,6 +1658,14 @@ ofconn_receives_async_msg(const struct ofconn *ofconn,
  *
  * Otherwise true is returned to indicate the packet should be forwarded to
  * the controller */
+
+/*
+ * 当 table-miss 时, 是否发送 PACKET_IN.
+ *
+ * 不发送的条件:
+ * 1. 协议版本 >= 1.3
+ * 2. ofconn->connmgr->ofproto->tables[pin->up.table_id].miss_config = OFPUTIL_TABLE_MISS_DEFAULT
+ */
 static bool
 ofconn_wants_packet_in_on_miss(struct ofconn *ofconn,
                                const struct ofproto_packet_in *pin)
@@ -1621,6 +1696,14 @@ ofconn_wants_packet_in_on_miss(struct ofconn *ofconn,
  *
  * This logic assumes that "table-miss" packet_in messages
  * are always sent to controller_id 0. */
+
+/*
+ * 连接管理(mgr)中是否存在 table_miss 的时候发送 PACKET_IN 的 ofconn
+ *
+ * 满足发送 PACKET_IN 的条件:
+ * 1. ofconn->controller_id = 0
+ * 2. 没有制定协议版本, 版本小于 1.3
+ */
 bool
 connmgr_wants_packet_in_on_miss(struct connmgr *mgr) OVS_EXCLUDED(ofproto_mutex)
 {
@@ -1653,6 +1736,11 @@ ofconn_make_name(const struct connmgr *mgr, const char *target)
     return xasprintf("%s<->%s", mgr->name, target);
 }
 
+/*
+ * 配置对 miss 和 action 的 PACKET_IN 消息进行速率限制
+ *
+ *
+ */
 static void
 ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
 {
@@ -1677,7 +1765,7 @@ ofconn_set_rate_limit(struct ofconn *ofconn, int rate, int burst)
 /*
  * 如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾
  * 否则 直接释放 b 的内存
- *
+ * 注: msg->header = counter
  */
 static void
 ofconn_send(const struct ofconn *ofconn, struct ofpbuf *msg,
@@ -1742,6 +1830,8 @@ connmgr_send_port_status(struct connmgr *mgr, struct ofconn *source,
 
 /* Sends an OFPT_FLOW_REMOVED or NXT_FLOW_REMOVED message based on 'fr' to
  * appropriate controllers managed by 'mgr'. */
+
+//遍历 mgr->all_conns, 如果满足发送异步消息的条件, 发送流表删除消息
 void
 connmgr_send_flow_removed(struct connmgr *mgr,
                           const struct ofputil_flow_removed *fr)
@@ -1768,6 +1858,8 @@ connmgr_send_flow_removed(struct connmgr *mgr,
  * in a "table-miss" flow (one with priority 0 and completely wildcarded) are
  * sent as OFPR_NO_MATCH.  This function returns the reason that should
  * actually be sent on 'ofconn' for 'pin'. */
+
+//返回发送 PACKET_IN 时的 reason
 static enum ofp_packet_in_reason
 wire_reason(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
 {
@@ -1802,6 +1894,10 @@ wire_reason(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
  * necessary according to their individual configurations.
  *
  * The caller doesn't need to fill in pin->buffer_id or pin->total_len. */
+/*
+ * 遍历  mgr->all_conns 每个元素 ofconn, 如果 ofconn 满足发送PACKET_IN 条件,
+ * 并且 pin.controller_id = ofconn->controller_id, 发送 PACKET_IN 消息
+ */
 void
 connmgr_send_packet_in(struct connmgr *mgr,
                        const struct ofproto_packet_in *pin)
@@ -1840,6 +1936,8 @@ do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
 
 /* Takes 'pin', composes an OpenFlow packet-in message from it, and passes it
  * to 'ofconn''s packet scheduler for sending. */
+
+//将一个异步 PACKET_IN 消息加入 ofconn->rconn.
 static void
 schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
                    enum ofp_packet_in_reason wire_reason)
@@ -1851,6 +1949,7 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
     pin.up.total_len = pin.up.packet_len;
 
     pin.up.reason = wire_reason;
+    //TODO OFPR_ACTION_SET 呢?
     if (pin.up.reason == OFPR_ACTION) {
         controller_max_len = pin.send_len;  /* max_len */
     } else {
@@ -1921,6 +2020,8 @@ connmgr_set_fail_mode(struct connmgr *mgr, enum ofproto_fail_mode fail_mode)
 
 /* Returns the longest probe interval among the primary controllers configured
  * on 'mgr'.  Returns 0 if there are no primary controllers. */
+
+//返回 mgr->controllers 所有 ofconn 中 probe_interval 最大值
 int
 connmgr_get_max_probe_interval(const struct connmgr *mgr)
 {
@@ -1937,6 +2038,11 @@ connmgr_get_max_probe_interval(const struct connmgr *mgr)
 
 /* Returns the number of seconds for which all of 'mgr's primary controllers
  * have been disconnected.  Returns 0 if 'mgr' has no primary controllers. */
+
+//如果找到控制器和交换机一直连接, 返回 0
+//如果 mgr 没有控制连接, 返回 0
+//如果控制器和交换机失去连接, mgr->controllers 的 ofconn 中找到上次失去连接到现在的最短时间
+//TODO: 如果一直保持连接与没有控制器都返回 0, 似乎矛盾
 int
 connmgr_failure_duration(const struct connmgr *mgr)
 {
@@ -1995,8 +2101,8 @@ static bool any_extras_changed(const struct connmgr *,
  * in-band control should guarantee access, in the same way that in-band
  * control guarantees access to OpenFlow controllers. */
 /*
- * 如果没有改变, 直接返回
- * 如果有改变, 删除原来的, 用新的初始化
+ * 如果mgr->extra_in_band_remotes 与 extras 没有改变, 直接返回
+ * 否则, 删除原来的, 用新的初始化
  */
 void
 connmgr_set_extra_in_band_remotes(struct connmgr *mgr,
@@ -2025,6 +2131,9 @@ connmgr_set_in_band_queue(struct connmgr *mgr, int queue_id)
     }
 }
 
+//检查 mgr->extra_in_band_remotes 与即将被修改的 extras 是否相同.
+//如果 mgr->n_extra_remotes = n && mgr->extra_in_band_remotes = extras, 返回 false
+//否则返回 true
 static bool
 any_extras_changed(const struct connmgr *mgr,
                    const struct sockaddr_in *extras, size_t n)
@@ -2113,6 +2222,9 @@ connmgr_count_hidden_rules(const struct connmgr *mgr)
  *
  * ofservice_reconfigure() must be called to fully configure the new
  * ofservice. */
+
+//根据 target 监听客户端连接, 并初始化 ofservice
+//分配 ofservice 对象加入 mgr->services
 static int
 ofservice_create(struct connmgr *mgr, const char *target,
                  uint32_t allowed_versions, uint8_t dscp)
@@ -2203,6 +2315,7 @@ ofmonitor_create(const struct ofputil_flow_monitor_request *request,
 
     *monitorp = NULL;
 
+    //确保request->id 对应的 ofmonitor 不存在
     m = ofmonitor_lookup(ofconn, request->id);
     if (m) {
         return OFPERR_OFPMOFC_MONITOR_EXISTS;
@@ -2355,9 +2468,9 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
 }
 
 /*
- * 遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
- * 如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员,
- * msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+ *  遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+ *  如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+ *  如果 msg->size 之和大于 128 * 1024 就发送监控停止消息, 停止 monitor_seqno++ 的 monitor
  */
 void
 ofmonitor_flush(struct connmgr *mgr)
@@ -2371,11 +2484,12 @@ ofmonitor_flush(struct connmgr *mgr)
         LIST_FOR_EACH_POP (msg, list_node, &ofconn->updates) {
             unsigned int n_bytes;
 
+            //将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾
             ofconn_send(ofconn, msg, ofconn->monitor_counter);
             n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
-            //如果当前 monitor 都在运行, 而 n_bytes 大于 128 K, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, 
-            //msg->list_node 加入 ofconn->rconn->txq 链表尾
-            //TODO: WHY ?
+            //如果当前 monitor 都在运行, 而 n_bytes 大于 128 K, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员,
+            //pause->list_node 加入 ofconn->rconn->txq 链表尾
+            //TODO: WHY ? 这里主要是流控
             if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {
                 struct ofpbuf *pause;
 

@@ -19,6 +19,7 @@
 组表
 
 
+sudo ovs-vsctl list Controller
 ovs-vsctl set Open_vSwitch . other-config:n-handler-threads=1 other-config:n-revalidator-threads=1
 ovs-vsctl --no-wait set Open_vSwitch .  other_config:n-handler-threads=1
 ovs-vsctl get bridge br0  other-config:flow-eviction-threshold

@@ -5546,7 +5546,7 @@ ofproto_collect_ofmonitor_refresh_rule(const struct ofmonitor *m,
 
 /*
  * 1. 将 m->match 克隆到 target->match
- * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+ * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
  *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
  */
 static void
@@ -5562,7 +5562,7 @@ ofproto_collect_ofmonitor_refresh_rules(const struct ofmonitor *m,
     //1. 将 m->match 克隆到 target->match
     cls_rule_init_from_minimatch(&target, &m->match, 0);
     /*
-     * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
+     * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
      * 遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
      */
     FOR_EACH_MATCHING_TABLE (table, m->table_id, ofproto) {

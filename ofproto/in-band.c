@@ -107,6 +107,12 @@ struct in_band {
 
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(60, 60);
 
+/*
+ * 1. 清空 r->remote_mac
+ * 2. 找到下一个 r->remote_addr.sin_addr 的下一跳地址和设备, 如果下一跳地址为空, 就用当前地址初始化
+ * 3. 如果 r->remote_netdev 为 NULL 或 r->remote_netdev != next_hop_dev, 就关闭旧的 netdev, 打开新的 netdev. 并初始化 r->remote_netdev 为新的 netdev
+ * 4. 查找 r->remote_netdev 的 mac 地址, 赋值给 r->remote_mac, 如果找到, 等待 10s, 如果找不到立即刷新
+ */
 static int
 refresh_remote(struct in_band *ib, struct in_band_remote *r)
 {
@@ -115,7 +121,9 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
     int retval;
 
     /* Find the next-hop IP address. */
+    //清空 r->remote_mac
     memset(r->remote_mac, 0, sizeof r->remote_mac);
+    //找到下一个 r->remote_addr.sin_addr 的下一跳地址, 如果下一跳地址为空, 就用当前地址初始化
     retval = netdev_get_next_hop(ib->local_netdev, &r->remote_addr.sin_addr,
                                  &next_hop_inaddr, &next_hop_dev);
     if (retval) {
@@ -129,6 +137,8 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
     }
 
     /* Open the next-hop network device. */
+    //如果 r->remote_netdev 为 NULL 或 r->remote_netdev != next_hop_dev,
+    //就关闭旧的 netdev, 打开新的 netdev. 并初始化 r->remote_netdev 为新的 netdev
     if (!r->remote_netdev
         || strcmp(netdev_get_name(r->remote_netdev), next_hop_dev))
     {
@@ -147,6 +157,7 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
     }
     free(next_hop_dev);
 
+    //查找 r->remote_netdev 的 mac 地址, 赋值给 r->remote_mac
     /* Look up the MAC address of the next-hop IP address. */
     retval = netdev_arp_lookup(r->remote_netdev, next_hop_inaddr.s_addr,
                                r->remote_mac);
@@ -162,6 +173,8 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
     return eth_addr_is_zero(r->remote_mac) ? 1 : 10;
 }
 
+//遍历 ib->remotes 的所有设备, 刷新下一个地址和网络设备, 并查找下一跳设备的
+//MAC, 如果前后 MAC 地址发生变化, 就返回 true
 static bool
 refresh_remotes(struct in_band *ib)
 {
@@ -182,10 +195,12 @@ refresh_remotes(struct in_band *ib)
         memcpy(old_remote_mac, r->remote_mac, ETH_ADDR_LEN);
 
         /* Refresh remote information. */
+        //刷新下一个地址和网络设备, 并查找下一跳设备的 MAC, //如果找到就设置刷新时间为当前直接加 10s, 否则, 立即刷新
         next_refresh = refresh_remote(ib, r) + time_now();
         ib->next_remote_refresh = MIN(ib->next_remote_refresh, next_refresh);
 
         /* If the MAC changed, log the changes. */
+        //这里如果 r->remote_mac = NULL 是否应该警告?
         if (!eth_addr_equals(r->remote_mac, old_remote_mac)) {
             any_changes = true;
             if (!eth_addr_is_zero(r->remote_mac)
@@ -205,6 +220,7 @@ refresh_remotes(struct in_band *ib)
 
 /* Refreshes the MAC address of the local port into ib->local_mac, if it is due
  * for a refresh.  Returns true if anything changed, otherwise false.  */
+//如果 ib->next_local_refresh 小于当前时间并且 ib->local_mac 改变, 就将ib->local_netdev 新的 mac 地址复制给 ib->local_mac
 static bool
 refresh_local(struct in_band *ib)
 {
@@ -246,6 +262,7 @@ in_band_count_rules(const struct in_band *ib)
     return hmap_count(&ib->rules);
 }
 
+//利用 match, priority 构造 in_band_rule对象, 加入 ib
 static void
 add_rule(struct in_band *ib, const struct match *match, int priority)
 {
@@ -266,6 +283,7 @@ add_rule(struct in_band *ib, const struct match *match, int priority)
     hmap_insert(&ib->rules, &rule->hmap_node, hash);
 }
 
+//删除已经存在的, 重新添加一些默认规则
 static void
 update_rules(struct in_band *ib)
 {
@@ -279,6 +297,9 @@ update_rules(struct in_band *ib)
         ib_rule->op = DEL;
     }
 
+    //允许从 local port 发送 DHCP 请求
+    //允许从 local mac 发送 ARP 请求
+    //允许从 local mac 发送 ARP 应答
     if (ib->n_remotes && !eth_addr_is_zero(ib->local_mac)) {
         /* (a) Allow DHCP requests sent from the local port. */
         match_init_catchall(&match);
@@ -305,6 +326,8 @@ update_rules(struct in_band *ib)
         add_rule(ib, &match, IBR_FROM_LOCAL_ARP);
     }
 
+    //遍历ib->remotes, 如果 r->remote_mac 不为 NULL, 允许 r->remote_mac 发送 ARP
+    //请求和发送 ARP 应答
     for (r = ib->remotes; r < &ib->remotes[ib->n_remotes]; r++) {
         const uint8_t *remote_mac = r->remote_mac;
 
@@ -327,6 +350,8 @@ update_rules(struct in_band *ib)
         add_rule(ib, &match, IBR_FROM_NEXT_HOP_ARP);
     }
 
+    //遍历ib->remotes, 允许 r->remote_addr 发送 ARP 应答, 发送　ARP 请求, 发送
+    //TCP 包, 接受 TCP 包
     for (r = ib->remotes; r < &ib->remotes[ib->n_remotes]; r++) {
         const struct sockaddr_in *a = &r->remote_addr;
 
@@ -369,6 +394,10 @@ update_rules(struct in_band *ib)
  * and 'ib' doesn't have any rules left to remove from the OpenFlow flow
  * table.  Thus, a false return value means that the caller can destroy 'ib'
  * without leaving extra flows hanging around in the flow table. */
+
+//更新 ib 的 local 和 remote netdev 及 rules.
+//如果流表为 NULL 或 remote netdev 为 NULL, 就返回 false;
+//否则返回 true;
 bool
 in_band_run(struct in_band *ib)
 {
@@ -377,6 +406,10 @@ in_band_run(struct in_band *ib)
 
     struct in_band_rule *rule, *next;
 
+    //初始化 ofpacts
+    //ofpacts->base = ofpacts_stub
+    //ofpacts->allocated = sizeof ofpacts_stub
+    //ofpacts->source = OFPBUF_STUB
     ofpbuf_use_stub(&ofpacts, ofpacts_stub, sizeof ofpacts_stub);
 
     if (ib->queue_id >= 0) {
@@ -384,9 +417,12 @@ in_band_run(struct in_band *ib)
     }
     ofpact_put_OUTPUT(&ofpacts)->port = OFPP_NORMAL;
 
+    //如果 ib->next_local_refresh 小于当前时间并且 ib->local_mac 改变, 就将 ib->local_netdev 新的 mac 地址复制给 ib->local_mac
     refresh_local(ib);
+    //遍历 ib->remotes 的所有设备, 刷新下一个地址和网络设备, 并查找下一跳设备的 MAC, 如果前后 MAC 地址发生变化, 就返回 true
     refresh_remotes(ib);
 
+    //删除已经存在的流表, 重新添加一些默认流表
     update_rules(ib);
 
     HMAP_FOR_EACH_SAFE (rule, next, hmap_node, &ib->rules) {
@@ -496,7 +532,7 @@ any_addresses_changed(struct in_band *ib,
     return false;
 }
 
-//用 addresses 初始化 in_band 的 remotes
+//清除旧的 remotes, 用 addresses 初始化 in_band 的 remotes
 void
 in_band_set_remotes(struct in_band *ib,
                     const struct sockaddr_in *addresses, size_t n)

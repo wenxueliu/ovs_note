@@ -140,9 +140,12 @@ send_bogus_packet_ins(struct fail_open *fo)
 }
 
 /* Enter fail-open mode if we should be in it. */
+//如果激活而且有控制连接, 断了连接时间超过 next_bogus_packet_in, 发送伪造 PACKET_IN, 否则, 等待 2s
+//否则设置不在发送伪造包
 void
 fail_open_run(struct fail_open *fo)
 {
+    //返回 fo->connmgr 中 ofconn 断开最短时间
     int disconn_secs = connmgr_failure_duration(fo->connmgr);
 
     /* Enter fail-open mode if 'fo' is not in it but should be.  */
@@ -165,6 +168,8 @@ fail_open_run(struct fail_open *fo)
     }
 
     /* Schedule a bogus packet-in if we're connected and in fail-open. */
+    //如果激活而且有控制连接, 断了连接时间超过 next_bogus_packet_in, 发送伪造 PACKET_IN, 否则, 等待 2s
+    //否则设置不在发送伪造包
     if (fail_open_is_active(fo)) {
         if (connmgr_is_any_controller_connected(fo->connmgr)) {
             bool expired = time_msec() >= fo->next_bogus_packet_in;
