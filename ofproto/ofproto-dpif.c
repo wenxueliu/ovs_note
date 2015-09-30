@@ -291,6 +291,7 @@ struct dpif_backer {
 /* All existing ofproto_backer instances, indexed by ofproto->up.type. */
 static struct shash all_dpif_backers = SHASH_INITIALIZER(&all_dpif_backers);
 
+//保存在 all_ofproto_dpifs 中
 struct ofproto_dpif {
     struct hmap_node all_ofproto_dpifs_node; /* In 'all_ofproto_dpifs'. */
     struct ofproto up;
@@ -430,6 +431,11 @@ ofproto_dpif_wants_packet_in_on_miss(struct ofproto_dpif *ofproto)
 
 /* Factory functions. */
 
+/*
+ * 1. 将 iface_hints 加入 init_ofp_ports
+ * 2. 注册 ofproto/trace, fdb, mdb, dpif 命令
+ * 3. 注册 upcall 命令
+ */
 static void
 init(const struct shash *iface_hints)
 {
@@ -451,12 +457,20 @@ init(const struct shash *iface_hints)
     udpif_init();
 }
 
+/*
+ * 注册 tunnel port, tunnel arp, dpctl, route 命令
+ * 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
+ * 将 base_dpif_classes 中的每个元素的 type 加入 types (实际上 types 包含 netdev, system 两个元素)
+ */
 static void
 enumerate_types(struct sset *types)
 {
     dp_enumerate_types(types);
 }
 
+/*
+ * 遍历 all_ofproto_dpifs 中的元素 ofproto, 如果 ofproto.up.type = type, 加入 * names
+ */
 static int
 enumerate_names(const char *type, struct sset *names)
 {
@@ -479,6 +493,13 @@ del(const char *type, const char *name)
     struct dpif *dpif;
     int error;
 
+    /*
+    * 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+    * (
+    * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
+    * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
+    * )
+    */
     error = dpif_open(name, type, &dpif);
     if (!error) {
         error = dpif_delete(dpif);
@@ -870,6 +891,11 @@ struct odp_garbage {
 static bool check_variable_length_userdata(struct dpif_backer *backer);
 static void check_support(struct dpif_backer *backer);
 
+/*
+ * 如果 all_dpif_backers 存在 type, 对其中的 backer 引用计数加 1, 返回
+ *
+ *
+ */
 static int
 open_dpif_backer(const char *type, struct dpif_backer **backerp)
 {
@@ -5165,6 +5191,7 @@ disable_tnl_push_pop(struct unixctl_conn *conn OVS_UNUSED, int argc OVS_UNUSED,
     }
 }
 
+//注册 ofproto/trace, fdb, mdb, dpif 命令
 static void
 ofproto_unixctl_init(void)
 {

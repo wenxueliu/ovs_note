@@ -111,6 +111,15 @@ static void log_flow_get_message(const struct dpif *,
 /* Incremented whenever tnl route, arp, etc changes. */
 struct seq *tnl_conf_seq;
 
+/*
+ * 1. 注册 dpctl 命令
+ * 2. 注册 tunnel port 命令
+ * 3. 注册 tunnel arp cache 初始化
+ * 4. 注册 route 命令
+ * 4. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+ * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
+ *
+ */
 static void
 dp_initialize(void)
 {
@@ -120,11 +129,33 @@ dp_initialize(void)
         int i;
 
         tnl_conf_seq = seq_create();
+        //注册 dpctl 命令
         dpctl_unixctl_register();
+        /*
+         * classifier_init(&cls, flow_segment_u64s);
+         * 注册 tunnel port 命令
+         */
         tnl_port_map_init();
+        //注册tunnel arp 命令
         tnl_arp_cache_init();
+        /*
+        * 1. classifier_init(&cls, NULL)
+        * 2. 注册 route 命令
+        */
         route_table_init();
 
+        /* static const struct dpif_class *base_dpif_classes[] = {
+         * #if defined(__linux__) || defined(_WIN32)
+         *     &dpif_netlink_class,
+         * #endif
+         *     &dpif_netdev_class,
+         * };
+         *
+         * 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+         * 0. 检查 dpif_netlink_class 和 dpif_netdev_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
+         * 1. 调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
+         * 2. 将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+         */
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
         }
@@ -133,6 +164,11 @@ dp_initialize(void)
     }
 }
 
+/*
+ * 0. 检查 new_class 是否已经加入 dpif_classes 和 dpif_blacklist, 如果加入返回, 否则继续步骤 1
+ * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
+ * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ */
 static int
 dp_register_provider__(const struct dpif_class *new_class)
 {
@@ -169,6 +205,11 @@ dp_register_provider__(const struct dpif_class *new_class)
 
 /* Registers a new datapath provider.  After successful registration, new
  * datapaths of that type can be opened using dpif_open(). */
+/*
+ * 0. 检查 new_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
+ * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
+ * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ */
 int
 dp_register_provider(const struct dpif_class *new_class)
 {
@@ -238,11 +279,25 @@ dp_blacklist_provider(const char *type)
 
 /* Adds the types of all currently registered datapath providers to 'types'.
  * The caller must first initialize the sset. */
+
+/*
+ * 注册 tunnel port, tunnel arp, dpctl, route 命令
+ * 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
+ * 将 base_dpif_classes 中的每个元素的 type 加入 types (实际上 types 包含 netdev, system 两个元素)
+ */
 void
 dp_enumerate_types(struct sset *types)
 {
     struct shash_node *node;
 
+    /*
+    * 1. 注册 dpctl 命令
+    * 2. 注册 tunnel port 命令
+    * 3. 注册 tunnel arp cache 初始化
+    * 4. 注册 route 命令
+    * 5. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+    * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
+    */
     dp_initialize();
 
     ovs_mutex_lock(&dpif_mutex);
@@ -333,6 +388,13 @@ dp_parse_name(const char *datapath_name_, char **name, char **type)
     }
 }
 
+/*
+ * 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+ * (
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
+ * )
+ */
 static int
 do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 {
@@ -356,6 +418,7 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
     if (!error) {
         ovs_assert(dpif->dpif_class == registered_class->dpif_class);
     } else {
+        //registered_class->refcount--
         dp_class_unref(registered_class);
     }
 
@@ -369,6 +432,13 @@ exit:
  * the empty string to specify the default system type.  Returns 0 if
  * successful, otherwise a positive errno value.  On success stores a pointer
  * to the datapath in '*dpifp', otherwise a null pointer. */
+/*
+ * 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+ * (
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
+ * )
+ */
 int
 dpif_open(const char *name, const char *type, struct dpif **dpifp)
 {
@@ -505,6 +575,10 @@ dpif_get_dp_stats(const struct dpif *dpif, struct dpif_dp_stats *stats)
     return error;
 }
 
+/*
+ * 如果 datapath_type = system, 调用 dpif_netlink_class->port_open_type(dpif_netlink_class, port_type)
+ * 如果 datapath_type = netdev, 调用 dpif_netdev_class->port_open_type(dpif_netdev_class, port_type)
+ */
 const char *
 dpif_port_open_type(const char *datapath_type, const char *port_type)
 {

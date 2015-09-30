@@ -325,6 +325,7 @@ static void meter_insert_rule(struct rule *);
 static void ofproto_unixctl_init(void);
 
 /* All registered ofproto classes, in probe order. */
+//ofproto_dpif_class
 static const struct ofproto_class **ofproto_classes;
 static size_t n_ofproto_classes;
 static size_t allocated_ofproto_classes;
@@ -359,15 +360,24 @@ static bool flow_restore_wait = true;
  * provider will make copies of anything required.  An ofproto provider
  * will remove any existing state that is not described by the hint, and
  * may choose to remove it all. */
+/*
+ * 1. 将 ofproto_dpif_class 加入 ofproto_classes
+ * 2. 拷贝 iface_hints 到 init_ofp_ports
+ * 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. ofproto_classes[i]->init(&init_ofp_ports);
+ * 4. 注册 ofproto/list 到 ovsdb
+ *
+ */
 void
 ofproto_init(const struct shash *iface_hints)
 {
     struct shash_node *node;
     size_t i;
 
+    //1. 将 ofproto_dpif_class 加入 ofproto_classes
     ofproto_class_register(&ofproto_dpif_class);
 
     /* Make a local copy, since we don't own 'iface_hints' elements. */
+    // 2. 拷贝 iface_hints 到 init_ofp_ports
     SHASH_FOR_EACH(node, iface_hints) {
         const struct iface_hint *orig_hint = node->data;
         struct iface_hint *new_hint = xmalloc(sizeof *new_hint);
@@ -380,16 +390,22 @@ ofproto_init(const struct shash *iface_hints)
         shash_add(&init_ofp_ports, node->name, new_hint);
     }
 
+    // 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. ofproto_classes[i]->init(&init_ofp_ports);
     for (i = 0; i < n_ofproto_classes; i++) {
         ofproto_classes[i]->init(&init_ofp_ports);
     }
 
+    // 4. 注册 ofproto/list 到 ovsdb
     ofproto_unixctl_init();
 }
 
 /* 'type' should be a normalized datapath type, as returned by
  * ofproto_normalize_type().  Returns the corresponding ofproto_class
  * structure, or a null pointer if there is none registered for 'type'. */
+
+/*
+ * 由于 ofproto_class 只包含 ofproto_dpif_class, type 如果是 system, netdev 不会有问题
+ */
 static const struct ofproto_class *
 ofproto_class_find__(const char *type)
 {
@@ -415,6 +431,12 @@ ofproto_class_find__(const char *type)
 
 /* Registers a new ofproto class.  After successful registration, new ofprotos
  * of that type can be created using ofproto_create(). */
+/*
+ * 将 new_class 加入 ofproto_classes(实际将 ofproto_dpif_class 加入 ofproto_classes)
+ * 1. 检查 new_class 是否与 ofproto_classes 中的元素重复
+ * 2. 如果 ofproto_classes 空间不够, 扩容 2 倍
+ * 3. new_class 加入 ofproto_classes
+ */
 int
 ofproto_class_register(const struct ofproto_class *new_class)
 {
@@ -460,6 +482,13 @@ ofproto_class_unregister(const struct ofproto_class *class)
 
 /* Clears 'types' and enumerates all registered ofproto types into it.  The
  * caller must first initialize the sset. */
+
+/*
+ * 调用 ofproto_classes每个元素的 enumerate_types 方法初始化 types.(实际上 ofproto_classes 只有 ofproto_dpif_class,types 仅包含 system, netdev)
+ * 1. 注册 tunnel port, tunnel arp, dpctl, route 命令
+ * 2. 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
+ * 3. 将 dpif_classes 中的每个元素的 type 加入 types(实际上 types 仅包含 system, netdev)
+ */
 void
 ofproto_enumerate_types(struct sset *types)
 {
@@ -1643,6 +1672,10 @@ process_port_change(struct ofproto *ofproto, int error, char *devname)
     }
 }
 
+/*
+ * 目前 datapath_type 只能为 system, netdev
+ * 调用 ofproto_dpif_class->type_run(datapath_type)
+ */
 int
 ofproto_type_run(const char *datapath_type)
 {

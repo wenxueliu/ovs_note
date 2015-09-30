@@ -176,6 +176,10 @@ route_table_get_change_seq(void)
     return 0;
 }
 
+/*
+ * 1. classifier_init(&cls, NULL)
+ * 2. 注册 route 命令
+ */
 void
 route_table_init(void)
 {

@@ -202,6 +202,9 @@ tnl_arp_cache_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
     ds_destroy(&ds);
 }
 
+/*
+ * 注册 arp 命令
+ */
 void
 tnl_arp_cache_init(void)
 {

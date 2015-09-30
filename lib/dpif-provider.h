@@ -386,6 +386,8 @@ struct dpif_class {
 extern const struct dpif_class dpif_netlink_class;
 extern const struct dpif_class dpif_netdev_class;
 
+static struct ovs_mutex dpif_mutex = OVS_MUTEX_INITIALIZER;
+
 #ifdef  __cplusplus
 }
 #endif

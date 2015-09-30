@@ -858,6 +858,12 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     return 0;
 }
 
+/*
+ * 如果 name 在 dp_netdevs 并且 create = false, 返回 0
+ * 如果 name 在 dp_netdevs 并且 create = true,  返回 EEXIST
+ * 如果 name 不在 dp_netdevs 并且 create = true,  调用 create_dp_netdev(name, class)
+ * 如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
+ */
 static int
 dpif_netdev_open(const struct dpif_class *class, const char *name,
                  bool create, struct dpif **dpifp)

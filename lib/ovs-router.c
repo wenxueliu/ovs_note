@@ -306,6 +306,10 @@ ovs_router_flush(void)
 }
 
 /* May not be called more than once. */
+/*
+ * 1. classifier_init(&cls, NULL)
+ * 2. 注册 route 命令
+ */
 void
 ovs_router_init(void)
 {

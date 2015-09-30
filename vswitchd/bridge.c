@@ -2859,6 +2859,11 @@ status_update_wait(void)
     }
 }
 
+/*
+ * 1. 调用 ofproto_classes 每个元素的 enumerate_types 方法初始化 types.(实际上 ofproto_classes 只有 ofproto_dpif_class)
+   即 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes, 之后将 dpif_classes 中的每个元素的 type 加入 types
+ *
+ */
 static void
 bridge_run__(void)
 {
@@ -2868,7 +2873,16 @@ bridge_run__(void)
 
     /* Let each datapath type do the work that it needs to do. */
     sset_init(&types);
+    /*
+    * 调用 ofproto_classes 每个元素的 enumerate_types 方法初始化 types.(实际上 ofproto_classes
+    * 只有 ofproto_dpif_class,types 仅包含 system, netdev)
+    * 1. 注册 tunnel port, tunnel arp, dpctl, route 命令
+    * 2. 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
+    * 3. 将 dpif_classes 中的每个元素的 type 加入 types(实际上 types 仅包含 system, netdev)
+    */
     ofproto_enumerate_types(&types);
+    //调用 ofproto_dpif_class->type_run(type)
+    //(实际调用 ofproto_dpif_class->type_run("system") 与 ofproto_dpif_class->type_run("netdev"))
     SSET_FOR_EACH (type, &types) {
         ofproto_type_run(type);
     }
@@ -2908,6 +2922,7 @@ bridge_run(void)
         /* Since we will not be running system_stats_run() in this process
          * with the current situation of multiple ovs-vswitchd daemons,
          * disable system stats collection. */
+        //调用 system_stats_thread_func() 定时间隔获取系统统计信息, 报告 CPU,Memory, Proce 等等
         system_stats_enable(false);
         return;
     } else if (!ovsdb_idl_has_lock(idl)
