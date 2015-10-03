@@ -719,6 +719,7 @@ dpif_netdev_init(void)
     return 0;
 }
 
+//从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 保存在 all_dps 中
 static int
 dpif_netdev_enumerate(struct sset *all_dps,
                       const struct dpif_class *dpif_class)
@@ -746,6 +747,11 @@ dpif_netdev_class_is_dummy(const struct dpif_class *class)
     return class != &dpif_netdev_class;
 }
 
+/*
+ * 如果 type=internal, class=dpif_netdev_class 返回 dummy
+ * 如果 type=internal, class!=dpif_netdev_class 返回 tap
+ * 如果 type!=internal, 直接返回 type
+ */
 static const char *
 dpif_netdev_port_open_type(const struct dpif_class *class, const char *type)
 {
@@ -812,6 +818,7 @@ choose_port(struct dp_netdev *dp, const char *name)
     return ODPP_NONE;
 }
 
+//dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
 static int
 create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
@@ -859,8 +866,12 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
 }
 
 /*
- * 如果 name 在 dp_netdevs 并且 create = false, 返回 0
- * 如果 name 在 dp_netdevs 并且 create = true,  返回 EEXIST
+ * 检查 name, class 对应的 dp_netdev 是否存在, 如果不存在创建, 如果存在, create = false,
+ * 返回 0, 否则返回错误值
+ *
+ * 如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
+ * 如果 name 在 dp_netdevs 并且 dp->class = class && create = false,  返回 0
+ * 如果 name 在 dp_netdevs 并且 dp->class != class,  返回 EINVAL
  * 如果 name 不在 dp_netdevs 并且 create = true,  调用 create_dp_netdev(name, class)
  * 如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
  */
@@ -1059,11 +1070,17 @@ do_add_port(struct dp_netdev *dp, const char *devname, const char *type,
     int i;
 
     /* Reject devices already in 'dp'. */
+    //从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. portp 指向找到的 port
     if (!get_port_by_name(dp, devname, &port)) {
         return EEXIST;
     }
 
     /* Open and validate network device. */
+    /*
+    * 如果 type=internal, class=dpif_netdev_class 返回 dummy
+    * 如果 type=internal, class!=dpif_netdev_class 返回 tap
+    * 如果 type!=internal, 直接返回 type
+    */
     open_type = dpif_netdev_port_open_type(dp->class, type);
     error = netdev_open(devname, open_type, &netdev);
     if (error) {
@@ -1257,6 +1274,7 @@ port_unref(struct dp_netdev_port *port)
     }
 }
 
+//从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. portp 指向找到的 port
 static int
 get_port_by_name(struct dp_netdev *dp,
                  const char *devname, struct dp_netdev_port **portp)

@@ -1414,6 +1414,11 @@ netdev_vport_range(struct unixctl_conn *conn, int argc,
                                 tunnel_get_status,                             \
                                 BUILD_HEADER, PUSH_HEADER, POP_HEADER) }}
 
+/*
+ * 将 geneve, gre, ipsec, gre64, vxlan, list,stt 到 netdev_classes 中
+ *
+ * 注册 tnl/egress_port_range 命令
+ */
 void
 netdev_vport_tunnel_register(void)
 {
@@ -1451,6 +1456,9 @@ netdev_vport_tunnel_register(void)
     }
 }
 
+/*
+ * 将 type 为 patch 的 patch_class 加入 netdev_classes 中.
+ */
 void
 netdev_vport_patch_register(void)
 {

@@ -115,6 +115,7 @@ netdev_is_pmd(const struct netdev *netdev)
             !strcmp(netdev->netdev_class->type, "dpdkvhostuser"));
 }
 
+//初始化 netdev_class_mutex 保证每个线程只初始化一次
 static void
 netdev_class_mutex_initialize(void)
     OVS_EXCLUDED(netdev_class_mutex, netdev_mutex)
@@ -127,6 +128,10 @@ netdev_class_mutex_initialize(void)
     }
 }
 
+/*
+ * 将 type 为 patch, system, internal, tap, geneve, gre, ipsec, gre64, vxlan, list,stt,
+ * dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中, 并调用对应的初始化方法
+ */
 static void
 netdev_initialize(void)
     OVS_EXCLUDED(netdev_class_mutex, netdev_mutex)
@@ -137,12 +142,17 @@ netdev_initialize(void)
         netdev_class_mutex_initialize();
 
         fatal_signal_add_hook(restore_all_flags, NULL, NULL, true);
+        //将 type 为 patch 的 patch_class 加入 netdev_classes 中.
         netdev_vport_patch_register();
 
 #ifdef __linux__
+        //将 type 为 system 的　netdev_class 加入 netdev_classes
         netdev_register_provider(&netdev_linux_class);
+        //将 type 为 internal 的　netdev_class 加入 netdev_classes
         netdev_register_provider(&netdev_internal_class);
+        //将 type 为 tap 的　netdev_class 加入 netdev_classes
         netdev_register_provider(&netdev_tap_class);
+        //将 geneve, gre, ipsec, gre64, vxlan, list,stt 到 netdev_classes 中
         netdev_vport_tunnel_register();
 #endif
 #if defined(__FreeBSD__) || defined(__NetBSD__)
@@ -154,6 +164,7 @@ netdev_initialize(void)
         netdev_register_provider(&netdev_internal_class);
         netdev_vport_tunnel_register();
 #endif
+        //将 type 为 dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中
         netdev_dpdk_register();
 
         ovsthread_once_done(&once);
@@ -199,6 +210,9 @@ netdev_wait(void)
     ovs_mutex_unlock(&netdev_class_mutex);
 }
 
+/*
+ * 遍历 netdev_classes 找到与 type 匹配的 netdev_registered_class
+ */
 static struct netdev_registered_class *
 netdev_lookup_class(const char *type)
     OVS_REQ_RDLOCK(netdev_class_mutex)
@@ -216,6 +230,11 @@ netdev_lookup_class(const char *type)
 
 /* Initializes and registers a new netdev provider.  After successful
  * registration, new netdevs of that type can be opened using netdev_open(). */
+/*
+ * 将 new_class 初始化并加入　netdev_classes
+ * 1. 如果 new_class->type 已经存在于 netdev_classes 返回警告信息
+ * 2. 如果 new_class->type 不存在, 调用 new_class 的 init() 方法后, 将其加入 * netdev_classes
+ */
 int
 netdev_register_provider(const struct netdev_class *new_class)
     OVS_EXCLUDED(netdev_class_mutex, netdev_mutex)
@@ -251,6 +270,8 @@ netdev_register_provider(const struct netdev_class *new_class)
 /* Unregisters a netdev provider.  'type' must have been previously
  * registered and not currently be in use by any netdevs.  After unregistration
  * new netdevs of that type cannot be opened using netdev_open(). */
+
+//将 type 对应的 netdev_registered_class 从 netdev_classes 中删除
 int
 netdev_unregister_provider(const char *type)
     OVS_EXCLUDED(netdev_class_mutex, netdev_mutex)
@@ -284,6 +305,8 @@ netdev_unregister_provider(const char *type)
 
 /* Clears 'types' and enumerates the types of all currently registered netdev
  * providers into it.  The caller must first initialize the sset. */
+
+// 将 netdev_classes 中的 netdev_class->type 加入 types 中
 void
 netdev_enumerate_types(struct sset *types)
     OVS_EXCLUDED(netdev_mutex)
@@ -348,6 +371,21 @@ netdev_is_reserved_name(const char *name)
  *
  * Some network devices may need to be configured (with netdev_set_config())
  * before they can be used. */
+
+/*
+ * 从 netdev_classes 中找到 type 对应的 netdev_registered_class 对象 rc, 调用
+ * rc->class->alloc() 创建一个 netdev 对象 dev 并初始化, 并将 name, dev 加入
+ * netdev_shash, 增加 rc 的引用计数
+ *
+ * 1. 将 type 为 patch, system, internal, tap, geneve, gre, ipsec, gre64, vxlan, list,stt,
+dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中, 并调用对应的初始化方法
+ * 2. 如果 name 对应的 netdev 在 netdev_shash 中, 将 netdev 的引用计数加 1.
+ * 如果 name 对应的 netdev 不在 netdev_shash 中, 继续
+ * 3. 如果 type 在 netdev_classes 中, 调用 alloc 分配一个 netdev * 对象,初始化,加入 netdev_shash.
+ * 如果  type 不在 netdev_classes 中, 返回错误消息
+ *
+ * 这里加 1 的意义?
+ */
 int
 netdev_open(const char *name, const char *type, struct netdev **netdevp)
     OVS_EXCLUDED(netdev_mutex)
@@ -355,6 +393,10 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
     struct netdev *netdev;
     int error;
 
+    /*
+    * 将 type 为 patch, system, internal, tap, geneve, gre, ipsec, gre64, vxlan, list,stt,
+    * dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中, 并调用对应的初始化方法
+    */
     netdev_initialize();
 
     ovs_mutex_lock(&netdev_class_mutex);
@@ -503,6 +545,13 @@ netdev_get_numa_id(const struct netdev *netdev)
     }
 }
 
+/*
+ * 减少 dev 的引用计数, 如果引用计数为 0, 就释放该 dev
+ * 1. 减少 dev 的引用计数, 如果引用技术不为 0. 返回
+ * 2. 如果引用计数为 0:
+ *  * 从 netdev_shash 中删除 dev
+ *  * 释放各个成员的内存
+ */
 static void
 netdev_unref(struct netdev *dev)
     OVS_RELEASES(netdev_mutex)
@@ -550,6 +599,8 @@ netdev_close(struct netdev *netdev)
  * This function should only be called by the main thread when closing
  * netdevs during user configuration changes. Otherwise, netdev_close should be
  * used to close netdevs. */
+
+//从 netdev_shash 中删除 netdev, 减少 dev 的引用计数, 如果引用计数为 0, 就释放该 dev
 void
 netdev_remove(struct netdev *netdev)
 {
@@ -1704,6 +1755,8 @@ netdev_get_class(const struct netdev *netdev)
 /* Returns the netdev with 'name' or NULL if there is none.
  *
  * The caller must free the returned netdev with netdev_close(). */
+
+//根据 name 从 netdev_shash 中找到 netdev, 如果找到, 并将该 netdev 的引用计数加 1, 否则返回 NULL
 struct netdev *
 netdev_from_name(const char *name)
     OVS_EXCLUDED(netdev_mutex)
@@ -1724,6 +1777,9 @@ netdev_from_name(const char *name)
  *
  * The caller is responsible for initializing and destroying 'device_list' and
  * must close each device on the list. */
+
+//从 netdev_shash 中找到与 netdev_class 同一类型的　netdev 加入 device_list 中.
+//并更新 netdev 的引用计数
 void
 netdev_get_devices(const struct netdev_class *netdev_class,
                    struct shash *device_list)
@@ -1748,6 +1804,9 @@ netdev_get_devices(const struct netdev_class *netdev_class,
  *
  * The caller is responsible for freeing 'vports' and must close
  * each 'netdev-vport' in the list. */
+
+//从 netdev_shash 中找到 netdev->netdev_class 为 vport_class 类型的所有 netdev, 加入 vports, 并返回该 vports 对象.
+//其中 size 表明匹配的个数
 struct netdev **
 netdev_get_vports(size_t *size)
     OVS_EXCLUDED(netdev_mutex)
