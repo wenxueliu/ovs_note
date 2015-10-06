@@ -781,6 +781,110 @@ const struct dpif_class dpif_netdev_class = {
     dpif_netdev_get_datapath_version,
 };
 
+
+/* PMD: Poll modes drivers.  PMD accesses devices via polling to eliminate
+ * the performance overhead of interrupt processing.  Therefore netdev can
+ * not implement rx-wait for these devices.  dpif-netdev needs to poll
+ * these device to check for recv buffer.  pmd-thread does polling for
+ * devices assigned to itself.
+ *
+ * DPDK used PMD for accessing NIC.
+ *
+ * Note, instance with cpu core id NON_PMD_CORE_ID will be reserved for
+ * I/O of all non-pmd threads.  There will be no actual thread created
+ * for the instance.
+ *
+ * Each struct has its own flow table and classifier.  Packets received
+ * from managed ports are looked up in the corresponding pmd thread's
+ * flow table, and are executed with the found actions.
+ * */
+struct dp_netdev_pmd_thread {
+    struct dp_netdev *dp;
+    struct ovs_refcount ref_cnt;    /* Every reference must be refcount'ed. */
+    struct cmap_node node;          /* In 'dp->poll_threads'. */
+
+    pthread_cond_t cond;            /* For synchronizing pmd thread reload. */
+    struct ovs_mutex cond_mutex;    /* Mutex for condition variable. */
+
+    /* Per thread exact-match cache.  Note, the instance for cpu core
+     * NON_PMD_CORE_ID can be accessed by multiple threads, and thusly
+     * need to be protected (e.g. by 'dp_netdev_mutex').  All other
+     * instances will only be accessed by its own pmd thread. */
+    struct emc_cache flow_cache;
+
+    /* Classifier and Flow-Table.
+     *
+     * Writers of 'flow_table' must take the 'flow_mutex'.  Corresponding
+     * changes to 'cls' must be made while still holding the 'flow_mutex'.
+     */
+    struct ovs_mutex flow_mutex;
+    struct dpcls cls;
+    struct cmap flow_table OVS_GUARDED; /* Flow table. */
+
+    /* Statistics. */
+    struct dp_netdev_pmd_stats stats;
+
+    /* Cycles counters */
+    struct dp_netdev_pmd_cycles cycles;
+
+    /* Used to count cicles. See 'cycles_counter_end()' */
+    unsigned long long last_cycles;
+
+    struct latch exit_latch;        /* For terminating the pmd thread. */
+    atomic_uint change_seq;         /* For reloading pmd ports. */
+    pthread_t thread;
+    int index;                      /* Idx of this pmd thread among pmd*/
+                                    /* threads on same numa node. */
+    unsigned core_id;               /* CPU core id of this pmd thread. */
+    int numa_id;                    /* numa node id of this pmd thread. */
+    int tx_qid;                     /* Queue id used by this pmd thread to
+                                     * send packets on all netdevs */
+
+    /* Only a pmd thread can write on its own 'cycles' and 'stats'.
+     * The main thread keeps 'stats_zero' and 'cycles_zero' as base
+     * values and subtracts them from 'stats' and 'cycles' before
+     * reporting to the user */
+    unsigned long long stats_zero[DP_N_STATS];
+    uint64_t cycles_zero[PMD_N_CYCLES];
+};
+
+/* Contained by struct dp_netdev_pmd_thread's 'cycle' member.  */
+struct dp_netdev_pmd_cycles {
+    /* Indexed by PMD_CYCLES_*. */
+    atomic_ullong n[PMD_N_CYCLES];
+};
+
+/* Contained by struct dp_netdev_pmd_thread's 'stats' member.  */
+struct dp_netdev_pmd_stats {
+    /* Indexed by DP_STAT_*. */
+    atomic_ullong n[DP_N_STATS];
+};
+
+
+enum dp_stat_type {
+    DP_STAT_EXACT_HIT,          /* Packets that had an exact match (emc). */
+    DP_STAT_MASKED_HIT,         /* Packets that matched in the flow table. */
+    DP_STAT_MISS,               /* Packets that did not match. */
+    DP_STAT_LOST,               /* Packets not passed up to the client. */
+    DP_N_STATS
+};
+
+enum pmd_cycles_counter_type {
+    PMD_CYCLES_POLLING,         /* Cycles spent polling NICs. */
+    PMD_CYCLES_PROCESSING,      /* Cycles spent processing packets */
+    PMD_N_CYCLES
+};
+
+
+
+
+
+
+
+
+
+
+
 static void dp_initialize(void)
 
     tnl_conf_seq = seq_create();
@@ -806,3 +910,44 @@ static int dp_register_provider__(const struct dpif_class *new_class)
     0. 检查 new_class 是否已经加入 dpif_classes 和 dpif_blacklist, 如果加入返回, 否则继续步骤 1
     1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
     1. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+
+
+###struct dpif_class dpif_netdev_class
+
+static struct shash dp_netdevs : 包含所有的 dp_netdev　的 map(key:name, value:dp_netdev)
+
+static int dpif_netdev_init(void)
+
+    将 dpif-netdev/pmd-stats-show, dpif-netdev/pmd-stats-clear 加入 commands 中
+
+static int dpif_netdev_enumerate(struct sset *all_dps, const struct dpif_class *dpif_class)
+
+    从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 保存在 all_dps 中
+
+static const char * dpif_netdev_port_open_type(const struct dpif_class *class, const char *type)
+
+    如果 type=internal, class=dpif_netdev_class 返回 dummy
+    如果 type=internal, class!=dpif_netdev_class 返回 tap
+    如果 type!=internal, 直接返回 type
+
+static int dpif_netdev_open(const struct dpif_class *class, const char *name, bool create, struct dpif **dpifp)
+
+    检查 name, class 对应的 dp_netdev 是否存在, 如果不存在创建, 如果存在, create = false, 返回 0, 否则返回错误值
+
+    如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
+    如果 name 在 dp_netdevs 并且 dp->class = class && create = false,  返回 0
+    如果 name 在 dp_netdevs 并且 dp->class != class,  返回 EINVAL
+    如果 name 不在 dp_netdevs 并且 create = true,  调用 create_dp_netdev(name, class)
+    如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
+
+static void dpif_netdev_close(struct dpif *dpif)
+
+    从 dpif 定位到 dp_netdev 对象 dp, 如果 dp->ref_cnt = 0, 从 dp_netdevs 中删除 dp_netdev, 并释放 dp 内存
+
+static int dpif_netdev_destroy(struct dpif *dpif)
+
+
+
+dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池.
+每个端口属于一个 netdev. 每个端口所属的 netdev 有一个接受队列
+每个线程有一个流表缓存池
