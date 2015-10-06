@@ -496,6 +496,17 @@ requires_datapath_assistance(const struct nlattr *a)
     return false;
 }
 
+/*
+ * 解析 actions 中的每一个元素. 根据元素的 type 执行相应的 action
+ *
+ * @packets : 需要执行 action 的数据包
+ * @cnt     : packets 的数量
+ * @steal   : 如果为 true, 最后将 packets 内存释放
+ * @actions : 需要执行的 action
+ * @actions_len : actions 的数量
+ * @dp_execute_action : 对于actions 中元素满足条件 requires_datapath_assistance() 执行的 action
+ *
+ */
 void
 odp_execute_actions(void *dp, struct dp_packet **packets, int cnt, bool steal,
                     const struct nlattr *actions, size_t actions_len,
@@ -509,6 +520,17 @@ odp_execute_actions(void *dp, struct dp_packet **packets, int cnt, bool steal,
         int type = nl_attr_type(a);
         bool last_action = (left <= NLA_ALIGN(a->nla_len));
 
+        /*
+         * 如果 type 为
+         *
+         * OVS_ACTION_ATTR_OUTPUT:
+         * OVS_ACTION_ATTR_TUNNEL_PUSH:
+         * OVS_ACTION_ATTR_TUNNEL_POP:
+         * OVS_ACTION_ATTR_USERSPACE:
+         * OVS_ACTION_ATTR_RECIRC:
+         *
+         * 之一, if 为真
+         */
         if (requires_datapath_assistance(a)) {
             if (dp_execute_action) {
                 /* Allow 'dp_execute_action' to steal the packet data if we do

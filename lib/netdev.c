@@ -106,6 +106,7 @@ netdev_n_rxq(const struct netdev *netdev)
     return netdev->n_rxq;
 }
 
+//检查 port->netdev->netdev_class->type 是 dpdk, dpdkr, dpdkvhostuser, dpdkvhostcuse 返回 true
 bool
 netdev_is_pmd(const struct netdev *netdev)
 {
@@ -697,11 +698,14 @@ netdev_rxq_close(struct netdev_rxq *rx)
  *
  * This function may be set to null if it would always return EOPNOTSUPP
  * anyhow. */
+
+//将 rx 中所有包拷贝到 buffers 中, cnt 是包个数, 成功返回 0
 int
 netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers, int *cnt)
 {
     int retval;
 
+    //将 rx 中所有包拷贝到 buffers 中, cnt 是包个数
     retval = rx->netdev->netdev_class->rxq_recv(rx, buffers, cnt);
     if (!retval) {
         COVERAGE_INC(netdev_received);
@@ -828,6 +832,13 @@ netdev_build_header(const struct netdev *netdev, struct ovs_action_push_tnl *dat
     return EOPNOTSUPP;
 }
 
+/*
+ * 1. 将 data 加入 buffers 每一个包的头部
+ * 2. 并将 data->out_port 加入 buffers 每一个包的元数据中
+ *
+ * netdev->netdev_class->push_header(buffers[i], data);
+ * pkt_metadata_init(&buffers[i]->md, u32_to_odp(data->out_port)); 即 buffers[i]->md.in_port.odp_port = data->out_port
+ */
 int
 netdev_push_header(const struct netdev *netdev,
                    struct dp_packet **buffers, int cnt,

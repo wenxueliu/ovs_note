@@ -115,6 +115,7 @@ netdev_vport_is_vport_class(const struct netdev_class *class)
     return is_vport_class(class);
 }
 
+//从 netdev_class 定位到 vport_class
 static const struct vport_class *
 vport_class_cast(const struct netdev_class *class)
 {
@@ -122,6 +123,7 @@ vport_class_cast(const struct netdev_class *class)
     return CONTAINER_OF(class, struct vport_class, netdev_class);
 }
 
+//从 netdev 定位到 netdev_vport
 static struct netdev_vport *
 netdev_vport_cast(const struct netdev *netdev)
 {
@@ -129,6 +131,7 @@ netdev_vport_cast(const struct netdev *netdev)
     return CONTAINER_OF(netdev, struct netdev_vport, up);
 }
 
+//从 netdev 定位到 netdev_vport 的 netdev_tunnel_config
 static const struct netdev_tunnel_config *
 get_netdev_tunnel_config(const struct netdev *netdev)
 {
@@ -151,6 +154,7 @@ netdev_vport_is_layer3(const struct netdev *dev)
     return (!strcmp("lisp", type));
 }
 
+//判断 dev->type 是 geneve, vxlan, lisp 或 stt
 static bool
 netdev_vport_needs_dst_port(const struct netdev *dev)
 {
@@ -168,6 +172,13 @@ netdev_vport_class_get_dpif_port(const struct netdev_class *class)
     return is_vport_class(class) ? vport_class_cast(class)->dpif_port : NULL;
 }
 
+/*
+ * 获取 netdev 对应的 dpif_port.
+ *
+ * 如果 netdev->netdev_class->construct 不是 netdev_vport_construct 返回 netdev->name
+ * 如果 netdev->netdev_class->construct 是 netdev_vport_construct 并且 netdev->class->get_config = get_tunnel_config netdev->class-type 为 stt, geneve, lisp, vxlan 类型 返回 "vport_class->dpif_port"_"vport_class->tnl_cfg.dst_port"
+ * 否则 返回 vport_class->dpif_port
+ */
 const char *
 netdev_vport_get_dpif_port(const struct netdev *netdev,
                            char namebuf[], size_t bufsize)
@@ -242,6 +253,14 @@ netdev_vport_alloc(void)
     return &netdev->up;
 }
 
+/*
+ * 从 netdev_ 定位到 netdev_vport 对象 dev.
+ * 如果 netdev_->type 是 geneve, dev->tnl_cfg.dst_port = GENEVE_DST_PORT
+ * 如果 netdev_->type 是 vxlan, dev->tnl_cfg.dst_port = VXLAN_DST_PORT
+ * 如果 netdev_->type 是 lisp, dev->tnl_cfg.dst_port = LISP_DST_PORT
+ * 如果 netdev_->type 是 stt, dev->tnl_cfg.dst_port = STT_DST_PORT
+ * 并且 dev->tnl_cfg 不分片, TTL 是 64
+ */
 static int
 netdev_vport_construct(struct netdev *netdev_)
 {
@@ -267,6 +286,7 @@ netdev_vport_construct(struct netdev *netdev_)
     return 0;
 }
 
+//仅仅是否 netdev_vport 的 peer 内存
 static void
 netdev_vport_destruct(struct netdev *netdev_)
 {
@@ -312,6 +332,9 @@ netdev_vport_get_etheraddr(const struct netdev *netdev_,
 
 /* Checks if the tunnel status has changed and returns a boolean.
  * Updates the tunnel status if it has changed. */
+
+//netdev->tnl_cfg.ip_dst 的路由 netdev->egress_iface 或 netdev->carrier_status
+//发生改变 返回 true, 没有发生改变, 返回 false
 static bool
 tunnel_check_status_change__(struct netdev_vport *netdev)
     OVS_REQUIRES(netdev->mutex)
@@ -343,6 +366,7 @@ tunnel_check_status_change__(struct netdev_vport *netdev)
     return false;
 }
 
+//将 tunnel_egress_iface 和 carrier_status  加入 smap
 static int
 tunnel_get_status(const struct netdev *netdev_, struct smap *smap)
 {
@@ -358,6 +382,8 @@ tunnel_get_status(const struct netdev *netdev_, struct smap *smap)
     return 0;
 }
 
+//如果 off 包含 NETDEV_UP | NETDEV_PROMISC 返回 EOPNOTSUPP
+//否则 old_flagsp 保存 NETDEV_UP | NETDEV_PROMISC, 返回 0
 static int
 netdev_vport_update_flags(struct netdev *netdev OVS_UNUSED,
                           enum netdev_flags off,
@@ -372,6 +398,8 @@ netdev_vport_update_flags(struct netdev *netdev OVS_UNUSED,
     return 0;
 }
 
+//如果路由表发生改变, vport 就发生改变, 如果路由表没有发生改变, vport
+//就没有发生改变
 static void
 netdev_vport_run(void)
 {

@@ -102,6 +102,8 @@ unixctl_version(struct unixctl_conn *conn, int argc OVS_UNUSED,
  * be handled immediately then it can defer the reply until later.  A given
  * connection can only process a single request at a time, so a reply must be
  * made eventually to avoid blocking that connection. */
+
+//将 name,command 加入 commands 中
 void
 unixctl_command_register(const char *name, const char *usage,
                          int min_args, int max_args,

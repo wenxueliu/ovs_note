@@ -561,6 +561,8 @@ ovs_refcount_read(const struct ovs_refcount *refcount_)
  * It is critical that we never increment a zero refcount to a
  * non-zero value, as whenever a refcount reaches the zero value, the
  * protected object may be irrevocably scheduled for deletion. */
+
+//如果 refcount->count 是非 0, 增加 ++refcount->count 返回 true
 static inline bool
 ovs_refcount_try_ref_rcu(struct ovs_refcount *refcount)
 {
@@ -608,6 +610,8 @@ ovs_refcount_try_ref_rcu(struct ovs_refcount *refcount)
  * be reordered to happen prior the lock operation.  No additional
  * barriers are needed here.
  */
+
+//将 refcount 减一, 并返回旧值
 static inline unsigned int
 ovs_refcount_unref_relaxed(struct ovs_refcount *refcount)
 {

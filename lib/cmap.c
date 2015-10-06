@@ -377,6 +377,9 @@ cmap_find(const struct cmap *cmap, uint32_t hash)
  * was stored, 0 otherwise.
  * Generally, the caller wants to use CMAP_NODE_FOR_EACH to verify for
  * hash collisions. */
+/*
+ *TODO 在 cmap 中根据 hashs 找到匹配的 buckets[i], 从 buckets[i] 根据 hashs[i] 找到 node 加入 nodes
+ */
 unsigned long
 cmap_find_batch(const struct cmap *cmap, unsigned long map,
                 uint32_t hashes[], const struct cmap_node *nodes[])

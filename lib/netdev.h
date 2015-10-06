@@ -107,6 +107,7 @@ struct netdev_stats {
 /* Configuration specific to tunnels. */
 struct netdev_tunnel_config {
     bool in_key_present;
+    //是否是 flow
     bool in_key_flow;
     ovs_be64 in_key;
 
@@ -114,9 +115,12 @@ struct netdev_tunnel_config {
     bool out_key_flow;
     ovs_be64 out_key;
 
+    //只有 geneve, stt, vxlan, lisp 需要　dst_port, 其他为 0
     ovs_be16 dst_port;
 
+    //src_ip 是否是 flow, 如果是 ip_src = 0
     bool ip_src_flow;
+    //dst_ip 是否是 flow, 如果是 ip_dst = 0
     bool ip_dst_flow;
     ovs_be32 ip_src;
     ovs_be32 ip_dst;
@@ -124,9 +128,11 @@ struct netdev_tunnel_config {
     uint32_t exts;
 
     uint8_t ttl;
+    //如果为 true, ttl = 0
     bool ttl_inherit;
 
     uint8_t tos;
+    //如果为 true, tos = 0
     bool tos_inherit;
 
     bool csum;

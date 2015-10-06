@@ -445,6 +445,7 @@ flow_extract(struct dp_packet *packet, struct flow *flow)
 
 /* Caller is responsible for initializing 'dst' with enough storage for
  * FLOW_U64S * 8 bytes. */
+//TODO 用 packet 初始化 dst
 void
 miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
 {
@@ -1437,6 +1438,8 @@ flow_wildcards_set_xreg_mask(struct flow_wildcards *wc, int idx, uint64_t mask)
 /* Calculates the 5-tuple hash from the given miniflow.
  * This returns the same value as flow_hash_5tuple for the corresponding
  * flow. */
+//基于 basis 根据 flow 计算 hash.
+//其中提取 flow 中的 nw_proto, nw_src, nw_dst, tp_src, 42
 uint32_t
 miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
 {
