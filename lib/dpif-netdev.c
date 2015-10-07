@@ -1255,6 +1255,7 @@ dp_netdev_lookup_port(const struct dp_netdev *dp, odp_port_t port_no)
     return NULL;
 }
 
+//通过 port_no 查找对应的 dp_netdev_port
 static int
 get_port_by_number(struct dp_netdev *dp,
                    odp_port_t port_no, struct dp_netdev_port **portp)
@@ -1286,6 +1287,7 @@ port_try_ref(struct dp_netdev_port *port)
     return false;
 }
 
+//如果 port->ref_cnt = 1, 释放 port 对象
 static void
 port_unref(struct dp_netdev_port *port)
 {
@@ -1355,6 +1357,7 @@ has_pmd_port_for_numa(struct dp_netdev *dp, int numa_id)
 }
 
 
+//减少 port->ref_cnt - 1 = 1, 释放 port 对象
 static void
 do_del_port(struct dp_netdev *dp, struct dp_netdev_port *port)
     OVS_REQUIRES(dp->port_mutex)
@@ -1372,6 +1375,7 @@ do_del_port(struct dp_netdev *dp, struct dp_netdev_port *port)
         dp_netdev_reload_pmds(dp);
     }
 
+//如果 port->ref_cnt = 1, 释放 port 对象
     port_unref(port);
 }
 
@@ -1384,6 +1388,7 @@ answer_port_query(const struct dp_netdev_port *port,
     dpif_port->port_no = port->port_no;
 }
 
+//将 port_no 对应的 dp_netdev_port 的 name, type, port_no 初始化 dpif_port
 static int
 dpif_netdev_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
                                  struct dpif_port *dpif_port)
@@ -1438,6 +1443,8 @@ dp_netdev_flow_hash(const ovs_u128 *ufid)
     return ufid->u32[0];
 }
 
+//从 pmd->flow_table 删除 flow->ufid 对应的节点
+//从 pmd->cls->subtables 删除 flow->cr 对应的 subtable->rule
 static void
 dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
                           struct dp_netdev_flow *flow)
@@ -1454,6 +1461,7 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     dp_netdev_flow_unref(flow);
 }
 
+//将 pmd->flow_table 中的每一 flow 删除
 static void
 dp_netdev_pmd_flow_flush(struct dp_netdev_pmd_thread *pmd)
 {
@@ -1466,6 +1474,7 @@ dp_netdev_pmd_flow_flush(struct dp_netdev_pmd_thread *pmd)
     ovs_mutex_unlock(&pmd->flow_mutex);
 }
 
+//删除 dp->poll_threads 每个线程 pmd 下的 flow_table
 static int
 dpif_netdev_flow_flush(struct dpif *dpif)
 {
@@ -1491,6 +1500,9 @@ dpif_netdev_port_dump_start(const struct dpif *dpif OVS_UNUSED, void **statep)
     return 0;
 }
 
+/*
+ * 从 dp->ports 的 state_->postion 中找到下一个节点, 初始化 dpif_port
+ */
 static int
 dpif_netdev_port_dump_next(const struct dpif *dpif, void *state_,
                            struct dpif_port *dpif_port)
@@ -1529,6 +1541,9 @@ dpif_netdev_port_dump_done(const struct dpif *dpif OVS_UNUSED, void *state_)
     return 0;
 }
 
+//从 dpif 定位到 dpif_netdev
+//如果 dpif_netdev->last_port_seq != dpif_netdev->dp->port_seq 返回 ENOBUFS
+//如果 dpif_netdev->last_port_seq == dpif_netdev->dp->port_seq 返回 EAGAIN
 static int
 dpif_netdev_port_poll(const struct dpif *dpif_, char **devnamep OVS_UNUSED)
 {
@@ -2298,6 +2313,7 @@ dpif_netdev_flow_dump_thread_create(struct dpif_flow_dump *dump_)
     struct dpif_netdev_flow_dump_thread *thread;
 
     thread = xmalloc(sizeof *thread);
+    //thread->up->dpif = dump->up->dpif
     dpif_flow_dump_thread_init(&thread->up, &dump->up);
     thread->dump = dump;
     return &thread->up;
@@ -2475,6 +2491,7 @@ pmd_config_changed(const struct dp_netdev *dp, size_t rxqs, const char *cmask)
 }
 
 /* Resets pmd threads if the configuration for 'rxq's or cpu mask changes. */
+//如果 dp->n_dpdk_rxqs 或 dp->pmd_cmask 与 n_rxqs 与 cmask 不同, 删除 dp->poll_threads 所有元素之后重新初始化
 static int
 dpif_netdev_pmd_set(struct dpif *dpif, unsigned int n_rxqs, const char *cmask)
 {
@@ -2918,6 +2935,8 @@ dp_netdev_get_pmd(struct dp_netdev *dp, unsigned core_id)
 }
 
 /* Sets the 'struct dp_netdev_pmd_thread' for non-pmd threads. */
+
+//初始化 nopmd 并将其加入 dp->poll_threads, 其中 core_id = NON_PMD_CORE_ID, index = 0, numa_id = OVS_NUMA_UNSPEC
 static void
 dp_netdev_set_nonpmd(struct dp_netdev *dp)
 {
@@ -2977,6 +2996,8 @@ core_id_to_qid(unsigned core_id)
 }
 
 /* Configures the 'pmd' based on the input argument. */
+
+//初始化 pmd 并将其加入 dp->poll_threads
 static void
 dp_netdev_configure_pmd(struct dp_netdev_pmd_thread *pmd, struct dp_netdev *dp,
                         int index, unsigned core_id, int numa_id)
@@ -3019,6 +3040,7 @@ dp_netdev_destroy_pmd(struct dp_netdev_pmd_thread *pmd)
 
 /* Stops the pmd thread, removes it from the 'dp->poll_threads',
  * and unrefs the struct. */
+//将 pmd 从 pmd->dp->poll_threads 中删除
 static void
 dp_netdev_del_pmd(struct dp_netdev_pmd_thread *pmd)
 {
@@ -3037,6 +3059,7 @@ dp_netdev_del_pmd(struct dp_netdev_pmd_thread *pmd)
 }
 
 /* Destroys all pmd threads. */
+//将 dp->poll_threads 中每一个元素删除
 static void
 dp_netdev_destroy_all_pmds(struct dp_netdev *dp)
 {
@@ -4068,6 +4091,11 @@ dpcls_init(struct dpcls *cls)
     pvector_init(&cls->subtables);
 }
 
+/*
+ * 1. 从 cls->subtables 删除 subtable
+ * 2. 从 cls->subtables_map 删除 subtable->cmap_node
+ * 3. 销毁 subtable->rules 每一元素
+ */
 static void
 dpcls_destroy_subtable(struct dpcls *cls, struct dpcls_subtable *subtable)
 {

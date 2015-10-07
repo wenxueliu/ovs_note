@@ -110,6 +110,10 @@ fat_rwlock_destroy(struct fat_rwlock *rwlock)
     ovs_mutex_destroy(&rwlock->mutex);
 }
 
+/*
+ * 如果当前线程对应的 key 存在, 直接返回.
+ * 如果当前线程对应的 key 不存在, 创建并初始化当前线程 key 对应的 value.
+ */
 static struct fat_rwlock_slot *
 fat_rwlock_get_slot__(struct fat_rwlock *rwlock)
 {
@@ -140,6 +144,8 @@ fat_rwlock_get_slot__(struct fat_rwlock *rwlock)
 /* Locks 'rwlock' for reading.  The read-lock is recursive: it may be acquired
  * any number of times by a single thread (which must then release it the same
  * number of times for it to truly be released). */
+
+//读锁只锁当前线程的变量, 其实是同一线程的锁标记. 可以递归
 void
 fat_rwlock_rdlock(const struct fat_rwlock *rwlock_)
     OVS_ACQ_RDLOCK(rwlock_)
@@ -162,6 +168,9 @@ fat_rwlock_rdlock(const struct fat_rwlock *rwlock_)
     }
 }
 
+//如果当前线程的 key 有对应的 value, 返回 value
+//如果当前线程的 key 没有对应的 value,且写锁被锁, 返回 NULL
+//如果当前线程的 key 没有对应的 value,且写锁没有锁, 创建 key 对应的 value
 static struct fat_rwlock_slot *
 fat_rwlock_try_get_slot__(struct fat_rwlock *rwlock)
 {
@@ -191,6 +200,12 @@ fat_rwlock_try_get_slot__(struct fat_rwlock *rwlock)
 
 /* Tries to lock 'rwlock' for reading.  If successful, returns 0.  If taking
  * the lock would require blocking, returns EBUSY (without blocking). */
+
+//如果写锁被锁, 且当前线程在写锁被锁之前没有创建锁, 则返回 EBUSY
+//即锁还没有锁线程而不锁已经有锁的线程
+//如果是写锁, 返回 EBUSY
+//如果是读锁, key 对应 value 已经存在, 锁之, 或递归锁
+//如果是读锁, key 对应 value 不存在, 返回 EBUSY
 int
 fat_rwlock_tryrdlock(const struct fat_rwlock *rwlock_)
     OVS_TRY_RDLOCK(0, rwlock_)
@@ -225,6 +240,7 @@ fat_rwlock_tryrdlock(const struct fat_rwlock *rwlock_)
 /* Locks 'rwlock' for writing.
  *
  * The write lock is not recursive. */
+//不仅锁全局锁, 各个线程的锁也加锁
 void
 fat_rwlock_wrlock(const struct fat_rwlock *rwlock_)
     OVS_ACQ_WRLOCK(rwlock_)

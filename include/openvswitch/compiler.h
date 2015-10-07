@@ -17,9 +17,12 @@
 #ifndef OPENVSWITCH_COMPILER_H
 #define OPENVSWITCH_COMPILER_H 1
 
+//Clang 编译器
 #ifndef __has_feature
   #define __has_feature(x) 0
 #endif
+
+//Clang 编译器
 #ifndef __has_extension
   #define __has_extension(x) 0
 #endif
