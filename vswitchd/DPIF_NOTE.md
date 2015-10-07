@@ -947,6 +947,11 @@ static void dpif_netdev_close(struct dpif *dpif)
 static int dpif_netdev_destroy(struct dpif *dpif)
 
 
+static int dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev, odp_port_t *port_nop)
+
+    如果 port_nop 不为 NULL 并且已经存在, 返回 EBUSY 或 EEXIST
+    如果 port_nop 为 NULL, 不存在, 初始化 port 对象并加入 dp->ports. 名称为 dpif_port, 端口号 port_no. type 为 netdev->type
+
 
 dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池.
 每个端口属于一个 netdev. 每个端口所属的 netdev 有一个接受队列
