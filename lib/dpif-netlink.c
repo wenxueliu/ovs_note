@@ -2320,6 +2320,10 @@ const struct dpif_class dpif_netlink_class = {
     dpif_netlink_get_datapath_version, /* get_datapath_version */
 };
 
+/*
+ * 1. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+ * 2. 确保 OVS_VPORT_FAMILY 对应的组属性中存在 OVS_VPORT_MCGROUP
+ */
 static int
 dpif_netlink_init(void)
 {
@@ -2345,6 +2349,12 @@ dpif_netlink_init(void)
                                           &ovs_packet_family);
         }
         if (!error) {
+            /*
+             * 确保 family_name 对应的属性列表中存在 group_name 的属性
+             *
+             * 通过 NETLINK_GENERIC 协议 sock 获取 family_name 存在对应的属性列表, 如果 CTRL_ATTR_MCAST_GROUPS 属性中存在与 group_name
+             * 相同的属性, 返回 0.
+             */
             error = nl_lookup_genl_mcgroup(OVS_VPORT_FAMILY, OVS_VPORT_MCGROUP,
                                            &ovs_vport_mcgroup);
         }
@@ -2500,6 +2510,10 @@ dpif_netlink_vport_transact(const struct dpif_netlink_vport *request,
 
     ovs_assert((reply != NULL) == (bufp != NULL));
 
+    /*
+    * 1. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+    * 2. 确保 OVS_VPORT_FAMILY 对应的组属性中存在 OVS_VPORT_MCGROUP
+    */
     error = dpif_netlink_init();
     if (error) {
         if (reply) {
@@ -2595,11 +2609,45 @@ dpif_netlink_dp_from_ofpbuf(struct dpif_netlink_dp *dp, const struct ofpbuf *buf
 }
 
 /* Appends to 'buf' the Generic Netlink message described by 'dp'. */
+/*
+ * 由 dp 构造 NETLINK 消息. 构造好的消息存放在 buf 中
+ *
+ * 具体:
+ *
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = ovs_datapath_family;
+ *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO;
+ *  nlmsghdr->nlmsg_seq = 0;
+ *  nlmsghdr->nlmsg_pid = 0;
+ *  genlmsghdr->cmd = dp->cmd;
+ *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
+ *  genlmsghdr->reserved = 0;
+ *  ovs_header = buf
+ *  ovs_header->dp_ifindex = dp->dp_ifindex
+ *  属性
+ *  OVS_DP_ATTR_NAME : dp->name
+ *  OVS_DP_ATTR_UPCALL_PID : dp->upcall_pid
+ *  OVS_DP_ATTR_USER_FEATURES : dp->user_features
+ *
+ */
 static void
 dpif_netlink_dp_to_ofpbuf(const struct dpif_netlink_dp *dp, struct ofpbuf *buf)
 {
     struct ovs_header *ovs_header;
-
+    /* 构造 Netlink 消息头
+    *
+    *  buf->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+    *
+    *  nlmsghdr->nlmsg_len = 0;
+    *  nlmsghdr->nlmsg_type = ovs_datapath_family;
+    *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO;
+    *  nlmsghdr->nlmsg_seq = 0;
+    *  nlmsghdr->nlmsg_pid = 0;
+    *  genlmsghdr->cmd = dp->cmd;
+    *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
+    *  genlmsghdr->reserved = 0;
+    *
+    */
     nl_msg_put_genlmsghdr(buf, 0, ovs_datapath_family,
                           NLM_F_REQUEST | NLM_F_ECHO, dp->cmd,
                           OVS_DATAPATH_VERSION);
@@ -2639,6 +2687,27 @@ dpif_netlink_dp_dump_start(struct nl_dump *dump)
     request.cmd = OVS_DP_CMD_GET;
 
     buf = ofpbuf_new(1024);
+    /*
+    * 由 dp 构造 NETLINK 消息. 构造好的消息存放在 buf 中
+    *
+    * 具体:
+    *
+    *  nlmsghdr->nlmsg_len = 0;
+    *  nlmsghdr->nlmsg_type = ovs_datapath_family;
+    *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO;
+    *  nlmsghdr->nlmsg_seq = 0;
+    *  nlmsghdr->nlmsg_pid = 0;
+    *  genlmsghdr->cmd = request->cmd; //OVS_DP_CMD_GET
+    *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
+    *  genlmsghdr->reserved = 0;
+    *  ovs_header = buf
+    *  ovs_header->dp_ifindex = request->dp_ifindex //0
+    *  属性
+    *  OVS_DP_ATTR_NAME : request->name //null
+    *  OVS_DP_ATTR_UPCALL_PID : request->upcall_pid
+    *  OVS_DP_ATTR_USER_FEATURES : request->user_features
+    *
+    */
     dpif_netlink_dp_to_ofpbuf(&request, buf);
     nl_dump_start(dump, NETLINK_GENERIC, buf);
     ofpbuf_delete(buf);

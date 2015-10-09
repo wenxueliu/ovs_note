@@ -38,6 +38,7 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(60, 600);
 /* Returns the nlmsghdr at the head of 'msg'.
  *
  * 'msg' must be at least as large as a nlmsghdr. */
+//返回 msg->data, nlmsghdr 指向 msg->data
 struct nlmsghdr *
 nl_msg_nlmsghdr(const struct ofpbuf *msg)
 {
@@ -59,6 +60,7 @@ nl_msg_genlmsghdr(const struct ofpbuf *msg)
  * not an NLMSG_ERROR message, returns false.
  *
  * 'msg' must be at least as large as a nlmsghdr. */
+//(nlmsghdr *)msg->data->nlmsg_type
 bool
 nl_msg_nlmsgerr(const struct ofpbuf *msg, int *errorp)
 {
@@ -107,6 +109,16 @@ nl_msg_reserve(struct ofpbuf *msg, size_t size)
  *
  * nl_msg_put_genlmsghdr() is more convenient for composing a Generic Netlink
  * message. */
+
+/*
+ *  设置将 nlmsghdr 存在在 msg->tail 之后 msg->tail += NLMSG_HDRLEN
+ *  nlmsghdr = msg->data + msg->size
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = type;
+ *  nlmsghdr->nlmsg_flags = flags;
+ *  nlmsghdr->nlmsg_seq = 0;
+ *  nlmsghdr->nlmsg_pid = 0;
+ */
 void
 nl_msg_put_nlmsghdr(struct ofpbuf *msg,
                     size_t expected_payload, uint32_t type, uint32_t flags)
@@ -115,7 +127,9 @@ nl_msg_put_nlmsghdr(struct ofpbuf *msg,
 
     ovs_assert(msg->size == 0);
 
+    //确保 msg->end - msg->tail 长度大于　NLMSG_HDRLEN + expected_payload
     nl_msg_reserve(msg, NLMSG_HDRLEN + expected_payload);
+    //nlmsghdr 指向 msg->tail, 之后将 msg->size 扩大 NLMSG_HDRLEN , 以存储 nlmsghdr
     nlmsghdr = nl_msg_put_uninit(msg, NLMSG_HDRLEN);
     nlmsghdr->nlmsg_len = 0;
     nlmsghdr->nlmsg_type = type;
@@ -145,12 +159,36 @@ nl_msg_put_nlmsghdr(struct ofpbuf *msg,
  *
  * nl_msg_put_nlmsghdr() should be used to compose Netlink messages that are
  * not Generic Netlink messages. */
+
+/* 构造 genl Netlink 消息头
+ *
+ *  msg->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+ *
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = family;
+ *  nlmsghdr->nlmsg_flags = flags;
+ *  nlmsghdr->nlmsg_seq = 0;
+ *  nlmsghdr->nlmsg_pid = 0;
+ *  genlmsghdr->cmd = cmd;
+ *  genlmsghdr->version = version;
+ *  genlmsghdr->reserved = 0;
+ *
+ */
 void
 nl_msg_put_genlmsghdr(struct ofpbuf *msg, size_t expected_payload,
                       int family, uint32_t flags, uint8_t cmd, uint8_t version)
 {
     struct genlmsghdr *genlmsghdr;
 
+    /*
+    *  设置将 nlmsghdr 存在在 msg->tail 之后 msg->tail += NLMSG_HDRLEN
+    *  nlmsghdr = msg->data + msg->size
+    *  nlmsghdr->nlmsg_len = 0;
+    *  nlmsghdr->nlmsg_type = type;
+    *  nlmsghdr->nlmsg_flags = flags;
+    *  nlmsghdr->nlmsg_seq = 0;
+    *  nlmsghdr->nlmsg_pid = 0;
+    */
     nl_msg_put_nlmsghdr(msg, GENL_HDRLEN + expected_payload, family, flags);
     ovs_assert(msg->size == NLMSG_HDRLEN);
     genlmsghdr = nl_msg_put_uninit(msg, GENL_HDRLEN);
@@ -171,6 +209,7 @@ nl_msg_put(struct ofpbuf *msg, const void *data, size_t size)
 /* Appends 'size' bytes of data, plus Netlink padding if needed, to the tail
  * end of 'msg', reallocating and copying its data if necessary.  Returns a
  * pointer to the first byte of the new data, which is left uninitialized. */
+//p 指向 msg->data + b->size 并且 msg->size += size
 void *
 nl_msg_put_uninit(struct ofpbuf *msg, size_t size)
 {
@@ -209,6 +248,16 @@ nl_msg_push_uninit(struct ofpbuf *msg, size_t size)
  * data as its payload, plus Netlink padding if needed, to the tail end of
  * 'msg', reallocating and copying its data if necessary.  Returns a pointer to
  * the first byte of data in the attribute, which is left uninitialized. */
+
+/*  msg 增加 struct nlattr nla 属性
+ *
+ *  msg->tail 增加 nla 之后 msg->tail += NLA_HDRLEN + size
+ *
+ *  nla = msg->tail
+ *  nla->nla_len = NLA_HDRLEN + size;
+ *  nla->nla_type = type;
+ *
+ */
 void *
 nl_msg_put_unspec_uninit(struct ofpbuf *msg, uint16_t type, size_t size)
 {
@@ -236,10 +285,28 @@ nl_msg_put_unspec_zero(struct ofpbuf *msg, uint16_t type, size_t size)
  * 'data' as its payload, to the tail end of 'msg', reallocating and copying
  * its data if necessary.  Returns a pointer to the first byte of data in the
  * attribute, which is left uninitialized. */
+
+/*
+ *  msg 增加 struct nlattr nla 属性
+ *
+ *  nla->nla_len = NLA_HDRLEN + size;
+ *  nla->nla_type = type;
+ *  数据体为 data, 长度 size
+ */
 void
 nl_msg_put_unspec(struct ofpbuf *msg, uint16_t type,
                   const void *data, size_t size)
 {
+    /*
+     *  msg 增加 struct nlattr nla 属性
+     *
+     *  msg->tail 增加 nla 之后 msg->tail += size + NLA_HDRLEN
+     *
+     *  nla = msg->tail
+     *  nla->nla_len = NLA_HDRLEN + size;
+     *  nla->nla_type = type;
+     *  nla 之后存放 data
+     */
     memcpy(nl_msg_put_unspec_uninit(msg, type, size), data, size);
 }
 
@@ -319,9 +386,24 @@ nl_msg_put_odp_port(struct ofpbuf *msg, uint16_t type, odp_port_t value)
 
 /* Appends a Netlink attribute of the given 'type' and the given
  * null-terminated string 'value' to 'msg'. */
+
+/*
+ *  msg 增加 struct nlattr nla 属性
+ *
+ *  nla->nla_len = NLA_HDRLEN + strlen(value)+1;
+ *  nla->nla_type = type;
+ *  数据体为 value, 长度 strlen(value)+1
+ */
 void
 nl_msg_put_string(struct ofpbuf *msg, uint16_t type, const char *value)
 {
+    /*
+     * msg 增加 struct nlattr nla 属性
+     *
+     *  nla->nla_len = NLA_HDRLEN + strlen(value) + 1;
+     *  nla->nla_type = type;
+     *  数据体为 value, 长度 strlen(value) + 1
+     */
     nl_msg_put_unspec(msg, type, value, strlen(value) + 1);
 }
 
@@ -718,6 +800,10 @@ nl_attr_validate(const struct nlattr *nla, const struct nl_policy *policy)
  *
  * If the Netlink attributes in 'msg' follow a Netlink header and a Generic
  * Netlink header, then 'nla_offset' should be NLMSG_HDRLEN + GENL_HDRLEN. */
+/*
+ * 将 msg->data + nla_offset 开始, 将解析出来的 nlattr 存放在 attrs 中.
+ * 其中 policy 主要表明 nlttrs[i] 是否是有效的属性, 成功返回 true
+ */
 bool
 nl_policy_parse(const struct ofpbuf *msg, size_t nla_offset,
                 const struct nl_policy policy[],

@@ -107,6 +107,9 @@ static void nl_pool_release(struct nl_sock *);
 /* Creates a new netlink socket for the given netlink 'protocol'
  * (NETLINK_ROUTE, NETLINK_GENERIC, ...).  Returns 0 and sets '*sockp' to the
  * new socket if successful, otherwise returns a positive errno value. */
+/*
+ * 设置 iovecs 大小, 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+ */
 int
 nl_sock_create(int protocol, struct nl_sock **sockp)
 {
@@ -454,10 +457,19 @@ nl_sock_leave_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
     return 0;
 }
 
+/*
+ * 由 msg 构造 nlmsg, 发送给 sock->fd
+ *
+ * 其中
+ * nlmsg->nlmsg_len = msg->size
+ * nlmsg->nlmsg_seq = nlmsg_seq
+ * nlmsg->nlmsg_pid = sock->pid
+ */
 static int
 nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
                uint32_t nlmsg_seq, bool wait)
 {
+    //返回 msg->data, nlmsghdr 指向 msg->data
     struct nlmsghdr *nlmsg = nl_msg_nlmsghdr(msg);
     int error;
 
@@ -504,6 +516,7 @@ nl_sock_send__(struct nl_sock *sock, const struct ofpbuf *msg,
 int
 nl_sock_send(struct nl_sock *sock, const struct ofpbuf *msg, bool wait)
 {
+    //sock->next_seq += 1
     return nl_sock_send_seq(sock, msg, nl_sock_allocate_seq(sock, 1), wait);
 }
 
@@ -525,6 +538,23 @@ nl_sock_send_seq(struct nl_sock *sock, const struct ofpbuf *msg,
     return nl_sock_send__(sock, msg, nlmsg_seq, wait);
 }
 
+/*
+ * 接受消息, 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
+ *
+ *  nlmsghdr = buf->base;
+ *  iov[0].iov_base = buf->base;
+ *  iov[0].iov_len = buf->allocated;
+ *  iov[1].iov_base = tail; //保存长度超过 buf->allocated 的数据
+ *  iov[1].iov_len = sizeof tail;
+ *  msg.msg_iov = iov;
+ *  msg.msg_iovlen = 2;
+ *
+ *  do {
+ *      //非阻塞接受
+ *      retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
+ *  }while (error == EINTR)
+ *
+ */
 static int
 nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
 {
@@ -534,7 +564,7 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
      * 'tail' to allow Netlink messages to be up to 64 kB long (a reasonable
      * figure since that's the maximum length of a Netlink attribute). */
     struct nlmsghdr *nlmsghdr;
-    uint8_t tail[65536];
+    uint8_t tail[65536]; //64k
     struct iovec iov[2];
     struct msghdr msg;
     ssize_t retval;
@@ -669,6 +699,31 @@ nl_sock_record_errors__(struct nl_transaction **transactions, size_t n,
     }
 }
 
+/*
+ * 将 transactions(n 个) 打包发送出去, 并将接收到的应答包保持在 transactions[i]->reply . done 保持已经完成的的请求应答数目
+ *
+ * 1. 更新 sock->next_seq += n
+ * 2. 将每个 transactions 包装成 struct nlmsghdr, 将所有的 transactions 打包到 struct iovec, 将 iovec 打包成 struct msghdr
+ *
+ *      struct nlmsghdr nlmsg
+ *      struct iovec iovecs[MAX_IOVS]
+ *      nlmsg = transactions[i]->request->data
+ *      nlmsg->nlmsg_len = transactions[i]->request->size;
+ *      nlmsg->nlmsg_seq = sock->next_seq + i;
+ *      nlmsg->nlmsg_pid = sock->pid;
+ *      iovs[i].iov_base = msg;
+ *      iovs[i].iov_len = transactions[i]->request->size;
+ *      msg.msg_iov = iovs;
+ *      msg.msg_iovlen = n;
+ *
+ *  3. 一次将所有消息发送给内核 sendmsg(sock->fd, msg, 0)
+ *  4. recvmsg(sock->fd, buf_txn->reply, false); 一条一条接受应答消息直到收到最大发送序列的消息的应答.
+ *  5. 将 buf_txn->replay 转为 struct nlmsghdr, 并检查 nlmsg_seq 的 是否在 (sock->next_seq, sock->next_seq + n)
+ *  6. 如果 transactions[i]->reply 不为 NULL, 就将收到的应答消息保持在 transactions[i]->reply
+ *
+ *  注: 这里有个问题就是内核应答必须以发送的顺序应答, 否则, 如果中间有消息丢失, 或后面发送的消息先收到应答, 就会导致收到序列之前消息不会再收到.
+ *  因此 done 等于 n 并不能保证所有的消息都收到
+ */
 static int
 nl_sock_transact_multiple__(struct nl_sock *sock,
                             struct nl_transaction **transactions, size_t n,
@@ -684,10 +739,13 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
     int error;
     int i;
 
+    //sock->next_seq += n, 返回之前的 sock->next_seq
     base_seq = nl_sock_allocate_seq(sock, n);
     *done = 0;
+    //将 每个 transactions[i] 加入 iovs[i] 最后打包成 iov. 其中 transactions[i] 转为 struct nlmsghdr
     for (i = 0; i < n; i++) {
         struct nl_transaction *txn = transactions[i];
+        //nlms = txn->request->data
         struct nlmsghdr *nlmsg = nl_msg_nlmsghdr(txn->request);
 
         nlmsg->nlmsg_len = txn->request->size;
@@ -730,6 +788,7 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
 
         /* Find a transaction whose buffer we can use for receiving a reply.
          * If no such transaction is left, use tmp_txn. */
+        //临时缓存
         buf_txn = &tmp_txn;
         for (i = 0; i < n; i++) {
             if (transactions[i]->reply) {
@@ -739,6 +798,23 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
         }
 
         /* Receive a reply. */
+        /*
+        * 非阻塞接受消息, 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
+        *
+        *  nlmsghdr = buf_txn->reply->base;
+        *  iov[0].iov_base = buf_txn->reply->base;
+        *  iov[0].iov_len = buf_txn->reply->allocated;
+        *  iov[1].iov_base = tail; //保存长度超过 buf->allocated 的数据
+        *  iov[1].iov_len = sizeof tail;
+        *  msg.msg_iov = iov;
+        *  msg.msg_iovlen = 2;
+        *
+        *  do {
+        *      //非阻塞接受
+        *      retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
+        *  }while (error == EINTR)
+        *
+        */
         error = nl_sock_recv__(sock, buf_txn->reply, false);
         if (error) {
             if (error == EAGAIN) {
@@ -880,6 +956,10 @@ nl_sock_transact_multiple__(struct nl_sock *sock,
     return error;
 }
 
+/*
+ * 将 n 个 transactions[i] 分成小组(每组大小小于 MAX_BATCH_BYTES), 每次发送一组. 然后收到应答. 再发下一组.
+ * 如果 transactions[i]->request 不为 NULL, 将每个 transactions[i]->request 应答保存在 transactions[i]->reply
+ */
 static void
 nl_sock_transact_multiple(struct nl_sock *sock,
                           struct nl_transaction **transactions, size_t n)
@@ -902,6 +982,8 @@ nl_sock_transact_multiple(struct nl_sock *sock,
     max_batch_count = MAX(sock->rcvbuf / 4096, 1);
     max_batch_count = MIN(max_batch_count, max_iovs);
 
+    //将 n 个 nlamsg 分成大小小于 MAX_BATCH_BYTES 的 m 组, 发送出去.
+    //然后收到应答. 保存在 transactions[i]->reply
     while (n > 0) {
         size_t count, bytes;
         size_t done;
@@ -922,6 +1004,31 @@ nl_sock_transact_multiple(struct nl_sock *sock,
             bytes += transactions[count]->request->size;
         }
 
+        /*
+        * 将 transactions(count 个) 打包发送出去, 并将接收到的应答包保持在 transactions[i]->reply . done 保持已经完成的的请求应答数目
+        *
+        * 1. 更新 sock->next_seq += n
+        * 2. 将每个 transactions 包装成 struct nlmsghdr, 将所有的 transactions 打包到 struct iovec, 将 iovec 打包成 struct msghdr
+        *
+        *      struct nlmsghdr nlmsg
+        *      struct iovec iovecs[MAX_IOVS]
+        *      nlmsg = transactions[i]->request->data
+        *      nlmsg->nlmsg_len = transactions[i]->request->size;
+        *      nlmsg->nlmsg_seq = sock->next_seq + i;
+        *      nlmsg->nlmsg_pid = sock->pid;
+        *      iovs[i].iov_base = msg;
+        *      iovs[i].iov_len = transactions[i]->request->size;
+        *      msg.msg_iov = iovs;
+        *      msg.msg_iovlen = n;
+        *
+        *  3. 一次将所有消息发送给内核 sendmsg(sock->fd, msg, 0)
+        *  4. recvmsg(sock->fd, buf_txn->reply, false); 一条一条接受应答消息直到收到最大发送序列的消息的应答.
+        *  5. 将 buf_txn->replay 转为 struct nlmsghdr, 并检查 nlmsg_seq 的 是否在 (sock->next_seq, sock->next_seq + n)
+        *  6. 如果 transactions[i]->reply 不为 NULL, 就将收到的应答消息保持在 transactions[i]->reply
+        *
+        *  注: 这里有个问题就是内核应答必须以发送的顺序应答, 否则, 如果中间有消息丢失, 或后面发送的消息先收到应答, 就会导致收到序列之前消息不会再收到.
+        *  因此 done 等于 n 并不能保证所有的消息都收到
+        */
         error = nl_sock_transact_multiple__(sock, transactions, count, &done);
         transactions += done;
         n -= done;
@@ -940,6 +1047,9 @@ nl_sock_transact_multiple(struct nl_sock *sock,
     }
 }
 
+/*
+ * 将 request 包装到 transaction 中发送出去, 如果 replyp 不为 NULL, 将应答信息保持在 replyp
+ */
 static int
 nl_sock_transact(struct nl_sock *sock, const struct ofpbuf *request,
                  struct ofpbuf **replyp)
@@ -951,6 +1061,10 @@ nl_sock_transact(struct nl_sock *sock, const struct ofpbuf *request,
     transaction.reply = replyp ? ofpbuf_new(1024) : NULL;
     transactionp = &transaction;
 
+    /*
+     * 将 n 个 transactions[i] 分成小组(每组大小小于 MAX_BATCH_BYTES), 每次发送一组. 然后收到应答. 再发下一组.
+     * 如果 transactions[i]->request 不为 NULL, 将每个 transactions[i]->request 应答保存在 transactions[i]->reply
+     */
     nl_sock_transact_multiple(sock, &transactionp, 1);
 
     if (replyp) {
@@ -992,6 +1106,33 @@ nl_sock_drain(struct nl_sock *sock)
  *
  * The caller must eventually destroy 'request'.
  */
+
+/*
+ *
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = ovs_datapath_family;
+ *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO | NLM_F_DUMP | NLM_F_ACK;
+ *  nlmsghdr->nlmsg_seq = 0;
+ *  nlmsghdr->nlmsg_pid = 0;
+ *  genlmsghdr->cmd = request->cmd; //OVS_DP_CMD_GET
+ *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
+ *  genlmsghdr->reserved = 0;
+ *  ovs_header = buf
+ *  ovs_header->dp_ifindex = request->dp_ifindex //0
+ *  属性
+ *  OVS_DP_ATTR_NAME : request->name //null
+ *  OVS_DP_ATTR_UPCALL_PID : request->upcall_pid
+ *  OVS_DP_ATTR_USER_FEATURES : request->user_features
+ *
+ * 将由 request 构造的 nlmsg 发送给 protocol 对应的 sock 的消息并初始化 dump.
+ *
+ * 其中
+ * 1. dump->sock 为 protocol 对应的 sock
+ * 2. dump->nl_seq 为 nl_msg_nlmsghdr(request)->nlmsg_seq;
+ * 3. dump->status 为将 request 发送给 protocol 对应的 sock 的状态
+ *
+ * 其中1: 根据 protocol 从 pools 中找到 sock, 如果 pools 中不存在, 就创建之
+ */
 void
 nl_dump_start(struct nl_dump *dump, int protocol, const struct ofpbuf *request)
 {
@@ -999,8 +1140,23 @@ nl_dump_start(struct nl_dump *dump, int protocol, const struct ofpbuf *request)
 
     ovs_mutex_init(&dump->mutex);
     ovs_mutex_lock(&dump->mutex);
+    /*
+     * 如果 protocol 在 pools 中存在, 将对应的 sock
+     * 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+     * dump->sock 指向对应的 sock
+     */
     dump->status = nl_pool_alloc(protocol, &dump->sock);
     if (!dump->status) {
+        /*
+        * 由 request 构造 nlmsg, 发送给 dump->sock->fd
+        *
+        * 其中
+        * nlmsg->nlmsg_len = request->size
+        * nlmsg->nlmsg_seq = dump->sock->next_seq + 1
+        * nlmsg->nlmsg_pid = dump->sock->pid
+        *
+        * 阻塞式
+        */
         dump->status = nl_sock_send__(dump->sock, request,
                                       nl_sock_allocate_seq(dump->sock, 1),
                                       true);
@@ -1009,6 +1165,8 @@ nl_dump_start(struct nl_dump *dump, int protocol, const struct ofpbuf *request)
     ovs_mutex_unlock(&dump->mutex);
 }
 
+//如果 buffer->size == 0 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 已经接受完数据返回 EOF
+//成功返回 0
 static int
 nl_dump_refill(struct nl_dump *dump, struct ofpbuf *buffer)
     OVS_REQUIRES(dump->mutex)
@@ -1017,6 +1175,7 @@ nl_dump_refill(struct nl_dump *dump, struct ofpbuf *buffer)
     int error;
 
     while (!buffer->size) {
+        //非阻塞接受 dump->sock->fd 的消息保存在 buffer, 成功返回 0
         error = nl_sock_recv__(dump->sock, buffer, false);
         if (error) {
             /* The kernel never blocks providing the results of a dump, so
@@ -1047,6 +1206,7 @@ nl_dump_refill(struct nl_dump *dump, struct ofpbuf *buffer)
     return 0;
 }
 
+//将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中. 成功返回 0
 static int
 nl_dump_next__(struct ofpbuf *reply, struct ofpbuf *buffer)
 {
@@ -1081,6 +1241,12 @@ nl_dump_next__(struct ofpbuf *reply, struct ofpbuf *buffer)
  * fetched. When this function returns false, other threads may continue to
  * process replies in their buffers, but they will not fetch more replies.
  */
+
+/*
+ * 如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中
+ * 如果 buffer->size != 0, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中.
+ * 成功返回 true
+ */
 bool
 nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
 {
@@ -1100,6 +1266,7 @@ nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
              * next recv on that socket, which could be anywhere due to the way
              * that we pool Netlink sockets.  Serializing the recv calls avoids
              * the issue. */
+            //如果 buffer->size == 0 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 已经接受完数据返回 EOF
             dump->status = nl_dump_refill(dump, buffer);
         }
         retval = dump->status;
@@ -1108,6 +1275,7 @@ nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
 
     /* Fetch the next message from the buffer. */
     if (!retval) {
+        //将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中. 成功返回 0
         retval = nl_dump_next__(reply, buffer);
         if (retval) {
             /* Record 'retval' as the dump status, but don't overwrite an error
@@ -1148,6 +1316,11 @@ nl_dump_done(struct nl_dump *dump)
         struct ofpbuf reply, buf;
 
         ofpbuf_use_stub(&buf, tmp_reply_stub, sizeof tmp_reply_stub);
+        /*
+        * 如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中
+        * 如果 buffer->size != 0, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中. 成功返回 0
+        * 如果数据接收完或发送错误返回false, 成功返回 true. 错误代码记录在 dump->status
+        */
         while (nl_dump_next(dump, &reply, &buf)) {
             /* Nothing to do. */
         }
@@ -1159,6 +1332,10 @@ nl_dump_done(struct nl_dump *dump)
         ovs_assert(status);
     }
 
+    /*
+    * 将 sock 保存在 pool = pools[sock->protocol]; pool->socks[pool->n++]
+    * 释放 sock 的内存
+    */
     nl_pool_release(dump->sock);
     ovs_mutex_destroy(&dump->mutex);
 
@@ -1223,6 +1400,8 @@ done:
 /* Causes poll_block() to wake up when any of the specified 'events' (which is
  * a OR'd combination of POLLIN, POLLOUT, etc.) occur on 'sock'.
  * On Windows, 'sock' is not treated as const, and may be modified. */
+
+//将 sock->fd 加入全局 poll 描述符号表中
 void
 nl_sock_wait(const struct nl_sock *sock, short int events)
 {
@@ -1291,6 +1470,11 @@ find_genl_family_by_id(uint16_t id)
     return NULL;
 }
 
+/*
+ * 在 genl_families 中查找 id 对应的 genl_family,
+ * 如果找到, genl_family->name != name, 用 name 替代 genl_family->name
+ * 如果没有, 创建新的 genl_family 加入 genl_families
+ */
 static void
 define_genl_family(uint16_t id, const char *name)
 {
@@ -1321,6 +1505,26 @@ genl_family_to_name(uint16_t id)
 }
 
 #ifndef _WIN32
+/*
+ * 1. 创建 NETLINK_GENERIC 协议 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+ * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
+ * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+ * 4. 解析应答消息,保持在 attrs 中
+ *
+ * 其中 2:
+ *
+ *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+ *
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+ *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+ *  nlmsghdr->nlmsg_seq = 0;
+ *  nlmsghdr->nlmsg_pid = 0;
+ *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+ *  genlmsghdr->version = 1;
+ *  genlmsghdr->reserved = 0;
+ *
+ */
 static int
 do_lookup_genl_family(const char *name, struct nlattr **attrs,
                       struct ofpbuf **replyp)
@@ -1330,15 +1534,46 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
     int error;
 
     *replyp = NULL;
+    /*
+    * 设置 iovecs 大小, 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+    */
     error = nl_sock_create(NETLINK_GENERIC, &sock);
     if (error) {
         return error;
     }
 
     ofpbuf_init(&request, 0);
+
+    /*
+     * 构造 Netlink 请求消息
+     *
+     *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+     *
+     *  nlmsghdr->nlmsg_len = 0;
+     *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+     *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+     *  nlmsghdr->nlmsg_seq = 0;
+     *  nlmsghdr->nlmsg_pid = 0;
+     *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+     *  genlmsghdr->version = 1;
+     *  genlmsghdr->reserved = 0;
+     *
+     */
     nl_msg_put_genlmsghdr(&request, 0, GENL_ID_CTRL, NLM_F_REQUEST,
                           CTRL_CMD_GETFAMILY, 1);
+    /*
+    *  msg 增加 struct nlattr nla 属性
+    *
+    *  nla->nla_len = NLA_HDRLEN + strlen(name)+1;
+    *  nla->nla_type = CTRL_ATTR_FAMILY_NAME;
+    *  数据体为 name, 长度 strlen(name)+1
+    */
     nl_msg_put_string(&request, CTRL_ATTR_FAMILY_NAME, name);
+
+
+    /*
+    * 将 request 包装到 transaction 中发送出去, 如果 replyp 不为 NULL, 将应答信息保持在 replyp
+    */
     error = nl_sock_transact(sock, &request, &reply);
     ofpbuf_uninit(&request);
     if (error) {
@@ -1346,6 +1581,10 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
         return error;
     }
 
+    /*
+    * 将 msg->data + nla_offset 开始, 将解析出来的 nlattr 存放在 attrs 中.
+    * 其中 policy 主要表明 nlttrs[i] 是否是有效的属性, 成功返回 true
+    */
     if (!nl_policy_parse(reply, NLMSG_HDRLEN + GENL_HDRLEN,
                          family_policy, attrs, ARRAY_SIZE(family_policy))
         || nl_attr_get_u16(attrs[CTRL_ATTR_FAMILY_ID]) == 0) {
@@ -1454,6 +1693,16 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
  * When successful, writes its result to 'multicast_group' and returns 0.
  * Otherwise, clears 'multicast_group' and returns a positive error code.
  */
+/*
+ * @family_name : 待查询的 family_name
+ * @group_name  : 期望返回的组属性名
+ * @multicast_group : 与 group_name 对应的属性
+ *
+ * 确保 family_name 对应的属性列表中存在 group_name 的属性
+ *
+ * 通过 NETLINK_GENERIC 协议 sock 获取 family_name 存在对应的属性列表, 如果 CTRL_ATTR_MCAST_GROUPS 属性中存在与 group_name
+ * 相同的属性, 返回 0.
+ */
 int
 nl_lookup_genl_mcgroup(const char *family_name, const char *group_name,
                        unsigned int *multicast_group)
@@ -1465,6 +1714,26 @@ nl_lookup_genl_mcgroup(const char *family_name, const char *group_name,
     int error;
 
     *multicast_group = 0;
+    /*
+    * 1. 创建 NETLINK_GENERIC 协议 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+    * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
+    * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+    * 4. 解析应答消息,保持在 attrs 中
+    *
+    * 其中 2:
+    *
+    *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+    *
+    *  nlmsghdr->nlmsg_len = 0;
+    *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+    *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+    *  nlmsghdr->nlmsg_seq = 0;
+    *  nlmsghdr->nlmsg_pid = 0;
+    *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+    *  genlmsghdr->version = 1;
+    *  genlmsghdr->reserved = 0;
+    *
+    */
     error = do_lookup_genl_family(family_name, family_attrs, &reply);
     if (error) {
         return error;
@@ -1508,6 +1777,13 @@ exit:
  * number and stores it in '*number'.  If successful, returns 0 and the caller
  * may use '*number' as the family number.  On failure, returns a positive
  * errno value and '*number' caches the errno value. */
+
+/*
+ * 发送 sock 请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+ * 在 genl_families 中查找 number 对应的 genl_family,
+ * 如果找到, genl_family->name != name, 用 name 替代 genl_family->name
+ * 如果没有, 创建新的 genl_family 加入 genl_families
+ */
 int
 nl_lookup_genl_family(const char *name, int *number)
 {
@@ -1516,9 +1792,34 @@ nl_lookup_genl_family(const char *name, int *number)
         struct ofpbuf *reply;
         int error;
 
+        /*
+        * 1. 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+        * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
+        * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+        * 4. 解析应答消息,保持在 attrs 中
+        *
+        * 其中 2:
+        *
+        *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+        *
+        *  nlmsghdr->nlmsg_len = 0;
+        *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+        *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+        *  nlmsghdr->nlmsg_seq = 0;
+        *  nlmsghdr->nlmsg_pid = 0;
+        *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+        *  genlmsghdr->version = 1;
+        *  genlmsghdr->reserved = 0;
+        *
+        */
         error = do_lookup_genl_family(name, attrs, &reply);
         if (!error) {
             *number = nl_attr_get_u16(attrs[CTRL_ATTR_FAMILY_ID]);
+            /*
+            * 在 genl_families 中查找 id 对应的 genl_family,
+            * 如果找到, genl_family->name != name, 用 name 替代 genl_family->name
+            * 如果没有, 创建新的 genl_family 加入 genl_families
+            */
             define_genl_family(*number, name);
         } else {
             *number = -error;
@@ -1538,6 +1839,18 @@ struct nl_pool {
 static struct ovs_mutex pool_mutex = OVS_MUTEX_INITIALIZER;
 static struct nl_pool pools[MAX_LINKS] OVS_GUARDED_BY(pool_mutex);
 
+/*
+ * @protocol : netlink 协议
+ * @sockp : protocol 对应的 sock
+ *
+ * 如果 protocol 在 pools 中存在, 将对应的 sock
+ * 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+ * 成功返回 0
+ *
+ * pool = pools[protocol]
+ * sockp = pool->socks[--pool->n]
+ * TODO 这里 pools[protocol] == NULL, BUG?
+ */
 static int
 nl_pool_alloc(int protocol, struct nl_sock **sockp)
 {
@@ -1561,6 +1874,10 @@ nl_pool_alloc(int protocol, struct nl_sock **sockp)
     }
 }
 
+/*
+ * 将 sock 保存在 pool = pools[sock->protocol]; pool->socks[pool->n++]
+ * 释放 sock 的内存
+ */
 static void
 nl_pool_release(struct nl_sock *sock)
 {
@@ -1619,6 +1936,14 @@ nl_pool_release(struct nl_sock *sock)
  *      2. Resending the request causes it to be re-executed, so the request
  *         needs to be idempotent.
  */
+
+/*
+ *
+ * 1. 如果 protocol 在 pools 中存在, 将对应的 sock
+ * 2. 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+ * 3. 将 request 包装到 transaction 中发送出去, 如果 replyp 不为 NULL, 将应答信息保持在 replyp
+ *
+ */
 int
 nl_transact(int protocol, const struct ofpbuf *request,
             struct ofpbuf **replyp)
@@ -1626,12 +1951,20 @@ nl_transact(int protocol, const struct ofpbuf *request,
     struct nl_sock *sock;
     int error;
 
+    /*
+     * 如果 protocol 在 pools 中存在, 将对应的 sock
+     * 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+     * 成功返回 0
+     */
     error = nl_pool_alloc(protocol, &sock);
     if (error) {
         *replyp = NULL;
         return error;
     }
 
+    /*
+    * 将 request 包装到 transaction 中发送出去, 如果 replyp 不为 NULL, 将应答信息保持在 replyp
+    */
     error = nl_sock_transact(sock, request, replyp);
 
     nl_pool_release(sock);
@@ -1658,6 +1991,14 @@ nl_transact(int protocol, const struct ofpbuf *request,
  * reliable delivery and reply semantics on top of bare Netlink.  See
  * nl_transact() for some caveats.
  */
+
+/*
+ * 1. 如果 protocol 在 pools 中存在, 将对应的 sock
+ * 2. 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+ * 3. 将 n 个 transactions[i] 分成小组(每组大小小于 MAX_BATCH_BYTES), 每次发送一组. 然后收到应答. 再发下一组.
+ * 4. 如果 transactions[i]->request 不为 NULL, 将每个 transactions[i]->request 应答保存在 transactions[i]->reply
+ *
+ */
 void
 nl_transact_multiple(int protocol,
                      struct nl_transaction **transactions, size_t n)
@@ -1665,8 +2006,17 @@ nl_transact_multiple(int protocol,
     struct nl_sock *sock;
     int error;
 
+    /*
+     * 如果 protocol 在 pools 中存在, 将对应的 sock
+     * 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
+     * 成功返回 0
+     */
     error = nl_pool_alloc(protocol, &sock);
     if (!error) {
+        /*
+        * 将 n 个 transactions[i] 分成小组(每组大小小于 MAX_BATCH_BYTES), 每次发送一组. 然后收到应答. 再发下一组.
+        * 如果 transactions[i]->request 不为 NULL, 将每个 transactions[i]->request 应答保存在 transactions[i]->reply
+        */
         nl_sock_transact_multiple(sock, transactions, n);
         nl_pool_release(sock);
     } else {
@@ -1675,6 +2025,7 @@ nl_transact_multiple(int protocol,
 }
 
 
+//sock->next_seq += n
 static uint32_t
 nl_sock_allocate_seq(struct nl_sock *sock, unsigned int n)
 {

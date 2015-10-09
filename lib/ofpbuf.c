@@ -370,6 +370,8 @@ ofpbuf_shift(struct ofpbuf *b, int delta)
 /* Appends 'size' bytes of data to the tail end of 'b', reallocating and
  * copying its data if necessary.  Returns a pointer to the first byte of the
  * new data, which is left uninitialized. */
+//p = b->data + b->size
+//b->size += size
 void *
 ofpbuf_put_uninit(struct ofpbuf *b, size_t size)
 {
