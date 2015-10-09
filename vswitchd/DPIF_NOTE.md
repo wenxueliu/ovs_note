@@ -956,3 +956,188 @@ static int dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev, odp_po
 dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池.
 每个端口属于一个 netdev. 每个端口所属的 netdev 有一个接受队列
 每个线程有一个流表缓存池
+
+
+##dpif-netlink
+
+int nl_lookup_genl_family(const char *name, int *number)
+
+    发送 sock 请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+    在 genl_families 中查找 number 对应的 genl_family,
+    如果找到, genl_family->name != name, 用 name 替代 genl_family->name
+    如果没有, 创建新的 genl_family 加入 genl_families
+
+    do_lookup_genl_family(name, attrs, &reply);
+    define_genl_family( *number, name);
+
+static int do_lookup_genl_family(const char *name, struct nlattr **attrs, struct ofpbuf **replyp)
+
+    1. 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+    2. 构造 Netlink 请求消息. 消息类型为 CTRL_CMD_GETFAMILY
+    3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+    4. 解析应答消息,保持在 attrs 中
+
+    其中 2:
+
+    request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+
+    nlmsghdr->nlmsg_len = 0;
+    nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+    nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+    nlmsghdr->nlmsg_seq = 0;
+    nlmsghdr->nlmsg_pid = 0;
+    genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+    genlmsghdr->version = 1;
+    genlmsghdr->reserved = 0;
+
+
+##附录
+
+struct nl_sock {
+    int fd;
+    uint32_t next_seq;          /* default 1 */
+    uint32_t pid;
+    int protocol;
+    unsigned int rcvbuf;        /* Receive buffer size (SO_RCVBUF). default 1024 * 1024; */
+};
+
+/* Compile-time limit on iovecs, so that we can allocate a maximum-size array
+ * of iovecs on the stack. */
+#define MAX_IOVS 128
+
+/* Maximum number of iovecs that may be passed to sendmsg, capped at a
+ * minimum of _XOPEN_IOV_MAX (16) and a maximum of MAX_IOVS.
+ *
+ * Initialized by nl_sock_create(). */
+static int max_iovs;
+
+int nl_sock_create(int protocol, struct nl_sock **sockp)
+
+    struct nl_sock *sock;
+    struct sockaddr_nl local, remote;
+    socklen_t local_size;
+    int rcvbuf;
+    int retval = 0;
+
+    if (ovsthread_once_start(&once)) {
+        int save_errno = errno;
+        errno = 0;
+
+        max_iovs = sysconf(_SC_UIO_MAXIOV);
+        if (max_iovs < _XOPEN_IOV_MAX) {
+            if (max_iovs == -1 && errno) {
+                VLOG_WARN("sysconf(_SC_UIO_MAXIOV): %s", ovs_strerror(errno));
+            }
+            max_iovs = _XOPEN_IOV_MAX;
+        } else if (max_iovs > MAX_IOVS) {
+            max_iovs = MAX_IOVS;
+        }
+
+        errno = save_errno;
+        ovsthread_once_done(&once);
+    }
+
+    *sockp = NULL;
+    sock = xmalloc(sizeof *sock);
+
+    sock->fd = socket(AF_NETLINK, SOCK_RAW, protocol);
+    if (sock->fd < 0) {
+        printf("fcntl: %s", errno);
+        goto error;
+    }
+
+    sock->protocol = protocol;
+    sock->next_seq = 1;
+
+    rcvbuf = 1024 * 1024;
+
+    if (setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUFFORCE,
+                   &rcvbuf, sizeof rcvbuf)) {
+        /* Only root can use SO_RCVBUFFORCE.  Everyone else gets EPERM.
+         * Warn only if the failure is therefore unexpected. */
+        if (errno != EPERM) {
+            printf("setting %d-byte socket receive buffer failed "
+                         "(%s)", rcvbuf, strer(errno));
+        }
+    }
+
+    socklen_t len;
+    int error;
+    len = sizeof value;
+    if (getsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, &value, &len)) {
+        error = sock_errno();
+        printf("getsockopt(%s): %s", optname, sock_strerror(error));
+    } else if (len != sizeof value) {
+        error = EINVAL;
+        printf("getsockopt(%s): value is %u bytes (expected %"PRIuSIZE")",
+                    optname, (unsigned int) len, sizeof value);
+    } else {
+        error = 0;
+    }
+
+    int retval = error;
+    if (retval < 0) {
+        retval = -retval;
+        goto error;
+    }
+
+    rcvbuf = value;
+    sock->rcvbuf = rcvbuf;
+
+    /* Connect to kernel (pid 0) as remote address. */
+    memset(&remote, 0, sizeof remote);
+    remote.nl_family = AF_NETLINK;
+    remote.nl_pid = 0;
+    if (connect(sock->fd, (struct sockaddr *) &remote, sizeof remote) < 0) {
+        printf("connect(0): %s", ovs_strerror(errno));
+        goto error;
+    }
+
+    /* Obtain pid assigned by kernel. */
+    local_size = sizeof local;
+    if (getsockname(sock->fd, (struct sockaddr *) &local, &local_size) < 0) {
+        printf("getsockname: %s", ovs_strerror(errno));
+        goto error;
+    }
+    if (local_size < sizeof local || local.nl_family != AF_NETLINK) {
+        printf("getsockname returned bad Netlink name");
+        retval = EINVAL;
+        goto error;
+    }
+    sock->pid = local.nl_pid;
+
+    *sockp = sock;
+    return 0;
+
+error:
+    if (retval == 0) {
+        retval = errno;
+        if (retval == 0) {
+            retval = EINVAL;
+        }
+    }
+    if (sock->fd >= 0) {
+        close(sock->fd);
+    }
+    free(sock);
+    return retval;
+}
+
+
+//加入多播组
+
+if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                &multicast_group, sizeof multicast_group) < 0) {
+    printf("could not join multicast group %u (%s)",
+                multicast_group, strerror(errno));
+    return errno;
+}
+
+//从多播组中去除
+if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_DROP_MEMBERSHIP,
+                &multicast_group, sizeof multicast_group) < 0) {
+    printf("could not leave multicast group %u (%s)",
+                multicast_group, ovs_strerror(errno));
+    return errno;
+}
+
