@@ -1,7 +1,10 @@
 
+上次到 ofproto_run(br->ofproto);
+
+
 ##全局配置
 
-flow-restore-wait : 
+flow-restore-wait : true | false
 
 ##全局变量
 
@@ -1345,18 +1348,49 @@ const struct ofproto_class ofproto_dpif_class = {
     get_datapath_version,       /* get_datapath_version */
 };
 
+//文件 lib/dpif.c
+static const struct dpif_class *base_dpif_classes[] = {
+#if defined(__linux__) || defined(_WIN32)
+    &dpif_netlink_class,
+#endif
+    &dpif_netdev_class,
+};
+
+//dpif_class
+static struct shash dpif_classes = SHASH_INITIALIZER(&dpif_classes);
+//dpif_class 黑名单
+static struct sset dpif_blacklist = SSET_INITIALIZER(&dpif_blacklist);
+
+//文件 ofproto.c
+static const struct ofproto_class **ofproto_classes;
+static size_t n_ofproto_classes; ofproto_classes 的数量
+
+
+//文件 bridge.c
+/* All bridges, indexed by name. */
+static struct hmap all_bridges = HMAP_INITIALIZER(&all_bridges); 保持 struct bridge 对象, 以 hash_string(bridge->name, 0) 索引
+
 ##核心步骤
 
 
 bridge_init_ofproto(cfg)
     ofproto_init()
+        void init() //ofproto-dpif.c 的 ofproto_dpif_class
 bridge_run__()
     ofproto_enumerate_types(&types);
+        enumerate_types(types);//ofproto-dpif.c 的 ofproto_dpif_class
+            dp_enumerate_types(types)
+                dp_initialize();
+                    dpif_netdev_init(void) // dpif-netdev.c 的 dpif_netdev_class
+                    dpif_netlink_init(void) // dpif-netlink.c 的 dpif_netlink_class
 
     SSET_FOR_EACH (type, &types)
         ofproto_type_run(type);
+            dpif_netlink_class->type_run(datapath_type)
+            dpif_netdev_class->type_run(datapath_type)
 
     HMAP_FOR_EACH (br, node, &all_bridges)
+        //从这里开始
         ofproto_run(br->ofproto);
 
 ##关键实现
@@ -1537,3 +1571,6 @@ static int open_dpif_backer(const char *type, struct dpif_backer **backerp)
     unixctl_command_register("upcall/set-flow-limit", "", 1, 1, upcall_unixctl_set_flow_limit, NULL);
     unixctl_command_register("revalidator/wait", "", 0, 0, upcall_unixctl_dump_wait, NULL);
     unixctl_command_register("revalidator/purge", "", 0, 0, upcall_unixctl_purge, NULL);
+
+
+

@@ -107,6 +107,7 @@ main(int argc, char *argv[])
     }
     unixctl_command_register("exit", "", 0, 0, ovs_vswitchd_exit, &exiting);
 
+    //初始化 ovsdb 命令
     bridge_init(remote);
     free(remote);
 

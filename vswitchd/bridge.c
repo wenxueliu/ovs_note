@@ -340,6 +340,7 @@ static void add_vlan_splinter_ports(struct bridge *,
 
 static void discover_types(const struct ovsrec_open_vswitch *cfg);
 
+//将 cfg 配置保存在 iface_hints
 static void
 bridge_init_ofproto(const struct ovsrec_open_vswitch *cfg)
 {
@@ -377,6 +378,7 @@ bridge_init_ofproto(const struct ovsrec_open_vswitch *cfg)
         }
     }
 
+    //
     ofproto_init(&iface_hints);
 
     shash_destroy_free_data(&iface_hints);

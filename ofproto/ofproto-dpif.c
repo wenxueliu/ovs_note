@@ -432,7 +432,7 @@ ofproto_dpif_wants_packet_in_on_miss(struct ofproto_dpif *ofproto)
 /* Factory functions. */
 
 /*
- * 1. 将 iface_hints 加入 init_ofp_ports
+ * 1. 将 iface_hints 加入 全局变量 init_ofp_ports
  * 2. 注册 ofproto/trace, fdb, mdb, dpif 命令
  * 3. 注册 upcall 命令
  */

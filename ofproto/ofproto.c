@@ -325,7 +325,7 @@ static void meter_insert_rule(struct rule *);
 static void ofproto_unixctl_init(void);
 
 /* All registered ofproto classes, in probe order. */
-//ofproto_dpif_class
+//目前只包含 ofproto_dpif_class
 static const struct ofproto_class **ofproto_classes;
 static size_t n_ofproto_classes;
 static size_t allocated_ofproto_classes;
@@ -365,7 +365,6 @@ static bool flow_restore_wait = true;
  * 2. 拷贝 iface_hints 到 init_ofp_ports
  * 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. ofproto_classes[i]->init(&init_ofp_ports);
  * 4. 注册 ofproto/list 到 ovsdb
- *
  */
 void
 ofproto_init(const struct shash *iface_hints)
@@ -404,7 +403,7 @@ ofproto_init(const struct shash *iface_hints)
  * structure, or a null pointer if there is none registered for 'type'. */
 
 /*
- * 由于 ofproto_class 只包含 ofproto_dpif_class, type 如果是 system, netdev 不会有问题
+ * 由于 ofproto_classes 只包含 ofproto_dpif_class, type 如果是 system, netdev 不会有问题
  */
 static const struct ofproto_class *
 ofproto_class_find__(const char *type)
@@ -1674,7 +1673,9 @@ process_port_change(struct ofproto *ofproto, int error, char *devname)
 
 /*
  * 目前 datapath_type 只能为 system, netdev
- * 调用 ofproto_dpif_class->type_run(datapath_type)
+ * 调用 ofproto_dpif_class->type_run(datapath_type) 实际调用
+ *      dpif_netlink_class->type_run(datapath_type)
+ *      dpif_netdev_class->type_run(datapath_type)
  */
 int
 ofproto_type_run(const char *datapath_type)

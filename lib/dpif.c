@@ -283,7 +283,7 @@ dp_blacklist_provider(const char *type)
 /*
  * 注册 tunnel port, tunnel arp, dpctl, route 命令
  * 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
- * 将 base_dpif_classes 中的每个元素的 type 加入 types (实际上 types 包含 netdev, system 两个元素)
+ * 将 base_dpif_classes 中的每个元素的 type 加入 types (实际上 types 包含 dpif_netlink_class->type(system), dpif_netdev_class->type(netdev) 两个元素)
  */
 void
 dp_enumerate_types(struct sset *types)
@@ -296,7 +296,7 @@ dp_enumerate_types(struct sset *types)
     * 3. 注册 tunnel arp cache 初始化
     * 4. 注册 route 命令
     * 5. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
-    * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
+    * 其中 5: 调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
     */
     dp_initialize();
 
