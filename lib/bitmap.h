@@ -35,17 +35,20 @@ bitmap_bit__(size_t offset)
     return 1UL << (offset % BITMAP_ULONG_BITS);
 }
 
+//N_BITS / 64 + 1 的向上取整.
 #define BITMAP_N_LONGS(N_BITS) DIV_ROUND_UP(N_BITS, BITMAP_ULONG_BITS)
 
 static inline size_t
 bitmap_n_longs(size_t n_bits)
 {
+    //n_bits / 64 + 1
     return BITMAP_N_LONGS(n_bits);
 }
 
 static inline size_t
 bitmap_n_bytes(size_t n_bits)
 {
+    //(n_bits / 64 + 1) * 8 (x86_64)
     return bitmap_n_longs(n_bits) * sizeof(unsigned long int);
 }
 

@@ -432,6 +432,7 @@ const char *dpif_type(const struct dpif *);
 int dpif_delete(struct dpif *);
 
 /* Statistics for a dpif as a whole. */
+//信息来自 ovs_dp_stats, ovs_dp_megaflow_stats
 struct dpif_dp_stats {
     uint64_t n_hit;             /* Number of flow table matches. */
     uint64_t n_missed;          /* Number of flow table misses. */

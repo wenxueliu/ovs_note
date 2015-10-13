@@ -95,6 +95,11 @@ find_poll_node(struct poll_loop *loop, int fd, HANDLE wevent)
  * ('where' is used in debug logging.  Commonly one would use poll_fd_wait() to
  * automatically provide the caller's source file and line number for
  * 'where'.) */
+/*
+ *  对于 fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+ *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
+ *
+ */
 static void
 poll_create_node(int fd, HANDLE wevent, short int events, const char *where)
 {
@@ -139,6 +144,12 @@ poll_create_node(int fd, HANDLE wevent, short int events, const char *where)
  * ('where' is used in debug logging.  Commonly one would use poll_fd_wait() to
  * automatically provide the caller's source file and line number for
  * 'where'.) */
+
+/*
+ *  对于 fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+ *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
+ *
+ */
 void
 poll_fd_wait_at(int fd, short int events, const char *where)
 {
@@ -174,6 +185,12 @@ poll_wevent_wait_at(HANDLE wevent, const char *where)
  * ('where' is used in debug logging.  Commonly one would use poll_timer_wait()
  * to automatically provide the caller's source file and line number for
  * 'where'.) */
+/*
+ *  如果 msec = 0, 调用 poll_timer_wait_until_at(0, where);
+ *  如果 msec > 0, 调用 poll_timer_wait_until_at(time_now()+msec, where);
+ *  否则 poll_timer_wait_until_at(LLONG_MAX, where);
+ *  其中 poll_timer_wait_until_at(when, where) 如果 when < poll_loop()->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
+ */
 void
 poll_timer_wait_at(long long int msec, const char *where)
 {
@@ -191,6 +208,7 @@ poll_timer_wait_at(long long int msec, const char *where)
         when = LLONG_MAX;
     }
 
+    //如果 when < poll_loop()->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
     poll_timer_wait_until_at(when, where);
 }
 
@@ -206,6 +224,9 @@ poll_timer_wait_at(long long int msec, const char *where)
  * ('where' is used in debug logging.  Commonly one would use
  * poll_timer_wait_until() to automatically provide the caller's source file
  * and line number for 'where'.) */
+/*
+ *  如果 when < poll_loop()->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
+ */
 void
 poll_timer_wait_until_at(long long int when, const char *where)
 {
@@ -222,9 +243,22 @@ poll_timer_wait_until_at(long long int when, const char *where)
  * ('where' is used in debug logging.  Commonly one would use
  * poll_immediate_wake() to automatically provide the caller's source file and
  * line number for 'where'.) */
+
+/*
+*  如果 msec = 0, 调用 poll_timer_wait_until_at(0, where);
+*  如果 msec > 0, 调用 poll_timer_wait_until_at(time_now()+msec, where);
+*  否则 poll_timer_wait_until_at(LLONG_MAX, where);
+*  其中 poll_timer_wait_until_at(when, where) 如果 when < poll_loop()->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
+*/
 void
 poll_immediate_wake_at(const char *where)
 {
+    /*
+    *  如果 msec = 0, 调用 poll_timer_wait_until_at(0, where);
+    *  如果 msec > 0, 调用 poll_timer_wait_until_at(time_now()+msec, where);
+    *  否则 poll_timer_wait_until_at(LLONG_MAX, where);
+    *  其中 poll_timer_wait_until_at(when, where) 如果 when < poll_loop()->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
+    */
     poll_timer_wait_at(0, where);
 }
 

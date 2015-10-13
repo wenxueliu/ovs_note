@@ -960,6 +960,17 @@ dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和�
 
 ##dpif-netlink
 
+###消息格式的转换
+
+在将 request 发送给内核的时候必须先转换为 struct ofpbuf 类型
+在接受到应答后, 必须将 bufp 转换为 reply
+此外, 在给内核发送数据的时候又将 struct ofpbuf 转换为 struct msghdr.
+此外, 收到内核应答数据的时候又将 struct msghdr 转换为 struct ofpbuf.
+
+而为了能够更好地映射发送和应答关系, 通过 struct transaction 数据结构 保持, 待发送的 request 和待接受的 reply
+而 struct msghdr 又包含 struct iovecs. 可以包多个 struct transaction 消息放入 iovecs 中, 一次发送多个请求.
+
+
 int nl_lookup_genl_family(const char *name, int *number)
 
     发送 sock 请求获取 name (genl_family->name) 对应的 number(genl_family->id)

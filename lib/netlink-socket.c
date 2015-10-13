@@ -339,6 +339,9 @@ nl_sock_mcgroup(struct nl_sock *sock, unsigned int multicast_group, bool join)
  *
  * It is not an error to attempt to join a multicast group to which a socket
  * already belongs. */
+/*
+ * 将 sock->fd 加入 multicast_group 多播组
+ */
 int
 nl_sock_join_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
 {
@@ -458,7 +461,7 @@ nl_sock_leave_mcgroup(struct nl_sock *sock, unsigned int multicast_group)
 }
 
 /*
- * 由 msg 构造 nlmsg, 发送给 sock->fd
+ * 由 nlmsg_seq, msg 构造 nlmsg, 发送给 sock->fd
  *
  * 其中
  * nlmsg->nlmsg_len = msg->size
@@ -539,7 +542,13 @@ nl_sock_send_seq(struct nl_sock *sock, const struct ofpbuf *msg,
 }
 
 /*
- * 接受消息, 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
+ * @sock : 待接受数据的 sock
+ * @buf  : 保存缓存数据
+ * @wait : true 阻塞, false 非阻塞
+ *
+ * 接受 sock->fd 消息保存在 buf
+ *
+ * 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
  *
  *  nlmsghdr = buf->base;
  *  iov[0].iov_base = buf->base;
@@ -550,7 +559,6 @@ nl_sock_send_seq(struct nl_sock *sock, const struct ofpbuf *msg,
  *  msg.msg_iovlen = 2;
  *
  *  do {
- *      //非阻塞接受
  *      retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
  *  }while (error == EINTR)
  *
@@ -617,6 +625,7 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
             }
         }
 #else
+        //如果 wait = true 阻塞. 否则非阻塞
         retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
 #endif
         error = (retval < 0 ? errno
@@ -677,6 +686,29 @@ nl_sock_recv__(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
  *
  * Regardless of success or failure, this function resets 'buf''s headroom to
  * 0. */
+
+/*
+ * @sock : 待接受数据的 sock
+ * @buf  : 保存缓存数据
+ * @wait : true 阻塞, false 非阻塞
+ *
+ * 接受 sock->fd 消息保存在 buf
+ *
+ * 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
+ *
+ *  nlmsghdr = buf->base;
+ *  iov[0].iov_base = buf->base;
+ *  iov[0].iov_len = buf->allocated;
+ *  iov[1].iov_base = tail; //保存长度超过 buf->allocated 的数据
+ *  iov[1].iov_len = sizeof tail;
+ *  msg.msg_iov = iov;
+ *  msg.msg_iovlen = 2;
+ *
+ *  do {
+ *      retval = recvmsg(sock->fd, &msg, wait ? 0 : MSG_DONTWAIT);
+ *  }while (error == EINTR)
+ *
+ */
 int
 nl_sock_recv(struct nl_sock *sock, struct ofpbuf *buf, bool wait)
 {
@@ -1108,27 +1140,17 @@ nl_sock_drain(struct nl_sock *sock)
  */
 
 /*
+ * 修改由 request 构造的 struct nlmsghdr nlmsg 之后发送给 protocol 对应的 sock 的消息并初始化 dump.
  *
- *  nlmsghdr->nlmsg_len = 0;
- *  nlmsghdr->nlmsg_type = ovs_datapath_family;
- *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO | NLM_F_DUMP | NLM_F_ACK;
- *  nlmsghdr->nlmsg_seq = 0;
- *  nlmsghdr->nlmsg_pid = 0;
- *  genlmsghdr->cmd = request->cmd; //OVS_DP_CMD_GET
- *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
- *  genlmsghdr->reserved = 0;
- *  ovs_header = buf
- *  ovs_header->dp_ifindex = request->dp_ifindex //0
- *  属性
- *  OVS_DP_ATTR_NAME : request->name //null
- *  OVS_DP_ATTR_UPCALL_PID : request->upcall_pid
- *  OVS_DP_ATTR_USER_FEATURES : request->user_features
+ * 其中 request 构造的 nlmsg:
+ * nlmsg->nlmsg_flags |= NLM_F_DUMP | NLM_F_ACK
+ * nlmsg->nlmsg_len = request->size
+ * nlmsg->nlmsg_seq = dump->sock->next_seq + 1
+ * nlmsg->nlmsg_pid = dump->sock->pid
  *
- * 将由 request 构造的 nlmsg 发送给 protocol 对应的 sock 的消息并初始化 dump.
- *
- * 其中
+ * 初始化后的 dump :
  * 1. dump->sock 为 protocol 对应的 sock
- * 2. dump->nl_seq 为 nl_msg_nlmsghdr(request)->nlmsg_seq;
+ * 2. dump->nl_seq 为 dump->sock->next_seq + 1;
  * 3. dump->status 为将 request 发送给 protocol 对应的 sock 的状态
  *
  * 其中1: 根据 protocol 从 pools 中找到 sock, 如果 pools 中不存在, 就创建之
@@ -1148,9 +1170,9 @@ nl_dump_start(struct nl_dump *dump, int protocol, const struct ofpbuf *request)
     dump->status = nl_pool_alloc(protocol, &dump->sock);
     if (!dump->status) {
         /*
-        * 由 request 构造 nlmsg, 发送给 dump->sock->fd
+        * 由 dump->sock,request 构造 struct nlmsghdr nlmsg, 发送给 dump->sock->fd
         *
-        * 其中
+        * nlmsg->nlmsg_flags |= NLM_F_DUMP | NLM_F_ACK
         * nlmsg->nlmsg_len = request->size
         * nlmsg->nlmsg_seq = dump->sock->next_seq + 1
         * nlmsg->nlmsg_pid = dump->sock->pid
@@ -1166,7 +1188,7 @@ nl_dump_start(struct nl_dump *dump, int protocol, const struct ofpbuf *request)
 }
 
 //如果 buffer->size == 0 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 已经接受完数据返回 EOF
-//成功返回 0
+//成功返回 0, 接收完返回 EOF, 失败返回错误码
 static int
 nl_dump_refill(struct nl_dump *dump, struct ofpbuf *buffer)
     OVS_REQUIRES(dump->mutex)
@@ -1245,7 +1267,7 @@ nl_dump_next__(struct ofpbuf *reply, struct ofpbuf *buffer)
 /*
  * 如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中
  * 如果 buffer->size != 0, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中.
- * 成功返回 true
+ * 成功接受数据成功返回 true, 读完所有数据或发生错误返回false
  */
 bool
 nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
@@ -1298,6 +1320,11 @@ nl_dump_next(struct nl_dump *dump, struct ofpbuf *reply, struct ofpbuf *buffer)
 /* Completes Netlink dump operation 'dump', which must have been initialized
  * with nl_dump_start().  Returns 0 if the dump operation was error-free,
  * otherwise a positive errno value describing the problem. */
+/*
+ * 如果 dump->state = 0, 继续接受数据直到数据接受完或发生错误. 之后将 dump->sock 保存在 pools 中
+ * 如果数据接受完, 返回0, 否则返回具体错误代码
+ * 注:如果数据没有收完就调用, 会导致后续数据丢失。
+ */
 int
 nl_dump_done(struct nl_dump *dump)
 {
@@ -1401,7 +1428,11 @@ done:
  * a OR'd combination of POLLIN, POLLOUT, etc.) occur on 'sock'.
  * On Windows, 'sock' is not treated as const, and may be modified. */
 
-//将 sock->fd 加入全局 poll 描述符号表中
+/*
+*  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+*  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
+*
+*/
 void
 nl_sock_wait(const struct nl_sock *sock, short int events)
 {
@@ -1412,6 +1443,11 @@ nl_sock_wait(const struct nl_sock *sock, short int events)
     }
     poll_immediate_wake(); /* XXX: temporary. */
 #else
+    /*
+    *  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+    *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
+    *
+    */
     poll_fd_wait(sock->fd, events);
 #endif
 }
@@ -1938,11 +1974,9 @@ nl_pool_release(struct nl_sock *sock)
  */
 
 /*
- *
- * 1. 如果 protocol 在 pools 中存在, 将对应的 sock
+ * 1. 如果 protocol 在 pools 中存在, 找到的对应的 sock
  * 2. 如果 protocol 在 pools 中不存在, 就根据 protocol 创建 sock.
  * 3. 将 request 包装到 transaction 中发送出去, 如果 replyp 不为 NULL, 将应答信息保持在 replyp
- *
  */
 int
 nl_transact(int protocol, const struct ofpbuf *request,

@@ -626,6 +626,8 @@ static struct ovs_list inuse_keys OVS_GUARDED_BY(key_mutex)
     = OVS_LIST_INITIALIZER(&inuse_keys);
 static struct ovs_list free_keys OVS_GUARDED_BY(key_mutex)
     = OVS_LIST_INITIALIZER(&free_keys);
+
+//全局的 key id
 static unsigned int n_keys OVS_GUARDED_BY(key_mutex);
 
 /* All existing struct ovsthread_key_slots. */
@@ -691,6 +693,10 @@ ovsthread_cancel_ovsthread_key_destruct__(void *aux OVS_UNUSED)
  * call any thread-specific data functions in this API.
  *
  * This function is similar to xpthread_key_create(). */
+/*
+ * 如果 free_keys 为空, 构造一个 key, 加入 inuse_keys, keyp 指向该 key
+ * 从 free_keys 中取一个 key 加入 inuse_keys, keyp 指向该 key
+ */
 void
 ovsthread_key_create(ovsthread_key_t *keyp, void (*destructor)(void *))
 {

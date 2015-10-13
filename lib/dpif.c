@@ -916,6 +916,7 @@ dpif_flow_stats_format(const struct dpif_flow_stats *stats, struct ds *s)
 }
 
 /* Places the hash of the 'key_len' bytes starting at 'key' into '*hash'. */
+// 用 key 和 key_len 设置 hash
 void
 dpif_flow_hash(const struct dpif *dpif OVS_UNUSED,
                const void *key, size_t key_len, ovs_u128 *hash)

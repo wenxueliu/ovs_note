@@ -1365,6 +1365,23 @@ odp_tun_key_from_attr(const struct nlattr *attr, struct flow_tnl *tun)
     return odp_tun_key_from_attr__(attr, NULL, 0, NULL, tun);
 }
 
+/*
+ * OVS_KEY_ATTR_TUNNEL:
+ *      OVS_TUNNEL_KEY_ATTR_ID            : tun_key->tun_id
+ *      OVS_TUNNEL_KEY_ATTR_IPV4_SRC      : tun_key->ip_src
+ *      OVS_TUNNEL_KEY_ATTR_IPV4_DST      : tun_key->ip_dst
+ *      OVS_TUNNEL_KEY_ATTR_TOS           : tun_key->ip_tos
+ *      OVS_TUNNEL_KEY_ATTR_TTL           : tun_key->ip_ttl
+ *      OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT : NULL
+ *      OVS_TUNNEL_KEY_ATTR_CSUM          : NULL
+ *      OVS_TUNNEL_KEY_ATTR_TP_SRC        : tun_key->tp_src
+ *      OVS_TUNNEL_KEY_ATTR_TP_DST        : tun_key->tp_dst
+ *      OVS_TUNNEL_KEY_ATTR_OAM           : NULL
+ *      OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS
+ *          OVS_VXLAN_EXT_GBP : (tun_key->gbp_flags << 16) | ntohs(tun_key->gbp_id)
+ *      OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS
+ *          略
+ */
 static void
 tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key,
                 const struct flow_tnl *tun_flow_key,
@@ -1413,8 +1430,13 @@ tun_key_to_attr(struct ofpbuf *a, const struct flow_tnl *tun_key,
     }
 
     if (tun_key == tun_flow_key) {
+        /*
+         * OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS
+         *      略
+         */
         tun_metadata_to_geneve_nlattr_flow(&tun_key->metadata, a);
     } else {
+        //TODO
         tun_metadata_to_geneve_nlattr_mask(key_buf, &tun_key->metadata,
                                            &tun_flow_key->metadata, a);
     }
@@ -3536,12 +3558,51 @@ odp_flow_key_from_mask(const struct odp_flow_key_parms *parms,
 }
 
 /* Generate ODP flow key from the given packet metadata */
+/*
+ *
+ * OVS_KEY_ATTR_PRIORITY : md->skb_priority
+ * OVS_KEY_ATTR_TUNNEL:
+ *      OVS_TUNNEL_KEY_ATTR_ID            : md->tunnel->tun_id
+ *      OVS_TUNNEL_KEY_ATTR_IPV4_SRC      : md->tunnel->ip_src
+ *      OVS_TUNNEL_KEY_ATTR_IPV4_DST      : md->tunnel->ip_dst
+ *      OVS_TUNNEL_KEY_ATTR_TOS           : md->tunnel->ip_tos
+ *      OVS_TUNNEL_KEY_ATTR_TTL           : md->tunnel->ip_ttl
+ *      OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT : NULL
+ *      OVS_TUNNEL_KEY_ATTR_CSUM          : NULL
+ *      OVS_TUNNEL_KEY_ATTR_TP_SRC        : md->tunnel->tp_src
+ *      OVS_TUNNEL_KEY_ATTR_TP_DST        : md->tunnel->tp_dst
+ *      OVS_TUNNEL_KEY_ATTR_OAM           : NULL
+ *      OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS
+ *          OVS_VXLAN_EXT_GBP : (md->tunnel->gbp_flags << 16) | ntohs(md->tunnel->gbp_id)
+ *      OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS
+ *          略
+ *
+ * OVS_KEY_ATTR_SKB_MARK : md->pkt_mark
+ * OVS_KEY_ATTR_IN_PORT  : md->in_port.odp_port
+ */
 void
 odp_key_from_pkt_metadata(struct ofpbuf *buf, const struct pkt_metadata *md)
 {
     nl_msg_put_u32(buf, OVS_KEY_ATTR_PRIORITY, md->skb_priority);
 
     if (md->tunnel.ip_dst) {
+        /*
+         * OVS_KEY_ATTR_TUNNEL:
+         *      OVS_TUNNEL_KEY_ATTR_ID            : md->tunnel->tun_id
+         *      OVS_TUNNEL_KEY_ATTR_IPV4_SRC      : md->tunnel->ip_src
+         *      OVS_TUNNEL_KEY_ATTR_IPV4_DST      : md->tunnel->ip_dst
+         *      OVS_TUNNEL_KEY_ATTR_TOS           : md->tunnel->ip_tos
+         *      OVS_TUNNEL_KEY_ATTR_TTL           : md->tunnel->ip_ttl
+         *      OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT : NULL
+         *      OVS_TUNNEL_KEY_ATTR_CSUM          : NULL
+         *      OVS_TUNNEL_KEY_ATTR_TP_SRC        : md->tunnel->tp_src
+         *      OVS_TUNNEL_KEY_ATTR_TP_DST        : md->tunnel->tp_dst
+         *      OVS_TUNNEL_KEY_ATTR_OAM           : NULL
+         *      OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS
+         *          OVS_VXLAN_EXT_GBP : (md->tunnel->gbp_flags << 16) | ntohs(md->tunnel->gbp_id)
+         *      OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS
+         *          略
+         */
         tun_key_to_attr(buf, &md->tunnel, &md->tunnel, NULL);
     }
 

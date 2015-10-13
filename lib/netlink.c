@@ -160,15 +160,17 @@ nl_msg_put_nlmsghdr(struct ofpbuf *msg,
  * nl_msg_put_nlmsghdr() should be used to compose Netlink messages that are
  * not Generic Netlink messages. */
 
-/* 构造 genl Netlink 消息头
+/*
+ *  构造 genl Netlink 消息, 保存在 msg 中
  *
  *  msg->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
- *
+ *  nlmsghdr = msg->tail
  *  nlmsghdr->nlmsg_len = 0;
  *  nlmsghdr->nlmsg_type = family;
  *  nlmsghdr->nlmsg_flags = flags;
  *  nlmsghdr->nlmsg_seq = 0;
  *  nlmsghdr->nlmsg_pid = 0;
+ *  genlmsghdr = msg + NLMSG_HDRLEN
  *  genlmsghdr->cmd = cmd;
  *  genlmsghdr->version = version;
  *  genlmsghdr->reserved = 0;
@@ -184,7 +186,7 @@ nl_msg_put_genlmsghdr(struct ofpbuf *msg, size_t expected_payload,
     *  设置将 nlmsghdr 存在在 msg->tail 之后 msg->tail += NLMSG_HDRLEN
     *  nlmsghdr = msg->data + msg->size
     *  nlmsghdr->nlmsg_len = 0;
-    *  nlmsghdr->nlmsg_type = type;
+    *  nlmsghdr->nlmsg_type = family;
     *  nlmsghdr->nlmsg_flags = flags;
     *  nlmsghdr->nlmsg_seq = 0;
     *  nlmsghdr->nlmsg_pid = 0;

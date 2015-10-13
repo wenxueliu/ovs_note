@@ -709,6 +709,10 @@ tun_metadata_to_geneve__(const struct tun_metadata *flow, struct ofpbuf *b,
     }
 }
 
+/*
+ * OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS
+ *      略
+ */
 void
 tun_metadata_to_geneve_nlattr_flow(const struct tun_metadata *flow,
                                    struct ofpbuf *b)

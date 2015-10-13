@@ -166,6 +166,7 @@ netdev_vport_needs_dst_port(const struct netdev *dev)
              !strcmp("lisp", type) || !strcmp("stt", type)) );
 }
 
+//如果 class->construct = netdev_vport_construct 返回 class 所在 vport_class->dpif_port 否则返回 NULL
 const char *
 netdev_vport_class_get_dpif_port(const struct netdev_class *class)
 {
@@ -184,12 +185,14 @@ netdev_vport_get_dpif_port(const struct netdev *netdev,
                            char namebuf[], size_t bufsize)
 {
     const struct netdev_class *class = netdev_get_class(netdev);
+    //如果 class->construct = netdev_vport_construct, dpif_port = class 所在 vport_class->dpif_port 否则 dpif_port = NULL
     const char *dpif_port = netdev_vport_class_get_dpif_port(class);
 
     if (!dpif_port) {
         return netdev_get_name(netdev);
     }
 
+    //netdev->class->get_config = get_tunnel_config 并且 dev->type 是 geneve, vxlan, lisp 或 stt 同时满足返回 true
     if (netdev_vport_needs_dst_port(netdev)) {
         const struct netdev_vport *vport = netdev_vport_cast(netdev);
 
