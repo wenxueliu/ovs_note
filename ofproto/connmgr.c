@@ -1895,7 +1895,7 @@ wire_reason(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
  *
  * The caller doesn't need to fill in pin->buffer_id or pin->total_len. */
 /*
- * 遍历  mgr->all_conns 每个元素 ofconn, 如果 ofconn 满足发送PACKET_IN 条件,
+ * 遍历  mgr->all_conns 每个元素 ofconn, 如果 ofconn 满足发送 PACKET_IN 条件,
  * 并且 pin.controller_id = ofconn->controller_id, 发送 PACKET_IN 消息
  */
 void

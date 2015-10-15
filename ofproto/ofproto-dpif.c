@@ -403,6 +403,9 @@ ofproto_dpif_flow_mod(struct ofproto_dpif *ofproto,
 
 /* Appends 'pin' to the queue of "packet ins" to be sent to the controller.
  * Takes ownership of 'pin' and pin->packet. */
+/*
+ * 将 pin 加入 ofproto->pins 队列. 通知 ofproto->pins_seq 发生变化
+ */
 void
 ofproto_dpif_send_packet_in(struct ofproto_dpif *ofproto,
                             struct ofproto_packet_in *pin)
@@ -536,6 +539,12 @@ lookup_ofproto_dpif_by_port_name(const char *name)
     return NULL;
 }
 
+/*
+ *
+ *
+ *
+ *
+ */
 static int
 type_run(const char *type)
 {
@@ -892,9 +901,17 @@ static bool check_variable_length_userdata(struct dpif_backer *backer);
 static void check_support(struct dpif_backer *backer);
 
 /*
+ * @type: 目前为 system, netdev
+ * @backerp : all_dpif_backers 中 type 对应的 dpif_backer
+ *
  * 如果 all_dpif_backers 存在 type, 对其中的 backer 引用计数加 1, 返回
+ * 如果 all_dpif_backers 不存在 type, 创建 backer 并初始化 backer
  *
- *
+ * backer->dpif : type 对应的 dpif_class, 目前为 dpif_netlink_dp, dpif_netdev
+ * backer->udpif : udpif_create(backer, backer->dpif)
+ * backer->type : type
+ * backer->refcount : 1
+ * backer->need_revalidate = 0;
  */
 static int
 open_dpif_backer(const char *type, struct dpif_backer **backerp)
@@ -911,6 +928,13 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     const char *name;
     int error;
 
+    /*
+     *  next_id = 1; // 0 is not a valid ID.
+     *  cmap_init(&id_map);
+     *  cmap_init(&metadata_map);
+     *  list_init(&expiring);
+     *  list_init(&expired);
+     */
     recirc_init();
 
     backer = shash_find_data(&all_dpif_backers, type);
@@ -925,6 +949,15 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     /* Remove any existing datapaths, since we assume we're the only
      * userspace controlling the datapath. */
     sset_init(&names);
+    /*
+    * @type  : 目前为 system 或 netdev
+    * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name. type=netdev, 包含 dp_netdev 的 name
+    *
+    * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+    * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
+    *
+    * NOTE: 实际调用 dpif_netlink_class->enumerate 或 dpif_netdev_class->enumerate
+    */
     dp_enumerate_names(type, &names);
     SSET_FOR_EACH(name, &names) {
         struct dpif *old_dpif;
@@ -934,6 +967,13 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
             continue;
         }
 
+        /*
+        * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+        * (
+        * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
+        * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
+        * )
+        */
         if (dpif_open(name, type, &old_dpif)) {
             VLOG_WARN("couldn't open old datapath %s to remove it", name);
         } else {
@@ -945,6 +985,13 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
 
     backer = xmalloc(sizeof *backer);
 
+    /*
+     * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法, 把创建的对象指向 backer->dpif
+     * (
+     * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
+     * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
+     * )
+     */
     error = dpif_create_and_open(backer_name, type, &backer->dpif);
     free(backer_name);
     if (error) {
@@ -970,6 +1017,7 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
 
     /* Loop through the ports already on the datapath and remove any
      * that we don't need anymore. */
+    //将 backer-dpif 中不在初始化配置的所有端口加入 garbage_list 中
     list_init(&garbage_list);
     dpif_port_dump_start(&port_dump, backer->dpif);
     while (dpif_port_dump_next(&port_dump, &port)) {
@@ -982,16 +1030,22 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     }
     dpif_port_dump_done(&port_dump);
 
+    //将 garbage_list 中的端口从 backer-dpif
     LIST_FOR_EACH_POP (garbage, list_node, &garbage_list) {
         dpif_port_del(backer->dpif, garbage->odp_port);
         free(garbage);
     }
 
+    //将 backer 加入 all_dpif_backers
     shash_add(&all_dpif_backers, type, backer);
 
+    //测试系统对 backer->support 中的特性支持程度并初始化 backer->support
     check_support(backer);
     atomic_count_init(&backer->tnl_count, 0);
 
+    //backer->recv_set_enable 只是限制 dpif_netlink 是否接受内核的消息
+    //如果为 false, dpif_netlink 将删除所有的 channel
+    //如果为 false, dpif_netdev 什么也不做
     error = dpif_recv_set(backer->dpif, backer->recv_set_enable);
     if (error) {
         VLOG_ERR("failed to listen on datapath of type %s: %s",
@@ -1267,6 +1321,12 @@ check_support(struct dpif_backer *backer)
     backer->support.tnl_push_pop = dpif_supports_tnl_push_pop(backer->dpif);
 }
 
+/*
+ *
+ *
+ *
+ *
+ */
 static int
 construct(struct ofproto *ofproto_)
 {
@@ -1470,6 +1530,10 @@ destruct(struct ofproto *ofproto_)
     close_dpif_backer(ofproto->backer);
 }
 
+/*
+ * 核心实现
+ *
+ */
 static int
 run(struct ofproto *ofproto_)
 {
@@ -1492,6 +1556,8 @@ run(struct ofproto *ofproto_)
 
     /* Do not perform any periodic activity required by 'ofproto' while
      * waiting for flow restore to complete. */
+
+    //将 ofproto->pins 的所有包发送给控制器
     if (!ofproto_get_flow_restore_wait()) {
         struct ofproto_packet_in *pin;
         struct ovs_list pins;
@@ -1514,6 +1580,7 @@ run(struct ofproto *ofproto_)
         dpif_ipfix_run(ofproto->ipfix);
     }
 
+    //遍历 ofproto->up.ports 的每一个端口, 调用　port_run(ofport)
     new_seq = seq_read(connectivity_seq_get());
     if (ofproto->change_seq != new_seq) {
         struct ofport_dpif *ofport;
@@ -5477,6 +5544,12 @@ ofp_port_to_odp_port(const struct ofproto_dpif *ofproto, ofp_port_t ofp_port)
     return ofport ? ofport->odp_port : ODPP_NONE;
 }
 
+/*
+ * 在 backer->odp_to_ofport_map 的 buckets[hash_odp_port[odp_port]] 查找
+ * 每个 ofport_dpif 对象 port, 检查 port->odp_port 是否等于 odp_port, 
+ * 如果等于返回 port
+ * 否则返回 NULL
+ */
 struct ofport_dpif *
 odp_port_to_ofport(const struct dpif_backer *backer, odp_port_t odp_port)
 {

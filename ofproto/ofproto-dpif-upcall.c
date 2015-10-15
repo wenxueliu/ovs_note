@@ -336,6 +336,13 @@ udpif_init(void)
     }
 }
 
+/*
+ * 创建 udpif 对象并初始化
+ *
+ * 没有显示初始化的 handlers, n_handlers, revalidators, n_revalidators,
+ * reval_exit,dump, dump_duration, max_n_flows, avg_n_flows
+ *
+ */
 struct udpif *
 udpif_create(struct dpif_backer *backer, struct dpif *dpif)
 {
@@ -363,6 +370,9 @@ udpif_create(struct dpif_backer *backer, struct dpif *dpif)
     return udpif;
 }
 
+/*
+ * 如果 udpif->dump_seq 与 udpif->conn_seq 不一致, 注销所有的 struct unixctl_conn conn
+ */
 void
 udpif_run(struct udpif *udpif)
 {
@@ -400,6 +410,13 @@ udpif_destroy(struct udpif *udpif)
 
 /* Stops the handler and revalidator threads, must be enclosed in
  * ovsrcu quiescent state unless when destroying udpif. */
+/*
+ * 1. 停止 udpif->handlers, udpif->revalidators
+ * 2. 是否 udpif->handlers, udpif->revalidators 的内存, udpif->n_handlers = 0,
+ * udpif->n_revalidators = 0
+ * 3. 删除 udpif->reval_barrier
+ * 4. 如果 udpif->dpif = dpif_netdev, 调用 dpif_netdev_class->dp_netdev_disable_upcall()
+ */
 static void
 udpif_stop_threads(struct udpif *udpif)
 {
@@ -418,6 +435,8 @@ udpif_stop_threads(struct udpif *udpif)
             xpthread_join(udpif->revalidators[i].thread, NULL);
         }
 
+        //对于 dpif_netdev, dp_netdev_disable_upcall(struct dp_netdev *dp))
+        //对于 dpif_netlink, 什么也不做
         dpif_disable_upcall(udpif->dpif);
 
         for (i = 0; i < udpif->n_revalidators; i++) {
@@ -444,6 +463,13 @@ udpif_stop_threads(struct udpif *udpif)
 
 /* Starts the handler and revalidator threads, must be enclosed in
  * ovsrcu quiescent state. */
+/*
+ * 1. 初始化 udpif->handlers, udpif->revalidators
+ * 2. 更新 udpif->ufid_enabled
+ * 3. 初始化 dpif_netdev_class->dpif_netdev_enable_upcall
+ * 4. udpif->reval_exit = false
+ * 5. udpif->reval_barrier = udpif->n_revalidators
+ */
 static void
 udpif_start_threads(struct udpif *udpif, size_t n_handlers,
                     size_t n_revalidators)
@@ -487,6 +513,11 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
  * 'n_handlers' and 'n_revalidators' can never be zero.  'udpif''s
  * datapath handle must have packet reception enabled before starting
  * threads. */
+/*
+ * 如果 n_handlers 与之前的配置不一样, 先删除所有的 handler, 设置之后, 重新创建并初始化
+ * 其中 n_handlers 还包括 dpif_netlink->n_handlers
+ * 注: 会停止所有的 handlers 线程
+ */
 void
 udpif_set_threads(struct udpif *udpif, size_t n_handlers,
                   size_t n_revalidators)
@@ -503,6 +534,8 @@ udpif_set_threads(struct udpif *udpif, size_t n_handlers,
     if (!udpif->handlers && !udpif->revalidators) {
         int error;
 
+        //设置 dpif_netlink_class ->handlers_set(udpif->dpif, n_handlers)
+        //dpif_netdev_class 什么也不做
         error = dpif_handlers_set(udpif->dpif, n_handlers);
         if (error) {
             VLOG_ERR("failed to configure handlers in dpif %s: %s",
@@ -519,6 +552,9 @@ udpif_set_threads(struct udpif *udpif, size_t n_handlers,
  * there are no transient references to any removed ofprotos (or other
  * objects).  In particular, this should be called after an ofproto is removed
  * (e.g. via xlate_remove_ofproto()) but before it is destroyed. */
+/*
+ * 对 n_handlers 和 n_revalidators 的修改应该用此函数
+ */
 void
 udpif_synchronize(struct udpif *udpif)
 {
@@ -565,6 +601,10 @@ udpif_get_memory_usage(struct udpif *udpif, struct simap *usage)
 }
 
 /* Remove flows from a single datapath. */
+/*
+ * 刷新 udpif, 删除所有流表, 重启 udpif->handlers, udpif->revalidators
+ *
+ */
 void
 udpif_flush(struct udpif *udpif)
 {
@@ -583,6 +623,10 @@ udpif_flush(struct udpif *udpif)
 }
 
 /* Removes all flows from all datapaths. */
+/*
+ * 刷新 all_udpifs 中的每个 udpif, 删除整个流表, 重启 udpif->handlers, udpif->revalidators
+ *
+ */
 static void
 udpif_flush_all_datapaths(void)
 {
@@ -603,6 +647,10 @@ udpif_use_ufid(struct udpif *udpif)
 }
 
 
+/*
+ * 如果 udpif->n_flows_mutex 被锁, 从 udpif->dpif->stats 中获取
+ * 否则直接从 upif->n_flows
+ */
 static unsigned long
 udpif_get_n_flows(struct udpif *udpif)
 {
@@ -628,25 +676,40 @@ udpif_get_n_flows(struct udpif *udpif)
 /* The upcall handler thread tries to read a batch of UPCALL_MAX_BATCH
  * upcalls from dpif, processes the batch and installs corresponding flows
  * in dpif. */
+/*
+ * 处理 udpif 的某个 handler
+ */
 static void *
 udpif_upcall_handler(void *arg)
 {
     struct handler *handler = arg;
     struct udpif *udpif = handler->udpif;
 
+    //直到 handler->udpif->exit_latch->fd[0] 可读
     while (!latch_is_set(&handler->udpif->exit_latch)) {
         if (recv_upcalls(handler)) {
             poll_immediate_wake();
         } else {
+            //将 dpif->handlers[handler->handler_id]->epoll_fd 加入 poll_loop() 监控中, 并增加 POLLIN 事件
             dpif_recv_wait(udpif->dpif, handler->handler_id);
+            //将 handler->udpif->exit_latch[0] 加入 poll
             latch_wait(&udpif->exit_latch);
         }
+        //直到再次 poll_loop() 有 events 被唤醒
         poll_block();
     }
 
     return NULL;
 }
 
+/*
+ * @handler : udpif 的某个 handler
+ *
+ * handler = udpif->dpif->handlers[handler->handler_id], handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
+ *
+ *
+ * 问题: udpif->dpif->handlers[handler->handler_id]->epoll_fd 存在被 epoll 和 poll 同时监听的可能性, 是否是期望的
+ */
 static size_t
 recv_upcalls(struct handler *handler)
 {
@@ -668,16 +731,40 @@ recv_upcalls(struct handler *handler)
 
         ofpbuf_use_stub(recv_buf, recv_stubs[n_upcalls],
                         sizeof recv_stubs[n_upcalls]);
+        /*
+         * handler = udpif->dpif->handlers[handler->handler_id]
+        *  handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 dupcall
+        *
+        * 注: 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
+        *
+        * 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
+        * 否则
+        *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
+        *     如果成功接收, 初始化 upcall 后返回.
+        *     如果缓存不够, 重试 50 次后放弃.
+        *     如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
+        *
+        * 注: 应该轮询的调用该函数直到返回 EAGAIN
+        */
         if (dpif_recv(udpif->dpif, handler->handler_id, dupcall, recv_buf)) {
             ofpbuf_uninit(recv_buf);
             break;
         }
 
+        //解析 dupcall->key 保存在 flow
         if (odp_flow_key_to_flow(dupcall->key, dupcall->key_len, flow)
             == ODP_FIT_ERROR) {
             goto free_dupcall;
         }
 
+        /*
+        * 用 udpif->backer, dupcall->packet, dupcall->type, dupcall->userdata, flow, dupcall->ufid, PMD_ID_NULL 初始化 upcall
+        *
+        * 1. 通过 backer, flow 在 xcfg 中查找到对应的 xport 初始化 xport
+        * 2. 用 packet, type, userdata, ufid, pmd_id 初始化 upcall
+        *
+        * 没有初始化 upcall->reval_seq, upcall->dump_seq, upcall->wc, 实际在 xlate_in_init 中初始化
+        */
         error = upcall_receive(upcall, udpif->backer, &dupcall->packet,
                                dupcall->type, dupcall->userdata, flow,
                                &dupcall->ufid, PMD_ID_NULL);
@@ -708,8 +795,11 @@ recv_upcalls(struct handler *handler)
         }
 
         pkt_metadata_from_flow(&dupcall->packet.md, flow);
+        //用 dupcall->packet 初始化 flow
         flow_extract(&dupcall->packet, flow);
 
+        //根据 upcall->type 处理
+        //TODO upcall->wc = NULL ?
         error = process_upcall(udpif, upcall,
                                &upcall->odp_actions, &upcall->wc);
         if (error) {
@@ -738,6 +828,12 @@ free_dupcall:
     return n_upcalls;
 }
 
+/*
+ *
+ *
+ *
+ *
+ */
 static void *
 udpif_revalidator(void *arg)
 {
@@ -756,6 +852,11 @@ udpif_revalidator(void *arg)
         if (leader) {
             uint64_t reval_seq;
 
+            /*
+            * 流表过期清除动作. 每秒最多执行 4 次
+            * 将 expired 列表的节点从 id_map 中删除
+            * 将 expiring 列表节点移到 expired 列表中
+            */
             recirc_run(); /* Recirculation cleanup. */
 
             reval_seq = seq_read(udpif->reval_seq);
@@ -784,6 +885,7 @@ udpif_revalidator(void *arg)
         if (udpif->reval_exit) {
             break;
         }
+        //
         revalidate(revalidator);
 
         /* Wait for all flows to have been dumped before we garbage collect. */
@@ -793,6 +895,7 @@ udpif_revalidator(void *arg)
         /* Wait for all revalidators to finish garbage collection. */
         ovs_barrier_block(&udpif->reval_barrier);
 
+        //根据 udpif->dump_duration 调整 udpif->flow_limit 的数目
         if (leader) {
             unsigned int flow_limit;
             long long int duration;
@@ -821,6 +924,7 @@ udpif_revalidator(void *arg)
             }
 
             poll_timer_wait_until(start_time + MIN(ofproto_max_idle, 500));
+            //等待 seq_change(udpif->reval_seq)
             seq_wait(udpif->reval_seq, last_reval_seq);
             latch_wait(&udpif->exit_latch);
             poll_block();
@@ -830,6 +934,12 @@ udpif_revalidator(void *arg)
     return NULL;
 }
 
+/*
+ * 根据 type 和解析后的 userdata 返回 upcall type
+ *
+ * 1. 将 userdata 解析为 struct user_action_cookie 类型 cookie
+ * 2. 根据 type 和 cookie 返回 upcall 类型
+ */
 static enum upcall_type
 classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
 {
@@ -910,6 +1020,16 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
  * before quiescing, as the referred objects are guaranteed to exist only
  * until the calling thread quiesces.  Otherwise, do not call upcall_uninit()
  * since the 'upcall->put_actions' remains uninitialized. */
+/*
+ * 用 backer, packet, type, userdata, flow, ufid, pmd_id 初始化 upcall
+ *
+ * 1. 通过 backer, flow 在 xcfg 中查找到对应的 xport 初始化 xport
+ * 2. 用 packet, type, userdata, ufid, pmd_id 初始化 upcall
+ *
+ * NOTE: 实际通过 内核 PACKET_IN 的数据解析为 struct dpif_upcall 对象 dupcall, 后初始化
+ *
+ * 没有初始化 upcall->reval_seq, upcall->dump_seq, upcall->wc, 实际在 xlate_in_init 中初始化
+ */
 static int
 upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
                const struct dp_packet *packet, enum dpif_upcall_type type,
@@ -918,6 +1038,15 @@ upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
 {
     int error;
 
+    /*
+    * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 初始化 upcall->ofprotop, upcall->ipfix,
+    * upcall->sflow, upcall->in_port
+    *
+    * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+    * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+    *
+    * TODO netflow = NULL 是否表面目前不支持 netflow
+    */
     error = xlate_lookup(backer, flow, &upcall->ofproto, &upcall->ipfix,
                          &upcall->sflow, NULL, &upcall->in_port);
     if (error) {
@@ -950,6 +1079,13 @@ upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
     return 0;
 }
 
+/*
+ * 1. 用 upcall 分配一个 xlate_in 对象
+ *
+ *
+ *
+ *
+ */
 static void
 upcall_xlate(struct udpif *udpif, struct upcall *upcall,
              struct ofpbuf *odp_actions, struct flow_wildcards *wc)
@@ -968,6 +1104,7 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
     if (upcall->type == DPIF_UC_MISS) {
         xin.resubmit_stats = &stats;
 
+        //如果 upcall->flow->recirc_id 在 id_map 中
         if (xin.recirc) {
             /* We may install a datapath flow only if we get a reference to the
              * recirculation context (otherwise we could have recirculation
@@ -987,6 +1124,7 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
 
     upcall->dump_seq = seq_read(udpif->dump_seq);
     upcall->reval_seq = seq_read(udpif->reval_seq);
+    //TODO
     xlate_actions(&xin, &upcall->xout);
     upcall->xout_initialized = true;
 
@@ -1009,6 +1147,7 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
         pin->up.reason = OFPR_NO_MATCH;
         pin->up.table_id = 0;
         pin->up.cookie = OVS_BE64_MAX;
+        //用 upcall->flow 初始化 pin->up.flow_metadata
         flow_get_metadata(upcall->flow, &pin->up.flow_metadata);
         pin->send_len = 0; /* Not used for flow table misses. */
         pin->miss_type = OFPROTO_PACKET_IN_NO_MISS;
@@ -1111,6 +1250,10 @@ out:
     return error;
 }
 
+/*
+ * 根据 upcall->type 和 upcall->userdata 的类型来执行不同的动作
+ *
+ */
 static int
 process_upcall(struct udpif *udpif, struct upcall *upcall,
                struct ofpbuf *odp_actions, struct flow_wildcards *wc)
@@ -1124,6 +1267,10 @@ process_upcall(struct udpif *udpif, struct upcall *upcall,
         upcall_xlate(udpif, upcall, odp_actions, wc);
         return 0;
 
+    /*
+     * 1. 用 upcall->userdata 初始化 struct user_action_cookie 对象 cookie
+     * 2. 用 upcall->flow, upcall->actions 初始化 flow_actions
+     */
     case SFLOW_UPCALL:
         if (upcall->sflow) {
             union user_action_cookie cookie;
@@ -1138,6 +1285,11 @@ process_upcall(struct udpif *udpif, struct upcall *upcall,
                 actions = nl_attr_get(upcall->actions);
                 actions_len = nl_attr_get_size(upcall->actions);
                 if (actions && actions_len) {
+                    /*
+                    * 用 flow, sflow_actions 初始化 sflow_actions
+                    * 1. 用 flow->mpls_lse 初始化 sflow_actions->mpls_lse.
+                    * 2. 遍历 actions 初始化 sflow_actions
+                    */
                     dpif_sflow_read_actions(flow, actions, actions_len,
                                             &sflow_actions);
                 }
@@ -1326,6 +1478,10 @@ get_ufid_hash(const ovs_u128 *ufid)
     return ufid->u32[0];
 }
 
+/*
+ * 在 udpif->ukeys[get_ufid_hash(ufid) % N_UMAPS].cmap 中查找 ukey->udif = ufid 的 ukey
+ *
+ */
 static struct udpif_key *
 ukey_lookup(struct udpif *udpif, const ovs_u128 *ufid)
 {

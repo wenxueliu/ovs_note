@@ -58,6 +58,11 @@ recirc_init(void)
 
 /* This should be called by the revalidator once at each round (every 500ms or
  * more). */
+/*
+ * 流表过期清除动作. 每秒最多执行 4 次
+ * 将 expired 列表的节点从 id_map 中删除
+ * 将 expiring 列表节点移到 expired 列表中
+ */
 void
 recirc_run(void)
 {
@@ -123,6 +128,9 @@ recirc_id_node_find(uint32_t id)
         : NULL;
 }
 
+/*
+ * 返回把 state 每个成员进行 hash 之后的值
+ */
 static uint32_t
 recirc_metadata_hash(const struct recirc_state *state)
 {
@@ -147,6 +155,9 @@ recirc_metadata_hash(const struct recirc_state *state)
     return hash;
 }
 
+/*
+ * a 与 b 的值是否完全一样
+ */
 static bool
 recirc_metadata_equal(const struct recirc_state *a,
                       const struct recirc_state *b)
@@ -165,6 +176,9 @@ recirc_metadata_equal(const struct recirc_state *a,
 
 /* Lockless RCU protected lookup.  If node is needed accross RCU quiescent
  * state, caller should take a reference. */
+/*
+ * 在 metadata_map 中找到和 target 在对象内容一样的节点
+ */
 static struct recirc_id_node *
 recirc_find_equal(const struct recirc_state *target, uint32_t hash)
 {
@@ -178,6 +192,9 @@ recirc_find_equal(const struct recirc_state *target, uint32_t hash)
     return NULL;
 }
 
+/*
+ * 在 metadata_map 中找到和 target 的 hash 一样并且引用计数不为 0 的节点,
+ */
 static struct recirc_id_node *
 recirc_ref_equal(const struct recirc_state *target, uint32_t hash)
 {
@@ -192,6 +209,11 @@ recirc_ref_equal(const struct recirc_state *target, uint32_t hash)
     return node;
 }
 
+/*
+ * 把 old 克隆给 new
+ *
+ * TODO: new->ofproto 没有克隆
+ */
 static void
 recirc_state_clone(struct recirc_state *new, const struct recirc_state *old)
 {
@@ -210,6 +232,9 @@ recirc_state_clone(struct recirc_state *new, const struct recirc_state *old)
  * The ID space is 2^^32, so there should never be a situation in which all
  * the IDs are used up.  We loop until we find a free one.
  * hash is recomputed if it is passed in as 0. */
+/*
+ * 分配一个 struct recirc_state 对象 node, 用 state 初始化, 将该节点加入 id_map, metadata_map
+ */
 static struct recirc_id_node *
 recirc_alloc_id__(const struct recirc_state *state, uint32_t hash)
 {
@@ -221,6 +246,7 @@ recirc_alloc_id__(const struct recirc_state *state, uint32_t hash)
     recirc_state_clone(CONST_CAST(struct recirc_state *, &node->state), state);
 
     ovs_mutex_lock(&mutex);
+    //找到一个没有用过的 id
     for (;;) {
         /* Claim the next ID.  The ID space should be sparse enough for the
            allocation to succeed at the first try.  We do skip the first
@@ -244,6 +270,12 @@ recirc_alloc_id__(const struct recirc_state *state, uint32_t hash)
 
 /* Look up an existing ID for the given flow's metadata and optional actions.
  */
+
+/*
+ * 在 metadata_map 中找到和 target 在对象内容一样的节点:
+ * 如果找到, 返回节点 id
+ * 如果没有找到, 返回 0
+ */
 uint32_t
 recirc_find_id(const struct recirc_state *target)
 {
@@ -254,10 +286,19 @@ recirc_find_id(const struct recirc_state *target)
 
 /* Allocate a unique recirculation id for the given set of flow metadata and
    optional actions. */
+/*
+ * 在 metadata_map 中找到和 state 的 hash 一样并且引用计数不为 0 的节点,
+ * 如果找到, 返回该节点
+ * 如果没有找到, 生成一个新的节点, 并返回节点的 id
+ *
+ */
 uint32_t
 recirc_alloc_id_ctx(const struct recirc_state *state)
 {
     uint32_t hash = recirc_metadata_hash(state);
+    /*
+    * 在 metadata_map 中找到和 state 的 hash 一样并且引用计数不为 0 的节点,
+    */
     struct recirc_id_node *node = recirc_ref_equal(state, hash);
     if (!node) {
         node = recirc_alloc_id__(state, hash);
@@ -266,6 +307,10 @@ recirc_alloc_id_ctx(const struct recirc_state *state)
 }
 
 /* Allocate a unique recirculation id. */
+/*
+ * 通过 ofproto 分配一个 node. 返回分配 struct recirc_id_node 的 id
+ *
+ */
 uint32_t
 recirc_alloc_id(struct ofproto_dpif *ofproto)
 {
@@ -277,6 +322,12 @@ recirc_alloc_id(struct ofproto_dpif *ofproto)
     return recirc_alloc_id__(&state, recirc_metadata_hash(&state))->id;
 }
 
+/*
+ * 将 node_ 的引用计数减一, 如果引用计数减到 1, 从 metadata_map 中删除
+ * node_, 并将其加入 expiring 列表 中
+ *
+ *
+ */
 void
 recirc_id_node_unref(const struct recirc_id_node *node_)
     OVS_EXCLUDED(mutex)
@@ -295,6 +346,12 @@ recirc_id_node_unref(const struct recirc_id_node *node_)
     }
 }
 
+/*
+ * 从 id_map 找到 id　对应的 recirc_id_node 对象 node:
+ * 如果找不到, 打印错误日志.
+ * 如果找到, node 的引用计数减一, 如果引用计数减到 1, 从 metadata_map 中删除
+ * node, 并将其加入 expiring 列表 中
+ */
 void
 recirc_free_id(uint32_t id)
 {
@@ -312,6 +369,9 @@ recirc_free_id(uint32_t id)
  * recirc_id leak.
  * No other thread may have access to the 'ofproto' being destructed.
  * All related datapath flows must be deleted before calling this. */
+/*
+ * 如果 ofproto 在 metadata_map 中, 打印错误日志
+ */
 void
 recirc_free_ofproto(struct ofproto_dpif *ofproto, const char *ofproto_name)
 {

@@ -227,6 +227,9 @@ dpif_netlink_cast(const struct dpif *dpif)
     return CONTAINER_OF(dpif, struct dpif_netlink, dpif);
 }
 
+/*
+ * 遍历查询内核中的所有 dpif_netlink_dp 对象, 将其 name 加入 all_dps
+ */
 static int
 dpif_netlink_enumerate(struct sset *all_dps,
                        const struct dpif_class *dpif_class OVS_UNUSED)
@@ -236,13 +239,25 @@ dpif_netlink_enumerate(struct sset *all_dps,
     struct ofpbuf msg, buf;
     int error;
 
+    /*
+    * 1. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+    * 2. 确保 OVS_VPORT_FAMILY 对应的组属性中存在 OVS_VPORT_MCGROUP
+    */
     error = dpif_netlink_init();
     if (error) {
         return error;
     }
 
     ofpbuf_use_stub(&buf, reply_stub, sizeof reply_stub);
+    /*
+    *  构造 OVS_DP_CMD_GET 的消息发送给 NETLINK_GENERIC 对应的 sock 的消息并初始化 dump.
+    *  初始化后的 dump :
+    *  1. dump->sock 为 NETLINK_GENERIC 对应的 sock
+    *  2. dump->nl_seq 为 dump->sock->next_seq + 1;
+    *  3. dump->status 为将 buf 发送给 NETLINK_GENERIC 对应的 sock 的状态
+    */
     dpif_netlink_dp_dump_start(&dump);
+    //将接收内核的消息解析为 dpif_netlink_dp , 并将 dpif_netlink_dp 的 name 加入 all_dps
     while (nl_dump_next(&dump, &msg, &buf)) {
         struct dpif_netlink_dp dp;
 
@@ -3202,7 +3217,7 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
 
 /*
  * @dpif
- * @enable :
+ * @enable : 是否接受数据包
  *
  * 如果 enable = true; dpif->handlers != NULL, 返回 0
  * 如果 enable = true; dpif->handlers = NULL,  TODO
@@ -3224,6 +3239,16 @@ dpif_netlink_recv_set__(struct dpif_netlink *dpif, bool enable)
     }
 }
 
+/*
+ * @dpif_ :
+ * @enable : 是否接受数据包
+ *
+ * 如果 enable = true; dpif->handlers != NULL, 返回 0
+ * 如果 enable = true; dpif->handlers = NULL,  TODO
+ * 如果 enable = false; dpif->handlers = NULL, 返回 0
+ * 如果 enable = false; dpif->handlers != NULL, 删除所有 channels
+ *
+ */
 static int
 dpif_netlink_recv_set(struct dpif *dpif_, bool enable)
 {
@@ -3431,9 +3456,10 @@ dpif_netlink_recv_windows(struct dpif_netlink *dpif, uint32_t handler_id,
 #else
 
 /*
- * dpif->handlers[handler_id] 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
+ * handler = dpif->handlers[handler_id]
+ *  handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
  *
- * 注: 这里假设 dpif->handlers[handler_id]->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
+ * 注: 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
  *
  * 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
  * 否则
@@ -3472,11 +3498,12 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "epoll_wait failed (%s)", ovs_strerror(errno));
         } else if (retval > 0) {
+            //可读的文件描述符
             handler->n_events = retval;
         }
     }
 
-    //轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
+    //轮询接受所有的 handler->epoll_events(即端口), 阻塞地接受 ch->sock 准备好的数据:
     //如果成功接收, 初始化 upcall 后返回.
     //如果缓存不够, 重试 50 次后放弃.
     //如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
@@ -3628,11 +3655,9 @@ dpif_netlink_recv_wait__(struct dpif_netlink *dpif, uint32_t handler_id)
 }
 
 /*
- *
  * 对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
  * 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
  * 否则加入 poll_loop()->poll_nodes
- *
  */
 static void
 dpif_netlink_recv_wait(struct dpif *dpif_, uint32_t handler_id)
@@ -3641,12 +3666,10 @@ dpif_netlink_recv_wait(struct dpif *dpif_, uint32_t handler_id)
 
     fat_rwlock_rdlock(&dpif->upcall_lock);
     /*
-    *
-    * 对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
-    * 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
-    * 否则加入 poll_loop()->poll_nodes
-    *
-    */
+     * 对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
+     * 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
+     * 否则加入 poll_loop()->poll_nodes
+     */
     dpif_netlink_recv_wait__(dpif, handler_id);
     fat_rwlock_unlock(&dpif->upcall_lock);
 }
@@ -4270,6 +4293,31 @@ dpif_netlink_dp_init(struct dpif_netlink_dp *dp)
     memset(dp, 0, sizeof *dp);
 }
 
+/*
+ *  构造 OVS_DP_CMD_GET 的消息发送给 NETLINK_GENERIC 对应的 sock 的消息并初始化 dump.
+ *
+ *  nlmsghdr->nlmsg_len = 0;
+ *  nlmsghdr->nlmsg_type = ovs_datapath_family;
+ *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO | NLM_F_DUMP | NLM_F_ACK;
+ *  nlmsghdr->nlmsg_seq = dump->sock->next_seq + 1;
+ *  nlmsghdr->nlmsg_pid = dump->sock->pid;
+ *  nlmsg->nlmsg_len = 1024
+ *
+ *  genlmsghdr->cmd = OVS_DP_CMD_GET;
+ *  genlmsghdr->version = OVS_DATAPATH_VERSION; //2
+ *  genlmsghdr->reserved = 0;
+ *  ovs_header = buf
+ *  ovs_header->dp_ifindex = request->dp_ifindex //0
+ *  属性
+ *  OVS_DP_ATTR_NAME : request->name //null
+ *  OVS_DP_ATTR_UPCALL_PID : request->upcall_pid
+ *  OVS_DP_ATTR_USER_FEATURES : request->user_features
+ *
+ *  初始化后的 dump :
+ *  1. dump->sock 为 NETLINK_GENERIC 对应的 sock
+ *  2. dump->nl_seq 为 dump->sock->next_seq + 1;
+ *  3. dump->status 为将 buf 发送给 NETLINK_GENERIC 对应的 sock 的状态
+ */
 static void
 dpif_netlink_dp_dump_start(struct nl_dump *dump)
 {
@@ -4281,7 +4329,7 @@ dpif_netlink_dp_dump_start(struct nl_dump *dump)
 
     buf = ofpbuf_new(1024);
     /*
-    * 由 dp 构造 NETLINK 消息. 构造好的消息存放在 buf 中
+    * 由 request 构造 NETLINK 消息. 构造好的消息存放在 buf 中
     *
     * 具体:
     *
@@ -4302,6 +4350,22 @@ dpif_netlink_dp_dump_start(struct nl_dump *dump)
     *
     */
     dpif_netlink_dp_to_ofpbuf(&request, buf);
+    /*
+    * 修改由 buf 构造的 struct nlmsghdr nlmsg 之后发送给 NETLINK_GENERIC 对应的 sock 的消息并初始化 dump.
+    *
+    * 其中 request 构造的 nlmsg:
+    * nlmsg->nlmsg_flags |= NLM_F_DUMP | NLM_F_ACK
+    * nlmsg->nlmsg_len = buf->size
+    * nlmsg->nlmsg_seq = dump->sock->next_seq + 1
+    * nlmsg->nlmsg_pid = dump->sock->pid
+    *
+    * 初始化后的 dump :
+    * 1. dump->sock 为 NETLINK_GENERIC 对应的 sock
+    * 2. dump->nl_seq 为 dump->sock->next_seq + 1;
+    * 3. dump->status 为将 buf 发送给 NETLINK_GENERIC 对应的 sock 的状态
+    *
+    * 其中1: 根据 NETLINK_GENERIC 从 pools 中找到 sock, 如果 pools 中不存在, 就创建之
+    */
     nl_dump_start(dump, NETLINK_GENERIC, buf);
     ofpbuf_delete(buf);
 }

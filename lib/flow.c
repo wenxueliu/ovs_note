@@ -789,6 +789,9 @@ flow_unwildcard_tp_ports(const struct flow *flow, struct flow_wildcards *wc)
 }
 
 /* Initializes 'flow_metadata' with the metadata found in 'flow'. */
+/*
+ * 用 flow 初始化 flow_metadata
+ */
 void
 flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
 {
@@ -796,41 +799,63 @@ flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
 
     BUILD_ASSERT_DECL(FLOW_WC_SEQ == 33);
 
+    // 将 match 各个数据成员初始化为 0
     match_init_catchall(flow_metadata);
     if (flow->tunnel.tun_id != htonll(0)) {
+        //flow_metadata->flow.tunnel.tun_id = flow->tunnel.tun_id
+        //flow_metadata->wc.masks.tunnel.tun_id = OVS_BE64_MAX;
         match_set_tun_id(flow_metadata, flow->tunnel.tun_id);
     }
     if (flow->tunnel.flags & FLOW_TNL_PUB_F_MASK) {
+        //flow_metadata->wc.masks.tunnel.flags = FLOW_TNL_PUB_F_MASK
+        //flow_metadata->flow.tunnel.flags = flow->tunnel.flags & FLOW_TNL_PUB_F_MASK
         match_set_tun_flags(flow_metadata,
                             flow->tunnel.flags & FLOW_TNL_PUB_F_MASK);
     }
     if (flow->tunnel.ip_src != htonl(0)) {
+        //flow_metadata->wc.masks.tunnel.ip_src = OVS_BE32_MAX
+        //flow_metadata->flow.tunnel.ip_src = flow->tunnel.ip_src & OVS_BE32_MAX
         match_set_tun_src(flow_metadata, flow->tunnel.ip_src);
     }
     if (flow->tunnel.ip_dst != htonl(0)) {
+        //flow_metadata->wc.masks.tunnel.ip_dst = OVS_BE32_MAX
+        //flow_metadata->flow.tunnel.ip_dst = flow->tunnel.ip_dst & OVS_BE32_MAX
         match_set_tun_dst(flow_metadata, flow->tunnel.ip_dst);
     }
     if (flow->tunnel.gbp_id != htons(0)) {
+        //flow_metadata->wc.masks.tunnel.gbp_flags = OVS_BE16_MAX
+        //flow_metadata->flow.tunnel.gbp_flags = flow->tunnel.gbp_id & OVS_BE16_MAX
         match_set_tun_gbp_id(flow_metadata, flow->tunnel.gbp_id);
     }
     if (flow->tunnel.gbp_flags) {
+        //flow_metadata->wc.masks.tunnel.gbp_flags = UINT8_MAX;
+        //flow_metadata->flow.tunnel.gbp_flags = flow->tunnel.gbp_flags & UINT8_MAX;
         match_set_tun_gbp_flags(flow_metadata, flow->tunnel.gbp_flags);
     }
+    //略
     tun_metadata_get_fmd(&flow->tunnel.metadata, flow_metadata);
     if (flow->metadata != htonll(0)) {
+        //flow_metadata->wc.mask.metadata = OVS_BE64_MAX
+        //flow_metadata->flow.metadata = flow->metadata & OVS_BE64_MAX;
         match_set_metadata(flow_metadata, flow->metadata);
     }
 
     for (i = 0; i < FLOW_N_REGS; i++) {
         if (flow->regs[i]) {
+            //flow_metadata->wc->masks.regs[i] = UINT32_MAX
+            //flow_metadata->flow.regs[reg_idx] = i & UINT32_MAX;
             match_set_reg(flow_metadata, i, flow->regs[i]);
         }
     }
 
     if (flow->pkt_mark != 0) {
+        //flow_metadata->flow.pkt_mark = flow->pkt_mark & UINT32_MAX
+        //flow_metadata->wc.masks.pkt_mark = UINT32_MAX
         match_set_pkt_mark(flow_metadata, flow->pkt_mark);
     }
 
+    //flow_metadata->wc.masks.in_port.ofp_port = u16_to_ofp(UINT16_MAX);
+    //flow_metadata->flow.in_port.ofp_port = ofp_port;
     match_set_in_port(flow_metadata, flow->in_port.ofp_port);
 }
 

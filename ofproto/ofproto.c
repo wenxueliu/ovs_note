@@ -390,6 +390,7 @@ ofproto_init(const struct shash *iface_hints)
     }
 
     // 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. ofproto_classes[i]->init(&init_ofp_ports);
+    // 实际调用 ofproto_dpif_class->init(&init_ofp_ports)
     for (i = 0; i < n_ofproto_classes; i++) {
         ofproto_classes[i]->init(&init_ofp_ports);
     }
@@ -403,7 +404,8 @@ ofproto_init(const struct shash *iface_hints)
  * structure, or a null pointer if there is none registered for 'type'. */
 
 /*
- * 由于 ofproto_classes 只包含 ofproto_dpif_class, type 如果是 system, netdev 不会有问题
+ * 由于 ofproto_classes 只包含 ofproto_dpif_class, 因此返回 ofproto_dpif_class.
+ * type 目前只有 system, netdev
  */
 static const struct ofproto_class *
 ofproto_class_find__(const char *type)
@@ -1672,6 +1674,7 @@ process_port_change(struct ofproto *ofproto, int error, char *devname)
 }
 
 /*
+ * TODO 有误
  * 目前 datapath_type 只能为 system, netdev
  * 调用 ofproto_dpif_class->type_run(datapath_type) 实际调用
  *      dpif_netlink_class->type_run(datapath_type)
@@ -1684,6 +1687,10 @@ ofproto_type_run(const char *datapath_type)
     int error;
 
     datapath_type = ofproto_normalize_type(datapath_type);
+    /*
+     * 由于 ofproto_classes 只包含 ofproto_dpif_class, 因此返回 ofproto_dpif_class.
+     * datapath_type 目前只有 system, netdev
+     */
     class = ofproto_class_find__(datapath_type);
 
     error = class->type_run ? class->type_run(datapath_type) : 0;

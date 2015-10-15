@@ -3739,6 +3739,9 @@ odp_to_ovs_frag(uint8_t odp_frag, bool is_mask)
         :  FLOW_NW_FRAG_ANY | FLOW_NW_FRAG_LATER;
 }
 
+/*
+ * 将 key 中的属性保存在 attrs 中, 出现属性类型保存在 present_attrsp, 超出属性范围的属性类型保存在 out_of_range_attrp
+ */
 static bool
 parse_flow_nlattrs(const struct nlattr *key, size_t key_len,
                    const struct nlattr *attrs[], uint64_t *present_attrsp,
@@ -4165,6 +4168,9 @@ parse_8021q_onward(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
     return MAX(fitness, encap_fitness);
 }
 
+/*
+ * 遍历 key 并解析 key 的每一个元素初始化 flow
+ */
 static enum odp_key_fitness
 odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
                        const struct nlattr *src_key, size_t src_key_len,
@@ -4174,10 +4180,14 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
     uint64_t expected_attrs;
     uint64_t present_attrs;
     int out_of_range_attr;
+    //什么意思?
     bool is_mask = src_flow != flow;
 
     memset(flow, 0, sizeof *flow);
 
+    /*
+    * 将 key 中的属性保存在 attrs 中, 出现属性类型保存在 present_attrsp, 超出属性范围的属性类型保存在 out_of_range_attrp
+    */
     /* Parse attributes. */
     if (!parse_flow_nlattrs(key, key_len, attrs, &present_attrs,
                             &out_of_range_attr)) {
@@ -4221,6 +4231,7 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
         }
     }
 
+    //TODO 如果没有 OVS_KEY_ATTR_IN_PORT, 而且 is_mask = true, flow->in_port.odp_port = 0, 是否是期望的
     if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_IN_PORT)) {
         flow->in_port.odp_port
             = nl_attr_get_odp_port(attrs[OVS_KEY_ATTR_IN_PORT]);
@@ -4229,6 +4240,10 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
         flow->in_port.odp_port = ODPP_NONE;
     }
 
+    //如果出现 Ethernet header, is_mask= true, expected_attrs 包含 OVS_KEY_ATTR_ETHERNET
+    //如果出现 Ethernet header, is_mask= false, expected_attrs 包含 OVS_KEY_ATTR_ETHERNET
+    //如果没有出现 Ethernet header, is_mask= false, expected_attrs 包含 OVS_KEY_ATTR_ETHERNET
+    //如果没有出现 Ethernet header, is_mask = true. expected_attrs 不包含 OVS_KEY_ATTR_ETHERNET
     /* Ethernet header. */
     if (present_attrs & (UINT64_C(1) << OVS_KEY_ATTR_ETHERNET)) {
         const struct ovs_key_ethernet *eth_key;
@@ -4281,6 +4296,9 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
  * protocol in OVS_KEY_ATTR_IPV4 or OVS_KEY_ATTR_IPV6 is IPPROTO_TCP then we
  * know that a OVS_KEY_ATTR_TCP attribute must appear and that otherwise it
  * must be absent. */
+/*
+ * 遍历 key 并解析 key 的每一个元素初始化 flow
+ */
 enum odp_key_fitness
 odp_flow_key_to_flow(const struct nlattr *key, size_t key_len,
                      struct flow *flow)

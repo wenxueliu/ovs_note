@@ -317,6 +317,10 @@ dp_class_unref(struct registered_dpif_class *rc)
     ovs_mutex_unlock(&dpif_mutex);
 }
 
+/*
+ * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+ * NOTE:实际 dpif_classes 包含 dpif_netlink_class 和 dpif_netdev_class
+ */
 static struct registered_dpif_class *
 dp_class_lookup(const char *type)
 {
@@ -338,6 +342,15 @@ dp_class_lookup(const char *type)
  *
  * Some kinds of datapaths might not be practically enumerable.  This is not
  * considered an error. */
+/*
+ * @type  : 目前为 system 或 netdev
+ * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name. type=netdev, 包含 dp_netdev 的 name
+ *
+ * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+ * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
+ *
+ * NOTE: 实际调用 dpif_netlink_class->enumerate 或 dpif_netdev_class->enumerate
+ */
 int
 dp_enumerate_names(const char *type, struct sset *names)
 {
@@ -345,15 +358,26 @@ dp_enumerate_names(const char *type, struct sset *names)
     const struct dpif_class *dpif_class;
     int error;
 
+    /*
+    * 1. 注册 dpctl 命令
+    * 2. 注册 tunnel port 命令
+    * 3. 注册 tunnel arp cache 初始化
+    * 4. 注册 route 命令
+    * 4. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+    * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
+    *
+    */
     dp_initialize();
     sset_clear(names);
 
+    //在 dpif_classes 中查找 type 对应的 registered_dpif_class.
     registered_class = dp_class_lookup(type);
     if (!registered_class) {
         VLOG_WARN("could not enumerate unknown type: %s", type);
         return EAFNOSUPPORT;
     }
 
+    //调用 registered_class->dpif_class->enumerate 方法.
     dpif_class = registered_class->dpif_class;
     error = (dpif_class->enumerate
              ? dpif_class->enumerate(names, dpif_class)
@@ -389,11 +413,44 @@ dp_parse_name(const char *datapath_name_, char **name, char **type)
 }
 
 /*
- * 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
- * (
+ * @type : 目前为 system, netdev
+ * @create : 是否创建
+ * @dpifp : dpif_classes 中 type 对应的 dpif_class
+ *
+ * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+ *
  * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
- * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
- * )
+ *
+ *     由 create, name 构造一个 NETLINK_GENERIC 协议请求消息, 向内核发送请求创建或设置 datapath, 并根据应答消息初始化一个 dpif_netlink 对象
+ *
+ *     1. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+ *     2. 确保 OVS_VPORT_FAMILY 对应的组属性中存在 OVS_VPORT_MCGROUP
+ *     3. 由 create, name 构造一个创建或设置 datapath 的 NETLINK 请求消息
+ *     4. 由 3 构造 NETLINK_GENERIC 协议消息, 发送请求, 根据应答消息初始化一个 dpif_netlink 对象
+ *
+ *     其中 3:
+ *       如果 create = true
+ *          dp_request.cmd = OVS_DP_CMD_NEW;
+ *          dp_request.upcall_pid = 0;
+ *          dp_request.name = name;
+ *          dp_request.user_features = OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS;
+ *       否则
+ *          dp_request.cmd = OVS_DP_CMD_SET;
+ *          dp_request.upcall_pid = 0;
+ *          dp_request.name = name;
+ *          dp_request.user_features = OVS_DP_F_UNALIGNED | OVS_DP_F_VPORT_PIDS;
+ *
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netdev_class,name,create,dpifp)
+ *
+ *     检查 name, class 对应的 dp_netdev 是否存在, 如果不存在创建, 如果存在, create = false,
+ *     返回 0, 否则返回错误值
+ *
+ *     如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
+ *     如果 name 在 dp_netdevs 并且 dp->class = class && create = false,  返回 0
+ *     如果 name 在 dp_netdevs 并且 dp->class != class,  返回 EINVAL
+ *     如果 name 不在 dp_netdevs 并且 create = true,  dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpifp 指向新的 dp_netdev
+ *     如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
+ *
  */
 static int
 do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
@@ -405,6 +462,10 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
     dp_initialize();
 
     type = dpif_normalize_type(type);
+    /*
+    * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+    * NOTE:实际 dpif_classes 包含 dpif_netlink_class 和 dpif_netdev_class
+    */
     registered_class = dp_class_lookup(type);
     if (!registered_class) {
         VLOG_WARN("could not create datapath %s of unknown type %s", name,
@@ -433,11 +494,12 @@ exit:
  * successful, otherwise a positive errno value.  On success stores a pointer
  * to the datapath in '*dpifp', otherwise a null pointer. */
 /*
- * 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+ * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
  * (
  * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
  * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
  * )
+ * 详细见 do_open
  */
 int
 dpif_open(const char *name, const char *type, struct dpif **dpifp)
@@ -450,9 +512,18 @@ dpif_open(const char *name, const char *type, struct dpif **dpifp)
  * type.  Will fail if a datapath with 'name' and 'type' already exists.
  * Returns 0 if successful, otherwise a positive errno value.  On success
  * stores a pointer to the datapath in '*dpifp', otherwise a null pointer. */
+
+/*
+ * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+ * (
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
+ * )
+ */
 int
 dpif_create(const char *name, const char *type, struct dpif **dpifp)
 {
+    //详细见 do_open
     return do_open(name, type, true, dpifp);
 }
 
@@ -461,6 +532,13 @@ dpif_create(const char *name, const char *type, struct dpif **dpifp)
  * the default system type.  Returns 0 if successful, otherwise a positive
  * errno value. On success stores a pointer to the datapath in '*dpifp',
  * otherwise a null pointer. */
+/*
+ * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法, 把创建的对象指向 backer->dpif
+ * (
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
+ * )
+ */
 int
 dpif_create_and_open(const char *name, const char *type, struct dpif **dpifp)
 {
@@ -1078,6 +1156,11 @@ dpif_flow_del(struct dpif *dpif,
  *
  * This function always successfully returns a dpif_flow_dump.  Error
  * reporting is deferred to dpif_flow_dump_destroy(). */
+/*
+ * @terse : 如果为 true, 用 ufid, 否则不用
+ * @dpif  :
+ *
+ */
 struct dpif_flow_dump *
 dpif_flow_dump_create(const struct dpif *dpif, bool terse)
 {

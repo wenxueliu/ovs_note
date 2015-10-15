@@ -442,6 +442,9 @@ struct xlate_cfg {
     struct hmap xbundles;
     struct hmap xports;
 };
+/*
+ * 类似内核 RCU 读写锁, 类似写时复制
+ */
 static OVSRCU_TYPE(struct xlate_cfg *) xcfgp = OVSRCU_INITIALIZER(NULL);
 static struct xlate_cfg *new_xcfg = NULL;
 
@@ -1092,6 +1095,18 @@ xlate_ofport_remove(struct ofport_dpif *ofport)
     xlate_xport_remove(new_xcfg, xport);
 }
 
+/*
+ * @ backer :
+ * @ flow   : 接收的 PACKET_IN 解析出来的 flow 对象
+ * @ ofp_in_port : flow->in_port.odp_port 在 xcfg 中对应的 xport 的 ofp_port
+ * @ xportp : flow->in_port.odp_port 在 xcfg 中对应的 xport
+ *
+ * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport
+ *
+ * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+ * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+ *
+ */
 static struct ofproto_dpif *
 xlate_lookup_ofproto_(const struct dpif_backer *backer, const struct flow *flow,
                       ofp_port_t *ofp_in_port, const struct xport **xportp)
@@ -1099,6 +1114,10 @@ xlate_lookup_ofproto_(const struct dpif_backer *backer, const struct flow *flow,
     struct xlate_cfg *xcfg = ovsrcu_get(struct xlate_cfg *, &xcfgp);
     const struct xport *xport;
 
+    /*
+     * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+     * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+     */
     xport = xport_lookup(xcfg, tnl_port_should_receive(flow)
                          ? tnl_port_receive(flow)
                          : odp_port_to_ofport(backer, flow->in_port.odp_port));
@@ -1132,6 +1151,23 @@ xlate_lookup_ofproto(const struct dpif_backer *backer, const struct flow *flow,
  *
  * Returns 0 if successful, ENODEV if the parsed flow has no associated ofproto.
  */
+/*
+ * @ backer :
+ * @ flow   : 接收的 PACKET_IN 解析出来的 flow 对象
+ * @ ofprotop : flow->in_port.odp_port 在 xcfg 中对应的 xport->xbridge->ofproto
+ * @ ipfix : flow->in_port.odp_port 在 xcfg 中对应的 xport->xbridge->ipfix
+ * @ sflow : flow->in_port.odp_port 在 xcfg 中对应的 xport->xbridge->sflow
+ * @ netflow : flow->in_port.odp_port 在 xcfg 中对应的 xport->xbridge->netflow
+ * @ ofp_in_port : flow->in_port.odp_port 在 xcfg 中对应的 xport 的 ofp_port
+ * @ xportp : flow->in_port.odp_port 在 xcfg 中对应的 xport
+ *
+ * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 初始化 ofprotop, ipfix,
+ * sflow, netflow, ofp_in_port
+ *
+ * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+ * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+ *
+ */
 int
 xlate_lookup(const struct dpif_backer *backer, const struct flow *flow,
              struct ofproto_dpif **ofprotop, struct dpif_ipfix **ipfix,
@@ -1141,6 +1177,13 @@ xlate_lookup(const struct dpif_backer *backer, const struct flow *flow,
     struct ofproto_dpif *ofproto;
     const struct xport *xport;
 
+    /*
+    * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport
+    *
+    * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+    * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+    *
+    */
     ofproto = xlate_lookup_ofproto_(backer, flow, ofp_in_port, &xport);
 
     if (!ofproto) {
@@ -1347,6 +1390,9 @@ rstp_process_packet(const struct xport *xport, const struct dp_packet *packet)
     }
 }
 
+/*
+ * 从 xbridge->xports 中找到 xport->ofp_port = ofp_port 的 xport
+ */
 static struct xport *
 get_ofp_port(const struct xbridge *xbridge, ofp_port_t ofp_port)
 {
@@ -4504,6 +4550,10 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
     }
 }
 
+/*
+ * 初始化 xlate_in 对象. (实际用 upcall 对象各个成员)
+ *
+ */
 void
 xlate_in_init(struct xlate_in *xin, struct ofproto_dpif *ofproto,
               const struct flow *flow, ofp_port_t in_port,
@@ -4529,6 +4579,7 @@ xlate_in_init(struct xlate_in *xin, struct ofproto_dpif *ofproto,
     xin->odp_actions = odp_actions;
 
     /* Do recirc lookup. */
+    //在 id_map 中找到 flow->recirc_id 对应的节点.
     xin->recirc = flow->recirc_id
         ? recirc_id_node_find(flow->recirc_id)
         : NULL;
@@ -4739,6 +4790,11 @@ xlate_wc_finish(struct xlate_ctx *ctx)
  * 'xout'.
  * The caller must take responsibility for eventually freeing 'xout', with
  * xlate_out_uninit(). */
+/*
+ *
+ *
+ *
+ */
 void
 xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
 {
@@ -4749,6 +4805,7 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
     };
 
     struct xlate_cfg *xcfg = ovsrcu_get(struct xlate_cfg *, &xcfgp);
+    //在 xcfgp 找到 xin->ofproto 对应的 xbridge
     struct xbridge *xbridge = xbridge_lookup(xcfg, xin->ofproto);
     if (!xbridge) {
         return;
@@ -4862,9 +4919,11 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         /* Restore pipeline metadata. May change flow's in_port and other
          * metadata to the values that existed when recirculation was
          * triggered. */
+        //state->metadata 初始化 flow
         recirc_metadata_to_flow(&state->metadata, flow);
 
         /* Restore stack, if any. */
+        //state 初始化 ctx.stack
         if (state->stack) {
             ofpbuf_put(&ctx.stack, state->stack->data, state->stack->size);
         }
@@ -4932,6 +4991,9 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
 
     /* Get the proximate input port of the packet.  (If xin->recirc,
      * flow->in_port is the ultimate input port of the packet.) */
+    /*
+    * 从 xbridge->xports 中找到 xport->ofp_port = ofp_port 的 xport
+    */
     struct xport *in_port = get_ofp_port(xbridge,
                                          ctx.base_flow.in_port.ofp_port);
 

@@ -51,6 +51,9 @@ match_wc_init(struct match *match, const struct flow *flow)
 }
 
 /* Initializes 'match' as a "catch-all" match that matches every packet. */
+/*
+ * 将 match 各个数据成员初始化为 0
+ */
 void
 match_init_catchall(struct match *match)
 {
@@ -151,6 +154,7 @@ match_set_metadata_masked(struct match *match,
     match->flow.metadata = metadata & mask;
 }
 
+//tun_id 不可以掩码
 void
 match_set_tun_id(struct match *match, ovs_be64 tun_id)
 {

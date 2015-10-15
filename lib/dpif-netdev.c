@@ -876,7 +876,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
  * 如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
  * 如果 name 在 dp_netdevs 并且 dp->class = class && create = false,  返回 0
  * 如果 name 在 dp_netdevs 并且 dp->class != class,  返回 EINVAL
- * 如果 name 不在 dp_netdevs 并且 create = true,  调用 create_dp_netdev(name, class)
+ * 如果 name 不在 dp_netdevs 并且 create = true, dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
  * 如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
  */
 static int

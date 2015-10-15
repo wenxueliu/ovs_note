@@ -23,6 +23,13 @@
 #include "poll-loop.h"
 #include "socket-util.h"
 
+/*
+ * 通过 pipe 和 poll 来建立两个程序直接的连接.
+ * latch_poll() : 使得 pipe 可写
+ * latch_set() : 使得 pipe 可读
+ * latch_is_set() : 等待直到 pipe 可读
+ * latch_wait_at() : 将 latch->fd[0] 加入 poll 监控的 fd 中
+ */
 /* Initializes 'latch' as initially unset. */
 void
 latch_init(struct latch *latch)
@@ -60,6 +67,9 @@ latch_set(struct latch *latch)
 
 /* Returns true if 'latch' is set, false otherwise.  Does not reset 'latch'
  * to the unset state. */
+/*
+ * poll 直到 latch->fds[0] 是否可读, 成功返回 true, 失败返回 false
+ */
 bool
 latch_is_set(const struct latch *latch)
 {
@@ -80,6 +90,10 @@ latch_is_set(const struct latch *latch)
  * ('where' is used in debug logging.  Commonly one would use latch_wait() to
  * automatically provide the caller's source file and line number for
  * 'where'.) */
+/*
+ *  对于 latch->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件. 否则加入 poll_loop()->poll_nodes
+ *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
+ */
 void
 latch_wait_at(const struct latch *latch, const char *where)
 {

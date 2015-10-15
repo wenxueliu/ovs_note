@@ -1046,6 +1046,9 @@ sflow_read_set_action(const struct nlattr *attr,
     }
 }
 
+/*
+ *  用 flow->mpls_lse 初始化 sflow_actions->mpls_lse.
+ */
 static void
 dpif_sflow_capture_input_mpls(const struct flow *flow,
                               struct dpif_sflow_actions *sflow_actions)
@@ -1075,6 +1078,11 @@ dpif_sflow_capture_input_mpls(const struct flow *flow,
     }
 }
 
+/*
+ * 用 flow, sflow_actions 初始化 sflow_actions
+ * 1. 用 flow->mpls_lse 初始化 sflow_actions->mpls_lse.
+ * 2. 遍历 actions 初始化 sflow_actions
+ */
 void
 dpif_sflow_read_actions(const struct flow *flow,
 			const struct nlattr *actions, size_t actions_len,
@@ -1092,6 +1100,9 @@ dpif_sflow_read_actions(const struct flow *flow,
 	/* Make sure the MPLS output stack
 	 * is seeded with the input stack.
 	 */
+    /*
+    *  用 flow->mpls_lse 初始化 sflow_actions->mpls_lse.
+    */
 	dpif_sflow_capture_input_mpls(flow, sflow_actions);
 
 	/* XXX when 802.1AD(QinQ) is supported then
