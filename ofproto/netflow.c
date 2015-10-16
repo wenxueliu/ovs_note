@@ -89,6 +89,14 @@ static void netflow_expire__(struct netflow *, struct netflow_flow *)
     OVS_REQUIRES(mutex);
 static void netflow_run__(struct netflow *) OVS_REQUIRES(mutex);
 
+/*
+ * ctx->wc->masks.nw_proto = 0xff
+ * ctx->wc->masks.nw_src = 0xff
+ * ctx->wc->masks.nw_dst = 0xff
+ * ctx->wc->masks.nw_tos |= IP_DSCP_MASK;
+ * ctx->wc->masks.tp_src = htons(0xff);
+ * ctx->wc->masks.tp_dst = htons(0xff);
+ */
 void
 netflow_mask_wc(const struct flow *flow, struct flow_wildcards *wc)
 {

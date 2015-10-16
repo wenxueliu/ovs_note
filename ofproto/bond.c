@@ -968,6 +968,7 @@ bond_is_balanced(const struct bond *bond) OVS_REQ_RDLOCK(rwlock)
 }
 
 /* Notifies 'bond' that 'n_bytes' bytes were sent in 'flow' within 'vlan'. */
+//如果 bond 是平衡的, 更新 &bond->hash[bond_hash(bond, flow, vlan) & BOND_MASK]->tx_bytes += n_bytes
 void
 bond_account(struct bond *bond, const struct flow *flow, uint16_t vlan,
              uint64_t n_bytes)

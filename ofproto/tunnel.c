@@ -358,6 +358,20 @@ tnl_process_ecn(struct flow *flow)
     return true;
 }
 
+/*
+ * ctx->wc->masks.tunnel.tun_id = OVS_BE64_MAX;
+ * ctx->wc->masks.tunnel.ip_src = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.ip_dst = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.flags = (FLOW_TNL_F_DONT_FRAGMENT |
+ *                                FLOW_TNL_F_CSUM |
+ *                                FLOW_TNL_F_KEY);
+ * ctx->wc->masks.tunnel.ip_tos = UINT8_MAX;
+ * ctx->wc->masks.tunnel.ip_ttl = UINT8_MAX;
+ * ctx->wc->masks.tunnel.tp_src = 0;
+ * ctx->wc->masks.tunnel.tp_dst = 0;
+ * ctx->wc->masks.pkt_mark = 0xff
+ * ctx->wc->masks.nw_tos |= IP_ECN_MASK;
+ */
 void
 tnl_wc_init(struct flow *flow, struct flow_wildcards *wc)
 {

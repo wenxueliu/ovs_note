@@ -115,6 +115,13 @@ recirc_metadata_from_flow(struct recirc_metadata *md,
     md->actset_output = flow->actset_output;
 }
 
+/*
+ * ctx->base_flow->tunnel = ctx->recirc->state->metadata->tunnel
+ * ctx->base_flow->metadata = ctx->recirc->state->metadata->metadata
+ * ctx->base_flow->regs = ctx->recirc->state->metadata->regs
+ * ctx->base_flow->in_port.ofp_port = ctx->recirc->state->metadata->in_port
+ * ctx->base_flow->actset_output = ctx->recirc->state->metadata->actset_output
+ */
 static inline void
 recirc_metadata_to_flow(const struct recirc_metadata *md,
                         struct flow *flow)

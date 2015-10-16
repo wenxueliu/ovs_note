@@ -2,24 +2,35 @@
 上次到 ofproto_run(br->ofproto);
 
 
-##全局配置
-
-flow-restore-wait : true | false
-
 ##全局变量
 
-static const struct ofproto_class **ofproto_classes = ofproto_dpif_class
-static size_t n_ofproto_classes;
+static const struct ofproto_class **ofproto_classes //实际只包含 ofproto_dpif_class
+static size_t n_ofproto_classes; // ofproto_classes 的数量
 static size_t allocated_ofproto_classes;
 
 /* All existing ofproto_backer instances, indexed by ofproto->up.type. */
 static struct shash all_dpif_backers = SHASH_INITIALIZER(&all_dpif_backers);
 
 //ofproto.c
+/* Initial mappings of port to OpenFlow number mappings. */
 static struct shash init_ofp_ports = SHASH_INITIALIZER(&init_ofp_ports);
 
 //ofproto-dpif.c
+/* Initial mappings of port to bridge mappings. */
 static struct shash init_ofp_ports = SHASH_INITIALIZER(&init_ofp_ports);
+
+/* All existing ofproto_backer instances, indexed by ofproto->up.type. */
+static struct shash all_dpif_backers = SHASH_INITIALIZER(&all_dpif_backers);
+
+
+//ofproto-dpif-rid.c
+static struct ovs_mutex mutex;
+static struct cmap id_map;
+static struct cmap metadata_map;
+static struct ovs_list expiring OVS_GUARDED_BY(mutex);
+static struct ovs_list expired OVS_GUARDED_BY(mutex);
+static uint32_t next_id OVS_GUARDED_BY(mutex); /* Possible next free id. */
+
 
 /* ofproto class structure, to be defined by each ofproto implementation.
  *

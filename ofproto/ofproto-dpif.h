@@ -216,8 +216,10 @@ static inline void rule_dpif_unref(struct rule_dpif *rule)
     }
 }
 
+//return rule->cr.priority == FAIL_OPEN_PRIORITY;
 static inline bool rule_dpif_is_fail_open(const struct rule_dpif *rule)
 {
+    //return rule->cr.priority == FAIL_OPEN_PRIORITY;
     return is_fail_open_rule(RULE_CAST(rule));
 }
 

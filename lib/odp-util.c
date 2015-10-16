@@ -3823,6 +3823,17 @@ check_expectations(uint64_t present_attrs, int out_of_range_attr,
     return ODP_FIT_PERFECT;
 }
 
+/*
+ * 初始化 flow->dl_type
+ * present_attrs 中包含 OVS_KEY_ATTR_ETHERTYPE,is_mask = false, flow->dl_type 不合法, 返回 false
+ * present_attrs 中包含 OVS_KEY_ATTR_ETHERTYPE,is_mask = true, flow->dl_type 不合法, flow->dl_type = 0xFFFF, 返回 false
+ * present_attrs 中包含 OVS_KEY_ATTR_ETHERTYPE, flow->dl_type 合法, flow->dl_type = attrs[OVS_KEY_ATTR_ETHERTYPE]
+ *
+ * present_attrs 中不包含 OVS_KEY_ATTR_ETHERTYPE,is_mask = false, flow->dl_type = FLOW_DL_TYPE_NONE, 返回 true
+ * present_attrs 中不包含 OVS_KEY_ATTR_ETHERTYPE,is_mask = true, src_flow->dl_type 不合法 返回 false
+ * present_attrs 中不包含 OVS_KEY_ATTR_ETHERTYPE,is_mask = true, src_flow->dl_type 合法 返回 true
+ *
+ */
 static bool
 parse_ethertype(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
                 uint64_t present_attrs, uint64_t *expected_attrs,
@@ -4259,6 +4270,7 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
     }
 
     /* Get Ethertype or 802.1Q TPID or FLOW_DL_TYPE_NONE. */
+    //初始化 flow->dl_type
     if (!parse_ethertype(attrs, present_attrs, &expected_attrs, flow,
         src_flow)) {
         return ODP_FIT_ERROR;
@@ -4316,6 +4328,9 @@ odp_flow_key_to_mask(const struct nlattr *mask_key, size_t mask_key_len,
                      const struct nlattr *flow_key, size_t flow_key_len,
                      struct flow *mask, const struct flow *flow)
 {
+    /*
+    * 遍历 key 并解析 key 的每一个元素初始化 mask
+    */
    return odp_flow_key_to_flow__(mask_key, mask_key_len, flow_key, flow_key_len,
                                  mask, flow);
 }
@@ -4343,6 +4358,25 @@ odp_key_fitness_to_string(enum odp_key_fitness fitness)
  * whose contents are the 'userdata_size' bytes at 'userdata' and returns the
  * offset within 'odp_actions' of the start of the cookie.  (If 'userdata' is
  * null, then the return value is not meaningful.) */
+/*
+ * @pid             :
+ * @userdata        :
+ * @userdata_size   :
+ * @tunnel_out_port :
+ * @include_actions :
+ * @odp_actions : 构造存在 OVS_ACTION_ATTR_USERSPACE 的数据
+ *
+ *
+ * 构造 OVS_ACTION_ATTR_USERSPACE 类型的 NETLINK 消息存放在 odp_actions.
+ * 如果 userdata != NULL, 返回 发送数据的大小;
+ * 否则 返回 0
+ *
+ * OVS_ACTION_ATTR_USERSPACE
+ *      OVS_USERSPACE_ATTR_PID : pid
+ *      OVS_USERSPACE_ATTR_USERDATA : userdata
+ *      OVS_USERSPACE_ATTR_EGRESS_TUN_PORT: tunnel_out_port
+ *      OVS_USERSPACE_ATTR_ACTIONS : NULL
+ */
 size_t
 odp_put_userspace_action(uint32_t pid,
                          const void *userdata, size_t userdata_size,

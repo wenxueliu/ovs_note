@@ -335,6 +335,12 @@ mf_is_mask_valid(const struct mf_field *mf, const union mf_value *mask)
 }
 
 /* Returns true if 'flow' meets the prerequisites for 'mf', false otherwise. */
+/*
+ * flow 满足 mf->prereqs 的需要.
+ * 如果满足 返回 true, 否则返回 false
+ *
+ * 举例, 如果 mf->prereqs = MFP_IP, 那么 flow->dl_type 必须是 ip 协议.
+ */
 bool
 mf_are_prereqs_ok(const struct mf_field *mf, const struct flow *flow)
 {

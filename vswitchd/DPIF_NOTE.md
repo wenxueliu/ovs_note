@@ -1,3 +1,20 @@
+
+/* Protects against changes to 'dp_netdevs'. */
+static struct ovs_mutex dp_netdev_mutex = OVS_MUTEX_INITIALIZER;
+
+dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池. 每个端口属于一个 netdev. 
+每个端口所属的 netdev 有一个接受队列, 每个线程有一个流表缓存池
+/* Contains all 'struct dp_netdev's. */
+static struct shash dp_netdevs
+
+
+
+//ofproto_dpif_upcall.c
+static struct ovs_list all_udpifs  //保存 udpif 对象
+
+
+
+
 /*
  * dpif, the DataPath InterFace.
  *
@@ -953,9 +970,6 @@ static int dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev, odp_po
     如果 port_nop 为 NULL, 不存在, 初始化 port 对象并加入 dp->ports. 名称为 dpif_port, 端口号 port_no. type 为 netdev->type
 
 
-dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池.
-每个端口属于一个 netdev. 每个端口所属的 netdev 有一个接受队列
-每个线程有一个流表缓存池
 
 
 ##dpif-netlink

@@ -3785,6 +3785,10 @@ ofproto_dpif_execute_actions(struct ofproto_dpif *ofproto,
     return error;
 }
 
+/*
+ * 如果 rule->new_rule 不为 NULL, 用 stats 更新 rule->new_rule 的 stats
+ * 否则用 stats 更新 rule->stats
+ */
 void
 rule_dpif_credit_stats(struct rule_dpif *rule,
                        const struct dpif_flow_stats *stats)
@@ -3863,6 +3867,10 @@ ofproto_dpif_get_tables_version(struct ofproto_dpif *ofproto OVS_UNUSED)
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
  * Any changes are restored before returning. */
+/*
+ *
+ *
+ */
 static struct rule_dpif *
 rule_dpif_lookup_in_table(struct ofproto_dpif *ofproto, cls_version_t version,
                           uint8_t table_id, struct flow *flow,
@@ -3909,6 +3917,12 @@ rule_dpif_lookup_in_table(struct ofproto_dpif *ofproto, cls_version_t version,
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
  * Any changes are restored before returning. */
+/*
+ * flow->in_port.ofp_port = in_port;
+ *
+ *
+ *
+ */
 struct rule_dpif *
 rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
                             cls_version_t version, struct flow *flow,
@@ -3957,8 +3971,11 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
      * TBL_INTERNAL being the last table. */
     BUILD_ASSERT_DECL(N_TABLES == TBL_INTERNAL + 1);
 
+    //默认如果一张表中查不到, 继续下一张表
     miss_config = OFPUTIL_TABLE_MISS_CONTINUE;
 
+    //遍历 ofproto->up.tables, 如果找到 rule, 用 state->n_packets 更新对应表的 n_matched,
+    //否则更新对应表的 n_missed
     for (next_id = *table_id;
          next_id < ofproto->up.n_tables;
          next_id++, next_id += (next_id == TBL_INTERNAL))

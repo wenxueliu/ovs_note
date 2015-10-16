@@ -4734,9 +4734,36 @@ too_many_output_actions(const struct ofpbuf *odp_actions OVS_UNUSED)
 #endif
 }
 
+/*
+ * ctx->wc->masks.in_port = 0xff
+ * ctx->wc->masks.dl_type = 0xff
+ * ctx->wc->masks.nw_frag |= FLOW_NW_FRAG_MASK
+ * ctx->wc->masks.recirc_id = UINT32_MAX;
+ * ctx->wc->masks.nw_proto = 0xff
+ * ctx->wc->masks.nw_src = 0xff
+ * ctx->wc->masks.nw_dst = 0xff
+ * ctx->wc->masks.nw_tos |= IP_DSCP_MASK;
+ * ctx->wc->masks.tp_src = htons(0xff);
+ * ctx->wc->masks.tp_dst = htons(0xff);
+ *
+ * ctx->wc->masks.tunnel.tun_id = OVS_BE64_MAX;
+ * ctx->wc->masks.tunnel.ip_src = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.ip_dst = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.flags = (FLOW_TNL_F_DONT_FRAGMENT |
+ *                                FLOW_TNL_F_CSUM |
+ *                                FLOW_TNL_F_KEY);
+ * ctx->wc->masks.tunnel.ip_tos = UINT8_MAX;
+ * ctx->wc->masks.tunnel.ip_ttl = UINT8_MAX;
+ * ctx->wc->masks.tunnel.tp_src = 0;
+ * ctx->wc->masks.tunnel.tp_dst = 0;
+ * ctx->wc->masks.pkt_mark = 0xff
+ * ctx->wc->masks.nw_tos |= IP_ECN_MASK;
+ *
+ */
 static void
 xlate_wc_init(struct xlate_ctx *ctx)
 {
+    //ctx->wc 全置为 0
     flow_wildcards_init_catchall(ctx->wc);
 
     /* Some fields we consider to always be examined. */
@@ -4753,9 +4780,31 @@ xlate_wc_init(struct xlate_ctx *ctx)
     }
 
     if (ctx->xbridge->netflow) {
+        /*
+        * ctx->wc->masks.nw_proto = 0xff
+        * ctx->wc->masks.nw_src = 0xff
+        * ctx->wc->masks.nw_dst = 0xff
+        * ctx->wc->masks.nw_tos |= IP_DSCP_MASK;
+        * ctx->wc->masks.tp_src = htons(0xff);
+        * ctx->wc->masks.tp_dst = htons(0xff);
+        */
         netflow_mask_wc(&ctx->xin->flow, ctx->wc);
     }
 
+    /*
+    * ctx->wc->masks.tunnel.tun_id = OVS_BE64_MAX;
+    * ctx->wc->masks.tunnel.ip_src = OVS_BE32_MAX;
+    * ctx->wc->masks.tunnel.ip_dst = OVS_BE32_MAX;
+    * ctx->wc->masks.tunnel.flags = (FLOW_TNL_F_DONT_FRAGMENT |
+    *                                FLOW_TNL_F_CSUM |
+    *                                FLOW_TNL_F_KEY);
+    * ctx->wc->masks.tunnel.ip_tos = UINT8_MAX;
+    * ctx->wc->masks.tunnel.ip_ttl = UINT8_MAX;
+    * ctx->wc->masks.tunnel.tp_src = 0;
+    * ctx->wc->masks.tunnel.tp_dst = 0;
+    * ctx->wc->masks.pkt_mark = 0xff
+    * ctx->wc->masks.nw_tos |= IP_ECN_MASK;
+    */
     tnl_wc_init(&ctx->xin->flow, ctx->wc);
 }
 
@@ -4791,9 +4840,62 @@ xlate_wc_finish(struct xlate_ctx *ctx)
  * The caller must take responsibility for eventually freeing 'xout', with
  * xlate_out_uninit(). */
 /*
+ * TODO
+ *
+ * ctx.base_flow.vlan_tci   = 0
+ * ctx.base_flow->tunnel   = xin->recirc->state->metadata->tunnel
+ * ctx.base_flow->metadata = xin->recirc->state->metadata->metadata
+ * ctx.base_flow->regs     = xin->recirc->state->metadata->regs
+ * ctx.base_flow->in_port.ofp_port = xin->recirc->state->metadata->in_port
+ * ctx.base_flow->actset_output    = xin->recirc->state->metadata->actset_output
+ *
+ * ctx->wc->masks.in_port = 0xff
+ * ctx->wc->masks.dl_type = 0xff
+ * ctx->wc->masks.nw_frag |= FLOW_NW_FRAG_MASK
+ * ctx->wc->masks.recirc_id = UINT32_MAX;
+ * ctx->wc->masks.nw_proto = 0xff
+ * ctx->wc->masks.nw_src = 0xff
+ * ctx->wc->masks.nw_dst = 0xff
+ * ctx->wc->masks.nw_tos |= IP_DSCP_MASK;
+ * ctx->wc->masks.tp_src = htons(0xff);
+ * ctx->wc->masks.tp_dst = htons(0xff);
+ *
+ * ctx->wc->masks.tunnel.tun_id = OVS_BE64_MAX;
+ * ctx->wc->masks.tunnel.ip_src = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.ip_dst = OVS_BE32_MAX;
+ * ctx->wc->masks.tunnel.flags = (FLOW_TNL_F_DONT_FRAGMENT |
+ *                                FLOW_TNL_F_CSUM |
+ *                                FLOW_TNL_F_KEY);
+ * ctx->wc->masks.tunnel.ip_tos = UINT8_MAX;
+ * ctx->wc->masks.tunnel.ip_ttl = UINT8_MAX;
+ * ctx->wc->masks.tunnel.tp_src = 0;
+ * ctx->wc->masks.tunnel.tp_dst = 0;
+ * ctx->wc->masks.pkt_mark = 0xff
+ * ctx->wc->masks.nw_tos |= IP_ECN_MASK;
+ *
+ * ctx->xbridge = xbridge_lookup(xcfg, xin->recirc->state->ofproto)
+ * ctx.table_id = xin->recirc->state->table_id;
+ *
+ * ctx.stack = xin->recirc->state->stack->data
+ * ctx.mirrors = xin->recirc->mirrors
+ * ctx.action_set = xin->recirc->state->ofpacts
+ * ctx.tables_version = ctx.xbridge->ofproto->tables_version
+ *
+ * 如果 xin->recirc->state->ofpacts 中有元素类型为 OFPACT_GROUP, ctx.action_set_has_group = true;
+ *
+ * 如果 xin->rule = NULL && xin->ofproto = NULL
+ * ctx.rule = 
  *
  *
  *
+ *
+ *
+ *
+ * xout->fail_open = ctx.rule && rule_dpif_is_fail_open(ctx.rule);
+ *
+ * NOTE:
+ * 当 xin->recirc 不为 NULL, xin->ofpacts 和 ctx.rule 不能同时不为 NULL
+ * 当 xin->flow->recirc_id && xin->recirc 不能同时为 NULL
  */
 void
 xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
@@ -4875,6 +4977,8 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
     }
 
     ofpbuf_reserve(ctx.odp_actions, NL_A_U32_SIZE);
+
+    //初始化 ctx->wc
     if (xin->wc) {
         xlate_wc_init(&ctx);
     }
@@ -4886,6 +4990,7 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
 
         xlate_report(&ctx, "Restoring state post-recirculation:");
 
+        //当 xin->recirc 不为 NULL, xin->ofpacts 和 ctx.rule 不能同时不为 NULL
         if (xin->ofpacts_len > 0 || ctx.rule) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             const char *conflict = xin->ofpacts_len ? "actions" : "rule";
@@ -4896,6 +5001,8 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         }
 
         /* Set the bridge for post-recirculation processing if needed. */
+        //如果在 xcfgp 找到 xin->ofproto 对应的 xbridge的 ofproto != xin->recirc->state->ofproto, 
+        //ctx->xbridge = xbridge_lookup(xcfg, state->ofproto)
         if (ctx.xbridge->ofproto != state->ofproto) {
             struct xlate_cfg *xcfg = ovsrcu_get(struct xlate_cfg *, &xcfgp);
             const struct xbridge *new_bridge
@@ -4913,25 +5020,36 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
 
         /* Set the post-recirculation table id.  Note: A table lookup is done
          * only if there are no post-recirculation actions. */
+        //ctx.table_id = xin->recirc->table_id
         ctx.table_id = state->table_id;
         xlate_report(&ctx, "- Resuming from table %"PRIu8, ctx.table_id);
 
         /* Restore pipeline metadata. May change flow's in_port and other
          * metadata to the values that existed when recirculation was
          * triggered. */
-        //state->metadata 初始化 flow
+        /*
+        * ctx->base_flow->tunnel    = xin->recirc->state->metadata->tunnel
+        * ctx->base_flow->metadata  = xin->recirc->state->metadata->metadata
+        * ctx->base_flow->regs      = xin->recirc->state->metadata->regs
+        * ctx->base_flow->in_port.ofp_port = xin->recirc->state->metadata->in_port
+        * ctx->base_flow->actset_output    = xin->recirc->state->metadata->actset_output
+        */
         recirc_metadata_to_flow(&state->metadata, flow);
 
         /* Restore stack, if any. */
-        //state 初始化 ctx.stack
+        /*
+         *ctx.stack = xin->recirc->state->stack->data
+         */
         if (state->stack) {
             ofpbuf_put(&ctx.stack, state->stack->data, state->stack->size);
         }
 
         /* Restore mirror state. */
+        //ctx.mirrors = ctx->recirc->mirrors
         ctx.mirrors = state->mirrors;
 
         /* Restore action set, if any. */
+        //ctx.action_set = xin->recirc->state->ofpacts
         if (state->action_set_len) {
             const struct ofpact *a;
 
@@ -4968,14 +5086,18 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
     /* The bridge is now known so obtain its table version. */
     ctx.tables_version = ofproto_dpif_get_tables_version(ctx.xbridge->ofproto);
 
+    //如果 xin->rule = NULL && xin->ofproto = NULL
     if (!xin->ofpacts && !ctx.rule) {
         ctx.rule = rule_dpif_lookup_from_table(
             ctx.xbridge->ofproto, ctx.tables_version, flow, xin->wc,
             ctx.xin->xcache != NULL, ctx.xin->resubmit_stats, &ctx.table_id,
             flow->in_port.ofp_port, true, true);
+        //xin->rule->stats = xin->resubmit_stats
         if (ctx.xin->resubmit_stats) {
             rule_dpif_credit_stats(ctx.rule, ctx.xin->resubmit_stats);
         }
+        //xin->xcache->entries 增加 XC_RULE 类型 entry;
+        //xin->xcache->entry->u.rule = xin->rule
         if (ctx.xin->xcache) {
             struct xc_entry *entry;
 
@@ -4987,6 +5109,7 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
             ctx.xin->resubmit_hook(ctx.xin, ctx.rule, 0);
         }
     }
+    //ctx.rule != NULL && ctx.rule->cr.priority == FAIL_OPEN_PRIORITY, xout->fail_open = true
     xout->fail_open = ctx.rule && rule_dpif_is_fail_open(ctx.rule);
 
     /* Get the proximate input port of the packet.  (If xin->recirc,
@@ -5189,9 +5312,11 @@ static void
 xlate_cache_netdev(struct xc_entry *entry, const struct dpif_flow_stats *stats)
 {
     if (entry->u.dev.tx) {
+        //如果 entry->u.dev.tx 是 netdev_vport, 用 stats 更新 entry->u.dev.tx 对应的 netdev_vport 的 stats
         netdev_vport_inc_tx(entry->u.dev.tx, stats);
     }
     if (entry->u.dev.rx) {
+        //如果是 netdev_vport, 用 stats 更新 netdev 对应的 netdev_vport 的 stats
         netdev_vport_inc_rx(entry->u.dev.rx, stats);
     }
     if (entry->u.dev.bfd) {
@@ -5222,6 +5347,9 @@ xlate_cache_normal(struct ofproto_dpif *ofproto, struct flow *flow, int vlan)
 }
 
 /* Push stats and perform side effects of flow translation. */
+/*
+ * 用 stats 更新 xcache->entries 的每个元素
+ */
 void
 xlate_push_stats(struct xlate_cache *xcache,
                  const struct dpif_flow_stats *stats)
@@ -5302,6 +5430,9 @@ xlate_cache_clear_netflow(struct netflow *netflow, struct flow *flow)
     free(flow);
 }
 
+/*
+ * 清除 xcache->entries 的每个元素
+ */
 void
 xlate_cache_clear(struct xlate_cache *xcache)
 {

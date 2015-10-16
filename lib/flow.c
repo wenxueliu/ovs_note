@@ -776,6 +776,10 @@ flow_zero_wildcards(struct flow *flow, const struct flow_wildcards *wildcards)
     }
 }
 
+/*
+ * ctx->wc->masks.tp_src = htons(0xff);
+ * ctx->wc->masks.tp_dst = htons(0xff);
+ */
 void
 flow_unwildcard_tp_ports(const struct flow *flow, struct flow_wildcards *wc)
 {

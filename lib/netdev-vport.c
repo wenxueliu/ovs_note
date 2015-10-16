@@ -783,6 +783,7 @@ netdev_vport_inc_rx(const struct netdev *netdev,
     }
 }
 
+//如果 netdev 是 netdev_vport, 用 stats 更新 netdev 对应的 netdev_vport 的 stats
 void
 netdev_vport_inc_tx(const struct netdev *netdev,
                     const struct dpif_flow_stats *stats)

@@ -78,6 +78,10 @@ static inline bool tag_intersects(tag_type, tag_type);
 
 /* Returns true if 'a' and 'b' have at least one tag in common,
  * false if their set of tags is disjoint. */
+/*
+ * 如果 a 和 b 除最后一位, 存在两个 bit 都相同且为 1, 那么返回 1
+ * 否则返回 0
+ */
 static inline bool
 tag_intersects(tag_type a, tag_type b)
 {

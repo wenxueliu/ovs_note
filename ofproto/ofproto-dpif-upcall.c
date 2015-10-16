@@ -829,8 +829,9 @@ free_dupcall:
 }
 
 /*
- *
- *
+ * NOTE
+ * 1. 不同线程 arg 参数不同. 因此属于不同的 revalidator, 但所有 revalidator 共享 udpif
+ * 2. revalidator->udpif->revalidators[0] 的 revalidator 是 leader
  *
  *
  */
@@ -872,6 +873,7 @@ udpif_revalidator(void *arg)
             udpif->reval_exit = latch_is_set(&udpif->exit_latch);
 
             start_time = time_msec();
+            //当 udpif->exit_latch->fds[0] 不可读, 开始 revalidator
             if (!udpif->reval_exit) {
                 bool terse_dump;
 
@@ -882,6 +884,7 @@ udpif_revalidator(void *arg)
 
         /* Wait for the leader to start the flow dump. */
         ovs_barrier_block(&udpif->reval_barrier);
+        //当 udpif->exit_latch->fds[0] 可读退出 revalidator
         if (udpif->reval_exit) {
             break;
         }
@@ -995,6 +998,13 @@ classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
 
 /* Calculates slow path actions for 'xout'.  'buf' must statically be
  * initialized with at least 128 bytes of space. */
+/*
+ * 构造 OVS_ACTION_ATTR_USERSPACE 的数据存放在 buf 中
+ *
+ * OVS_ACTION_ATTR_USERSPACE
+ *      OVS_USERSPACE_ATTR_PID : udpif->dpif->handlers[flow_hash_5tuple(flow,0) % udpif->dpif->n_handlers]->channels[port_no].sock->pid
+ *      OVS_USERSPACE_ATTR_USERDATA : {.type =USER_ACTION_COOKIE_SLOW_PATH, .slow_path.unused=0, .slow_path.rease=xout->slow }
+ */
 static void
 compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
                   const struct flow *flow, odp_port_t odp_in_port,
@@ -1011,7 +1021,16 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
     port = xout->slow & (SLOW_CFM | SLOW_BFD | SLOW_LACP | SLOW_STP)
         ? ODPP_NONE
         : odp_in_port;
+    /*
+    * 返回 udpif->dpif->handlers[flow_hash_5tuple(flow,0) % udpif->dpif->n_handlers]->channels[port_no].sock->pid
+    * NOTE: 这里 dpif 为 dpif_netlink
+    */
     pid = dpif_port_get_pid(udpif->dpif, port, flow_hash_5tuple(flow, 0));
+    /*
+    * 构造 OVS_ACTION_ATTR_USERSPACE 类型的 NETLINK 消息存放在 odp_actions.
+    * 如果 userdata != NULL, 返回 发送数据的大小;
+    * 否则 返回 0
+    */
     odp_put_userspace_action(pid, &cookie, sizeof cookie.slow_path,
                              ODPP_NONE, false, buf);
 }
@@ -1787,6 +1806,11 @@ ukey_delete(struct umap *umap, struct udpif_key *ukey)
     ovsrcu_postpone(ukey_delete__, ukey);
 }
 
+/*
+ * 如果 udpif->dump_duration 小于 200 ms, 或者从当前时间到上次 revalidation
+ * 时间内处理的包的数量大于 5 个, 返回 true.
+ * 否则返回 false
+ */
 static bool
 should_revalidate(const struct udpif *udpif, uint64_t packets,
                   long long int used)
@@ -1858,6 +1882,7 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
                     ? stats->n_bytes - ukey->stats.n_bytes
                     : 0);
 
+    //如果 ukey->reval_seq!= udpif->reval_seq 并且从上次到现在处理的包的数量小于 5 个.
     if (need_revalidate && last_used
         && !should_revalidate(udpif, push.n_packets, last_used)) {
         ok = false;
@@ -1866,22 +1891,37 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
 
     /* We will push the stats, so update the ukey stats cache. */
     ukey->stats = *stats;
+    //如果 ukey->reval_seq!= udpif->reval_seq 并且 stats.n_packets = 0
     if (!push.n_packets && !need_revalidate) {
         ok = true;
         goto exit;
     }
 
+    //如果 ukey->reval_seq = udpif->reval_seq 并且 ukey->xcache != NULL, 用 push 更新 ukey->xcache->entries
     if (ukey->xcache && !need_revalidate) {
+        /*
+        * 用 push 更新 ukey->xcache->entries 的每个元素
+        */
         xlate_push_stats(ukey->xcache, &push);
         ok = true;
         goto exit;
     }
 
+    /*
+    * 遍历 ukey->key 并解析 ukey->key 的每一个元素初始化 flow
+    */
     if (odp_flow_key_to_flow(ukey->key, ukey->key_len, &flow)
         == ODP_FIT_ERROR) {
         goto exit;
     }
 
+    /*
+    * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 初始化 ofprotop, netflow, ofp_in_port
+    *
+    * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+    * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+    *
+    */
     error = xlate_lookup(udpif->backer, &flow, &ofproto, NULL, NULL, &netflow,
                          &ofp_in_port);
     if (error) {
@@ -1889,12 +1929,18 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
     }
 
     if (need_revalidate) {
+        /*
+        * 清除 ukey->xcache->entries 的每个元素
+        */
         xlate_cache_clear(ukey->xcache);
     }
     if (!ukey->xcache) {
         ukey->xcache = xlate_cache_new();
     }
 
+    /*
+    * 用后面的参数初始化 xlate_in 对象 xin. (实际用 upcall 对象各个成员)
+    */
     xlate_in_init(&xin, ofproto, &flow, ofp_in_port, NULL, push.tcp_flags,
                   NULL, need_revalidate ? &wc : NULL, &odp_actions);
     if (push.n_packets) {
@@ -1912,6 +1958,9 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
 
     if (xout.slow) {
         ofpbuf_clear(&odp_actions);
+        /*
+        * 构造 OVS_ACTION_ATTR_USERSPACE 的数据存放在 odp_actions 中
+        */
         compose_slow_path(udpif, &xout, &flow, flow.in_port.odp_port,
                           &odp_actions);
     }
@@ -1920,11 +1969,13 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
         goto exit;
     }
 
+    //初始化 dp_mask
     if (odp_flow_key_to_mask(ukey->mask, ukey->mask_len, ukey->key,
                              ukey->key_len, &dp_mask, &flow) == ODP_FIT_ERROR) {
         goto exit;
     }
 
+    //检查 dp_mask 和 wc.masks 是否一致
     /* Since the kernel is free to ignore wildcarded bits in the mask, we can't
      * directly check that the masks are the same.  Instead we check that the
      * mask in the kernel is more specific i.e. less wildcarded, than what
@@ -2186,6 +2237,11 @@ revalidate(struct revalidator *revalidator)
     dpif_flow_dump_thread_destroy(dump_thread);
 }
 
+/*
+ *
+ *
+ *
+ */
 static bool
 handle_missed_revalidation(struct udpif *udpif, uint64_t reval_seq,
                            struct udpif_key *ukey)
@@ -2213,6 +2269,7 @@ revalidator_sweep__(struct revalidator *revalidator, bool purge)
     udpif = revalidator->udpif;
     dump_seq = seq_read(udpif->dump_seq);
     reval_seq = seq_read(udpif->reval_seq);
+    //当前 revalidator 在所有 revalidator 的偏移
     slice = revalidator - udpif->revalidators;
     ovs_assert(slice < udpif->n_revalidators);
 

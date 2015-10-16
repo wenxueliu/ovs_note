@@ -836,6 +836,10 @@ dpif_port_query_by_name(const struct dpif *dpif, const char *devname,
  * disabled and then re-enabled, so a client that does that must be prepared to
  * update all of the flows that it installed that contain
  * OVS_ACTION_ATTR_USERSPACE actions. */
+/*
+ * 返回 dpif->handlers[hash % dpif->n_handlers]->channels[port_no].sock->pid
+ * NOTE: 这里 dpif 为 dpif_netlink
+ */
 uint32_t
 dpif_port_get_pid(const struct dpif *dpif, odp_port_t port_no, uint32_t hash)
 {

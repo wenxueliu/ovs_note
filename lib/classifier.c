@@ -501,6 +501,9 @@ hash_metadata(ovs_be64 metadata)
     return hash_uint64((OVS_FORCE uint64_t) metadata);
 }
 
+/*
+ * 在 cls->partitions 中查找 hash_uint64(metadata) 对应的 cls_partition. 如果找到返回 cls_partition
+ */
 static struct cls_partition *
 find_partition(const struct classifier *cls, ovs_be64 metadata, uint32_t hash)
 {
@@ -950,6 +953,7 @@ find_conjunctive_match__(struct hmap *matches, uint64_t id, uint32_t hash)
     return NULL;
 }
 
+//TODO
 static bool
 find_conjunctive_match(const struct cls_conjunction_set *set,
                        unsigned int max_n_clauses, struct hmap *matches,
@@ -1012,6 +1016,17 @@ free_conjunctive_matches(struct hmap *matches,
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
  * Any changes are restored before returning. */
+/*
+ * 遍历 cls->subtables 每个元素,
+ * 1. 跳过不属于 tags partition 的 subtables
+ * 2. 跳过优先级低的或者不匹配的 subtables
+ * 3. 如果找到匹配的并且 allow_conjunctive_matches = true, 将 conj_set 保存在 soft, soft_pri 记录最大优先级
+ * 4. 如果找到匹配的并且 allow_conjunctive_matches = false, 继续循环
+ *
+ * 遍历之后
+ * 如果 hard_pri > soft_pri, 返回 hard->cls_rule, 或 NULL
+ * 否则遍历 soft 将最高优先级的流表找查找优先级比 hard_pri 高的 cls_rule, 赋值给 hard. 返回 hard->cls_rule
+ */
 static const struct cls_rule *
 classifier_lookup__(const struct classifier *cls, cls_version_t version,
                     struct flow *flow, struct flow_wildcards *wc,
@@ -1058,6 +1073,11 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
      * that 'tags' always intersects such a cls_subtable's 'tags', so we don't
      * need a special case.
      */
+    /*
+    * 在 cls->partitions 中查找 hash_uint64(metadata) 对应的 cls_partition.
+    * 如果找到返回 cls_partition
+    * 如果cls->partitions 为 NULL 或没有找到返回 NULL
+    */
     partition = (cmap_is_empty(&cls->partitions)
                  ? NULL
                  : find_partition(cls, flow->metadata,
@@ -1065,10 +1085,23 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
     tags = partition ? partition->tags : TAG_ARBITRARY;
 
     /* Initialize trie contexts for find_match_wc(). */
+    /*
+     * 用 cls->tries 初始化 trie_ctx
+     * ctx->trie = trie;
+     * ctx->be32ofs = trie->field->flow_be32ofs;
+     * ctx->lookup_done = false;
+     */
     for (int i = 0; i < cls->n_tries; i++) {
         trie_ctx_init(&trie_ctx[i], &cls->tries[i]);
     }
 
+    /*
+     * 遍历 cls->subtables 每个元素, 
+     * 1. 跳过不属于 tags partition 的 subtables
+     * 2. 跳过优先级低的或者不匹配的 subtables
+     * 3. 如果找到匹配的并且 allow_conjunctive_matches = true, 将 conj_set 保存在 soft, soft_pri 记录最大优先级
+     * 4. 如果找到匹配的并且 allow_conjunctive_matches = false, 继续循环
+     */
     /* Main loop. */
     struct cls_subtable *subtable;
     PVECTOR_FOR_EACH_PRIORITY (subtable, hard_pri, 2, sizeof *subtable,
@@ -1088,6 +1121,7 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
             continue;
         }
 
+        //如果 allow_conjunctive_matches = true, 将 conj_set 保存在 soft. soft_pri 记录最大优先级
         conj_set = ovsrcu_get(struct cls_conjunction_set *, &match->conj_set);
         if (!conj_set) {
             /* 'match' isn't part of a conjunctive match.  It's the best
@@ -1100,6 +1134,7 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
             hard_pri = hard->priority;
         } else if (allow_conjunctive_matches) {
             /* 'match' is part of a conjunctive match.  Add it to the list. */
+            //如果空间不够, 扩展 soft_stub
             if (OVS_UNLIKELY(n_soft >= allocated_soft)) {
                 struct cls_conjunction_set **old_soft = soft;
 
@@ -1122,6 +1157,8 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
     /* In the common case, at this point we have no soft matches and we can
      * return immediately.  (We do the same thing if we have potential soft
      * matches but none of them are higher-priority than our hard match.) */
+
+    // 如果 hard_pri > soft_pri, 返回 hard->cls_rule, 或 NULL
     if (hard_pri >= soft_pri) {
         if (soft != soft_stub) {
             free(soft);
@@ -1159,6 +1196,8 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
          * It's also tempting to break out of the soft match loop if 'n_soft ==
          * 1' but that would also miss lower-priority hard matches.  We could
          * special case that also but again there's no need. */
+
+        //将 soft 中 priority 小于 hard_pri 的去除
         for (int i = 0; i < n_soft; ) {
             if (!soft[i] || soft[i]->priority <= hard_pri) {
                 soft[i] = soft[--n_soft];
@@ -1166,6 +1205,7 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
                 i++;
             }
         }
+        //如果 soft 都小于 hard_pri
         if (!n_soft) {
             break;
         }
@@ -1174,6 +1214,7 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
          * must be higher than the hard match's priority; otherwise we would
          * have deleted all of the soft matches in the previous loop.)  Count
          * the number of soft matches that have that priority. */
+        //遍历 soft 用 soft_pri 记录最高的优先级, n_soft_pri 记录最高优先级的数量
         soft_pri = INT_MIN;
         int n_soft_pri = 0;
         for (int i = 0; i < n_soft; i++) {
@@ -1195,6 +1236,7 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
         struct conjunctive_match cm_stubs[16];
         struct hmap matches;
 
+        //再次遍历 soft 找到是否存在匹配的 rule
         hmap_init(&matches);
         for (int i = 0; i < n_soft; i++) {
             uint32_t id;
@@ -1206,8 +1248,10 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
                 uint32_t saved_conj_id = flow->conj_id;
                 const struct cls_rule *rule;
 
+                //修改了 flow->conj_id
                 flow->conj_id = id;
                 rule = classifier_lookup__(cls, version, flow, wc, false);
+                //恢复了 flow->conj_id
                 flow->conj_id = saved_conj_id;
 
                 if (rule) {
@@ -1229,6 +1273,8 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
          *
          * The next iteration of the soft match loop will delete any null
          * pointers we put into 'soft' (and some others too). */
+        //如果最高优先级的规则, 再次查找，将满足条件的最高优先级的赋值给 hard.
+        //TODO 这里如果最高优先级有多个, 后面的就不会匹配了.
         for (int i = 0; i < n_soft; i++) {
             if (soft[i]->priority != soft_pri) {
                 continue;
@@ -1272,6 +1318,17 @@ classifier_lookup__(const struct classifier *cls, cls_version_t version,
  *
  * 'flow' is non-const to allow for temporary modifications during the lookup.
  * Any changes are restored before returning. */
+/*
+ * 遍历 cls->subtables 每个元素,
+ * 1. 跳过不属于 tags partition 的 subtables
+ * 2. 跳过优先级低的或者不匹配的 subtables
+ * 3. 如果找到匹配的并且 allow_conjunctive_matches = true, 将 conj_set 保存在 soft, soft_pri 记录最大优先级
+ * 4. 如果找到匹配的并且 allow_conjunctive_matches = false, 继续循环
+ *
+ * 遍历之后
+ * 如果 hard_pri > soft_pri, 返回 hard->cls_rule, 或 NULL
+ * 否则遍历 soft 将最高优先级的流表找查找优先级比 hard_pri 高的 cls_rule, 赋值给 hard. 返回 hard->cls_rule
+ */
 const struct cls_rule *
 classifier_lookup(const struct classifier *cls, cls_version_t version,
                   struct flow *flow, struct flow_wildcards *wc)
@@ -1627,6 +1684,13 @@ static unsigned int be_get_bit_at(const ovs_be32 value[], unsigned int ofs);
 
 /* Return 'true' if can skip rest of the subtable based on the prefix trie
  * lookup results. */
+/*
+ *
+ * @ofs : ofs.start=0, ofs.end=cls->subtables[i]->index_ofs[j]
+ *
+ * 根据 prefix 来决定是否可以跳过剩下的 subtable
+ *
+ */
 static inline bool
 check_tries(struct trie_ctx trie_ctx[CLS_MAX_TRIES], unsigned int n_tries,
             const unsigned int field_plen[CLS_MAX_TRIES],
@@ -1638,6 +1702,7 @@ check_tries(struct trie_ctx trie_ctx[CLS_MAX_TRIES], unsigned int n_tries,
     /* Check if we could avoid fully unwildcarding the next level of
      * fields using the prefix tries.  The trie checks are done only as
      * needed to avoid folding in additional bits to the wildcards mask. */
+
     for (j = 0; j < n_tries; j++) {
         /* Is the trie field relevant for this subtable? */
         if (field_plen[j]) {
@@ -1646,10 +1711,16 @@ check_tries(struct trie_ctx trie_ctx[CLS_MAX_TRIES], unsigned int n_tries,
             uint8_t be64ofs = be32ofs / 2;
 
             /* Is the trie field within the current range of fields? */
+            //找到　trie_ctx[j]->be32ofs/2 在 ofs.start 和 ofs.end 之间的 trie_ctx
             if (be64ofs >= ofs.start && be64ofs < ofs.end) {
                 /* On-demand trie lookup. */
                 if (!ctx->lookup_done) {
                     memset(&ctx->match_plens, 0, sizeof ctx->match_plens);
+                    /*
+                    * flow 满足 mf->prereqs 的需要.
+                    * 如果满足返回匹配的值
+                    * 否则返回 0
+                    */
                     ctx->maskbits = trie_lookup(ctx->trie, flow,
                                                 &ctx->match_plens);
                     ctx->lookup_done = true;
@@ -1829,6 +1900,10 @@ find_match_wc(const struct cls_subtable *subtable, cls_version_t version,
 
         ofs.end = subtable->index_ofs[i];
 
+        /*
+         *
+         *
+         */
         if (check_tries(trie_ctx, n_tries, subtable->trie_plen, ofs, flow,
                         wc)) {
             /* 'wc' bits for the trie field set, now unwildcard the preceding
@@ -1923,6 +1998,11 @@ find_equal(const struct cls_subtable *subtable, const struct miniflow *flow,
  * Prefixes are in the network byte order, and the offset 0 corresponds to
  * the most significant bit of the first byte.  The offset can be read as
  * "how many bits to skip from the start of the prefix starting at 'pr'". */
+/*
+ * 从 pr 的 ofs 位开始:
+ * 如果 plen > (32 - ofs % 32), 返回 32 位
+ * 否则 返回 pr[ofs/32] << ofs % 32
+ */
 static uint32_t
 raw_get_prefix(const ovs_be32 pr[], unsigned int ofs, unsigned int plen)
 {
@@ -2101,6 +2181,7 @@ trie_next_edge(struct trie_node *node, const ovs_be32 value[],
     return node->edges + be_get_bit_at(value, ofs);
 }
 
+//TODO
 static const struct trie_node *
 trie_next_node(const struct trie_node *node, const ovs_be32 value[],
                unsigned int ofs)
@@ -2123,6 +2204,11 @@ be_set_bit_at(ovs_be32 value[], unsigned int ofs)
  * '*plens' will have a bit set for each prefix length that may have matching
  * rules.  The caller is responsible for clearing the '*plens' prior to
  * calling this.
+ */
+/*
+ * TODO 看不懂
+ * 从 trie 中找匹配的值
+ *
  */
 static unsigned int
 trie_lookup_value(const rcu_trie_ptr *trie, const ovs_be32 value[],
@@ -2157,6 +2243,11 @@ trie_lookup_value(const rcu_trie_ptr *trie, const ovs_be32 value[],
     return !prev || trie_is_leaf(prev) ? match_len : match_len + 1;
 }
 
+/*
+ * flow 满足 mf->prereqs 的需要.
+ * 如果满足返回匹配的值
+ * 否则返回 0
+ */
 static unsigned int
 trie_lookup(const struct cls_trie *trie, const struct flow *flow,
             union mf_value *plens)
@@ -2166,6 +2257,10 @@ trie_lookup(const struct cls_trie *trie, const struct flow *flow,
     /* Check that current flow matches the prerequisites for the trie
      * field.  Some match fields are used for multiple purposes, so we
      * must check that the trie is relevant for this flow. */
+    /*
+     * flow 满足 mf->prereqs 的需要.
+     * 如果满足 返回 true, 否则返回 false
+     */
     if (mf_are_prereqs_ok(mf, flow)) {
         return trie_lookup_value(&trie->root,
                                  &((ovs_be32 *)flow)[mf->flow_be32ofs],

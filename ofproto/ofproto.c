@@ -6667,6 +6667,9 @@ handle_group_mod(struct ofconn *ofconn, const struct ofp_header *oh)
     }
 }
 
+/*
+ * 返回 ofproto->tables[table_id].miss_config
+ */
 enum ofputil_table_miss
 ofproto_table_get_miss_config(const struct ofproto *ofproto, uint8_t table_id)
 {

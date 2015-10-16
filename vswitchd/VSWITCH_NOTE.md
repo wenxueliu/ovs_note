@@ -16,8 +16,16 @@
 
 ###ofgroup
 
+
+配置
+
+flow-restore-wait : true | false, false : 删除所有流表
+flow-limit : 
+
 组表
 
+n-revalidator-threads: Revalidation threads which read the datapath flow table and maintains them
+n-handler-threads : An array of 'struct handler's for upcall handling and flow installation.
 
 sudo ovs-vsctl list Controller
 ovs-vsctl set Open_vSwitch . other-config:n-handler-threads=1 other-config:n-revalidator-threads=1

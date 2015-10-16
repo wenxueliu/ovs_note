@@ -1361,14 +1361,14 @@ dpif_netlink_port_get_pid__(const struct dpif_netlink *dpif,
 }
 
 /*
-* 返回 dpif->handlers[hash % dpif->n_handlers]->channels[port_no].sock->pid
-*
-* 其中: 如果 port_no > dpif->uc_array_size, 就改为默认 port_no = 0
-*
-* @dpif : 
-* @port_no : 查找的端口号
-* @hash    : 计算 dpif->handlers 的索引, 即 hash % dpif->n_handlers
-*/
+ * 返回 dpif->handlers[hash % dpif->n_handlers]->channels[port_no].sock->pid
+ *
+ * 其中: 如果 port_no > dpif->uc_array_size, 就改为默认 port_no = 0
+ *
+ * @dpif : 
+ * @port_no : 查找的端口号
+ * @hash    : 计算 dpif->handlers 的索引, 即 hash % dpif->n_handlers
+ */
 static uint32_t
 dpif_netlink_port_get_pid(const struct dpif *dpif_, odp_port_t port_no,
                           uint32_t hash)
