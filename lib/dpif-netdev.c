@@ -3194,6 +3194,8 @@ dp_netdev_count_packet(struct dp_netdev_pmd_thread *pmd,
  * 'put_actions' empty; otherwise it must store the desired actions into
  * 'put_actions'.
  *
+ * NOTE:
+ * 参照 ofproto_dpif_upcall 的 upcall_cb
  *
  */
 static int

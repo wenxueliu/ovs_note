@@ -3369,6 +3369,9 @@ union ovs_key_tp {
 static void get_tp_key(const struct flow *, union ovs_key_tp *);
 static void put_tp_key(const union ovs_key_tp *, struct flow *);
 
+/*
+ * 用 parms, export_mask 初始化 buf
+ */
 static void
 odp_flow_key_from_flow__(const struct odp_flow_key_parms *parms,
                          bool export_mask, struct ofpbuf *buf)
@@ -3538,10 +3541,16 @@ unencap:
  *
  * 'buf' must have at least ODPUTIL_FLOW_KEY_BYTES bytes of space, or be
  * capable of being expanded to allow for that much space. */
+/*
+* 用 parms 初始化 buf
+*/
 void
 odp_flow_key_from_flow(const struct odp_flow_key_parms *parms,
                        struct ofpbuf *buf)
 {
+    /*
+    * 用 parms, false 初始化 buf
+    */
     odp_flow_key_from_flow__(parms, false, buf);
 }
 
@@ -3616,6 +3625,7 @@ odp_key_from_pkt_metadata(struct ofpbuf *buf, const struct pkt_metadata *md)
 }
 
 /* Generate packet metadata from the given ODP flow key. */
+//用 key 初始化 md
 void
 odp_key_to_pkt_metadata(const struct nlattr *key, size_t key_len,
                         struct pkt_metadata *md)

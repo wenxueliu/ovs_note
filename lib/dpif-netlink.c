@@ -2207,8 +2207,8 @@ dpif_netlink_flow_dump_thread_cast(struct dpif_flow_dump_thread *thread)
 }
 
 /*
- * 初始化一个线程对象, 返回线程对象所在的 dump
- * thread->up->dpif = dump->dpif
+ * 初始化一个线程对象 thread, 返回线程对象所在的 thread->up
+ * thread->up->dpif = dump->up->dpif
  * thread->dump = dump
  * thread->nl_flows = malloc(NL_DUMP_BUFSIZE)
  * thread->nl_actions = NULL
@@ -2268,8 +2268,15 @@ dpif_netlink_flow_to_dpif_flow(struct dpif *dpif, struct dpif_flow *dpif_flow,
 }
 
 /*
- * 从 thread->dump->nl_dump->sock->fd 中收数据保持保存在 thread->nl_flows 中, 直到遇到错误或包读完
+ * @thread_ :
+ * @flows   : 保持从 thread->dump->nl_dump->sock->fd 中收到的数据
+ * @max_flows : 期望最多的 flows 的大小, 如果 flows 中 flow 的数量大于 max_flows 退出
  *
+ * 从 thread->dump->nl_dump->sock->fd 中收数据保持保存在 flows 中, 直到遇到错误或收到 max_flows 的包
+ * 返回 flows 收的的流表数量
+ *
+ * NOTE:
+ * flows 中 flow 的数量可能小于 max_flow
  * 如果遇到 flow 没有 actions 重新从内核中查询.
  *
  */
@@ -2297,7 +2304,7 @@ dpif_netlink_flow_dump_next(struct dpif_flow_dump_thread *thread_,
         /*
          * 如果 dump->nl_dump->sock->fd 的数据已经读完, 退出循环
          *
-         * 如果 thread->nl_flows->size == 0, 非阻塞接受 dump->nl_dump->sock->fd 的消息保存在 thread->nl_flows, 将 thread->nl_flows 中的 nlmsghdr 的 payload 保持在 thread->nl_flow->data 中
+         * 如果 thread->nl_flows->size == 0, 非阻塞接受 dump->nl_dump->sock->fd 的消息保存在 thread->nl_flows, 将 thread->nl_flows 中的 nlmsghdr 的 payload 保持在 nl_flow->data 中
          * 如果 thread->nl_flows->size != 0, 将 thread->nl_flows 中的 nlmsghdr 的 payload 保持在 nl_flow->data 中.
          * 成功接受数据成功返回 true, 读完所有数据或发生错误返回false
          */

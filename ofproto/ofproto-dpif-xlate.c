@@ -1101,10 +1101,10 @@ xlate_ofport_remove(struct ofport_dpif *ofport)
  * @ ofp_in_port : flow->in_port.odp_port 在 xcfg 中对应的 xport 的 ofp_port
  * @ xportp : flow->in_port.odp_port 在 xcfg 中对应的 xport
  *
- * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport
+ * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 并返回 xport->xbridge->ofproto
  *
  * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
- * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+ * 2. port 在 xcfg->xports 中存在, 找到对应的 xport, 返回 xport->xbridge->ofproto
  *
  */
 static struct ofproto_dpif *
@@ -1165,7 +1165,7 @@ xlate_lookup_ofproto(const struct dpif_backer *backer, const struct flow *flow,
  * sflow, netflow, ofp_in_port
  *
  * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
- * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+ * 2. port 在 xcfg->xports 中存在, 返回对应 xport 所在的 xport->xbridge->ofproto
  *
  */
 int
@@ -1178,12 +1178,12 @@ xlate_lookup(const struct dpif_backer *backer, const struct flow *flow,
     const struct xport *xport;
 
     /*
-    * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport
-    *
-    * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
-    * 2. port 在 xcfg->xports 中存在, 返回对应 xport
-    *
-    */
+     * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 并返回 xport->xbridge->ofproto
+     *
+     * 1. backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+     * 2. port 在 xcfg->xports 中存在, 找到对应的 xport, 返回 xport->xbridge->ofproto
+     *
+     */
     ofproto = xlate_lookup_ofproto_(backer, flow, ofp_in_port, &xport);
 
     if (!ofproto) {

@@ -365,6 +365,8 @@ udpif_create(struct dpif_backer *backer, struct dpif *dpif)
         ovs_mutex_init(&udpif->ukeys[i].mutex);
     }
 
+    //dpif->dp->upcall_cb = upcall_cb
+    //dpif->dp->upcall_aux = udpif
     dpif_register_upcall_cb(dpif, upcall_cb, udpif);
 
     return udpif;
@@ -648,6 +650,8 @@ udpif_use_ufid(struct udpif *udpif)
 
 
 /*
+ * 获取 udpif 关联的流表的数量
+ *
  * 如果 udpif->n_flows_mutex 被锁, 从 udpif->dpif->stats 中获取
  * 否则直接从 upif->n_flows
  */
@@ -829,6 +833,9 @@ free_dupcall:
 }
 
 /*
+ * 
+ * 2. 
+ * 3. 根据情况, 调整 updif->flow_limit
  * NOTE
  * 1. 不同线程 arg 参数不同. 因此属于不同的 revalidator, 但所有 revalidator 共享 udpif
  * 2. revalidator->udpif->revalidators[0] 的 revalidator 是 leader
@@ -893,6 +900,7 @@ udpif_revalidator(void *arg)
 
         /* Wait for all flows to have been dumped before we garbage collect. */
         ovs_barrier_block(&udpif->reval_barrier);
+        // 内核发送消息, 将 udpif->ukeys 中与 revalidator 关联的满足一定条件的 ukey 删除
         revalidator_sweep(revalidator);
 
         /* Wait for all revalidators to finish garbage collection. */
@@ -1211,6 +1219,15 @@ upcall_uninit(struct upcall *upcall)
     }
 }
 
+/*
+ * TODO
+ * 1. 用 aux->backer, packet, type, userdata, flow, ufid, pmd_id 初始化 upcall
+ * 2. 根据 upcall->type 和 upcall->userdata 的类型来执行不同的动作
+ * 3. 将 upcall.put_actions.data 加入 put_actions
+ * 4. 根据 flow 初始化 wc
+ * 5. upcall.ukeys 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中
+ *
+ */
 static int
 upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufid,
           unsigned pmd_id, enum dpif_upcall_type type,
@@ -1226,23 +1243,38 @@ upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufi
     atomic_read_relaxed(&enable_megaflows, &megaflow);
     atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
 
+    /*
+     * 用 aux->backer, packet, type, userdata, flow, ufid, pmd_id 初始化 upcall
+     *
+     * 1. 通过 backer, flow 在 xcfg 中查找到对应的 xport 初始化 xport
+     * 2. 用 packet, type, userdata, ufid, pmd_id 初始化 upcall
+     *
+     * NOTE: 实际通过 内核 PACKET_IN 的数据解析为 struct dpif_upcall 对象 dupcall, 后初始化
+     *
+     * 没有初始化 upcall->reval_seq, upcall->dump_seq, upcall->wc, 实际在 xlate_in_init 中初始化
+     */
     error = upcall_receive(&upcall, udpif->backer, packet, type, userdata,
                            flow, ufid, pmd_id);
     if (error) {
         return error;
     }
 
+    /*
+     * 根据 upcall->type 和 upcall->userdata 的类型来执行不同的动作
+     */
     error = process_upcall(udpif, &upcall, actions, wc);
     if (error) {
         goto out;
     }
 
+    //将 upcall.put_actions.data 加入 put_actions
     if (upcall.xout.slow && put_actions) {
         ofpbuf_put(put_actions, upcall.put_actions.data,
                    upcall.put_actions.size);
     }
 
     if (OVS_UNLIKELY(!megaflow)) {
+        //根据 flow 初始化 wc
         flow_wildcards_init_for_packet(wc, flow);
     }
 
@@ -1258,6 +1290,11 @@ upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufi
         goto out;
     }
 
+    /*
+    * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+    * 如果没有找到, 将 new_key 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中, 返回 true
+    * 如果找到, 输出冲突日志, 返回 false
+    */
     if (upcall.ukey && !ukey_install(udpif, upcall.ukey)) {
         error = ENOSPC;
     }
@@ -1271,7 +1308,6 @@ out:
 
 /*
  * 根据 upcall->type 和 upcall->userdata 的类型来执行不同的动作
- *
  */
 static int
 process_upcall(struct udpif *udpif, struct upcall *upcall,
@@ -1373,6 +1409,15 @@ process_upcall(struct udpif *udpif, struct upcall *upcall,
     return EAGAIN;
 }
 
+/*
+ * 遍历 upcalls 每个元素 upcall
+ * 1. 如果 udpif->n_flows < udpif->flow_limit, 并且 upcall->type = DPIF_UC_MISS: 用 upcall->ukey 初始化 DPIF_OP_FLOW_PUT 类型 op, 加入 ops
+ * 2. 如果 upcall->odp_actions.size 不为 0, 用 upcall->key 初始化 DPIF_OP_EXECUTE 类型的 op, 加入 ops
+ * 3. 用 ops 每个元素 op 的 dop 初始化 opsp
+ * 4. 遍历 opsp 中的操作发送给内核并将应答初始化 opsp[i]->u.{type}.stats]
+ * 5. 解锁 ops 中的每个 ukey
+ *
+ */
 static void
 handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
                size_t n_upcalls)
@@ -1454,6 +1499,7 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
             op->ukey = NULL;
             op->dop.type = DPIF_OP_EXECUTE;
             op->dop.u.execute.packet = CONST_CAST(struct dp_packet *, packet);
+            //upcall->key 初始化 op->dop.u.execute.packet->md
             odp_key_to_pkt_metadata(upcall->key, upcall->key_len,
                                     &op->dop.u.execute.packet->md);
             op->dop.u.execute.actions = upcall->odp_actions.data;
@@ -1483,6 +1529,10 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
         }
         opsp[n_opsp++] = &ops[i].dop;
     }
+    /*
+    * 遍历 opsp 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(udpif->dpif, opsp, chunk)
+    * 立即应用从开始到当前索引的所有操作. 并将内核应答初始化 ops[i]->u.{type}.stats]
+    */
     dpif_operate(udpif->dpif, opsp, n_opsp);
     for (i = 0; i < n_ops; i++) {
         if (ops[i].ukey) {
@@ -1498,8 +1548,7 @@ get_ufid_hash(const ovs_u128 *ufid)
 }
 
 /*
- * 在 udpif->ukeys[get_ufid_hash(ufid) % N_UMAPS].cmap 中查找 ukey->udif = ufid 的 ukey
- *
+ * 在 udpif->ukeys[get_ufid_hash(ufid) % N_UMAPS].cmap 的所有元素中查找满足 ukey->udif = ufid 的 ukey
  */
 static struct udpif_key *
 ukey_lookup(struct udpif *udpif, const ovs_u128 *ufid)
@@ -1516,6 +1565,12 @@ ukey_lookup(struct udpif *udpif, const ovs_u128 *ufid)
     return NULL;
 }
 
+/*
+ * 创建并初始化 udpif_key 对象 ukey
+ *
+ * NOTE:
+ * 没有初始化的 ukey->xcache
+ */
 static struct udpif_key *
 ukey_create__(const struct nlattr *key, size_t key_len,
               const struct nlattr *mask, size_t mask_len,
@@ -1564,6 +1619,17 @@ ukey_create__(const struct nlattr *key, size_t key_len,
     return ukey;
 }
 
+/*
+ * TODO
+ *
+ * 用 upcall, wc 初始化 ukey
+ *
+ * 1. 如果 upcall->key_len = 0, 用 upcall->flow, wc 初始化 keybuf
+ *    否则 用 upcall->key 初始化 keybuf
+ * 2. 如果 megaflow = true, 用 wc->mask 初始化 keybuf
+ * 3. 用 keybuf, maskbuf 及 upcall 其他参数初始化 updif_key 对象
+ *
+ */
 static struct udpif_key *
 ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
 {
@@ -1583,6 +1649,7 @@ ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
          * upcall, so convert the upcall's flow here. */
         ofpbuf_use_stack(&keybuf, &keystub, sizeof keystub);
         odp_parms.odp_in_port = upcall->flow->in_port.odp_port;
+        //用 odp_parms->flow(即 upcall->flow) 初始化 keybuf
         odp_flow_key_from_flow(&odp_parms, &keybuf);
     }
 
@@ -1591,10 +1658,16 @@ ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
     if (megaflow) {
         odp_parms.odp_in_port = ODPP_NONE;
         odp_parms.key_buf = &keybuf;
-
+        //用 odp_parms->mask(即 wc->masks) 初始化 maskbuf
         odp_flow_key_from_mask(&odp_parms, &maskbuf);
     }
 
+    /*
+    * 创建并初始化 udpif_key 对象 ukey
+    *
+    * NOTE:
+    * 没有初始化的 ukey->xcache
+    */
     return ukey_create__(keybuf.data, keybuf.size, maskbuf.data, maskbuf.size,
                          true, upcall->ufid, upcall->pmd_id,
                          &upcall->put_actions, upcall->dump_seq,
@@ -1603,6 +1676,17 @@ ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
                          &upcall->xout);
 }
 
+/*
+ * @udpif
+ * @flow : 用于初始化 ukey
+ * @ukey : 执行被创建的 udpif_key 对象
+ *
+ * 创建 udpif_key 对象, 并用 flow 初始化
+ *
+ * NOTE:
+ * 如果 flow->actions_len = 0, flow_key_len = 0, 从内核重新查询
+ * 如果 flow 的 actions 中有 OVS_ACTION_ATTR_RECIRC, 返回错误代码
+ */
 static int
 ukey_create_from_dpif_flow(const struct udpif *udpif,
                            const struct dpif_flow *flow,
@@ -1622,6 +1706,9 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
         /* If the key or actions were not provided by the datapath, fetch the
          * full flow. */
         ofpbuf_use_stack(&buf, &stub, sizeof stub);
+        /*
+         * 向内核查询流表, 保持在 full_flow
+         */
         err = dpif_flow_get(udpif->dpif, NULL, 0, &flow->ufid,
                             flow->pmd_id, &buf, &full_flow);
         if (err) {
@@ -1642,6 +1729,9 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
     dump_seq = seq_read(udpif->dump_seq);
     reval_seq = seq_read(udpif->reval_seq);
     ofpbuf_use_const(&actions, &flow->actions, flow->actions_len);
+    /*
+     * 创建 ukey 对象, 用 flow 初始化 ukey
+     */
     *ukey = ukey_create__(flow->key, flow->key_len,
                           flow->mask, flow->mask_len, flow->ufid_present,
                           &flow->ufid, flow->pmd_id, &actions, dump_seq,
@@ -1654,6 +1744,13 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
  *
  * On success, returns true, installs the ukey and returns it in a locked
  * state. Otherwise, returns false. */
+/*
+ * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+ * 如果没有找到, 将 ukey->mutex 加锁, 并将 new_key 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中, 返回 true
+ * 如果找到, 输出冲突日志, 返回 false
+ *
+ * TODO 可以用 UNLIKELY 修饰 old_ukey
+ */
 static bool
 ukey_install_start(struct udpif *udpif, struct udpif_key *new_ukey)
     OVS_TRY_LOCK(true, new_ukey->mutex)
@@ -1666,6 +1763,9 @@ ukey_install_start(struct udpif *udpif, struct udpif_key *new_ukey)
     idx = new_ukey->hash % N_UMAPS;
     umap = &udpif->ukeys[idx];
     ovs_mutex_lock(&umap->mutex);
+    /*
+     * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+     */
     old_ukey = ukey_lookup(udpif, &new_ukey->ufid);
     if (old_ukey) {
         /* Uncommon case: A ukey is already installed with the same UFID. */
@@ -1714,6 +1814,11 @@ ukey_install_finish(struct udpif_key *ukey, int error)
     return !error;
 }
 
+/*
+ * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+ * 如果没有找到, 将 new_key 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中, 返回 true
+ * 如果找到, 输出冲突日志, 返回 false
+ */
 static bool
 ukey_install(struct udpif *udpif, struct udpif_key *ukey)
 {
@@ -1727,6 +1832,11 @@ ukey_install(struct udpif *udpif, struct udpif_key *ukey)
      * ukey during revalidator_sweep() and only if the dump_seq is mismatched.
      * It is unlikely for a revalidator thread to advance dump_seq and reach
      * the next GC phase between ukey creation and flow installation. */
+    /*
+    * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+    * 如果没有找到, 将 new_key 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中, 返回 true
+    * 如果找到, 输出冲突日志, 返回 false
+    */
     return ukey_install_start(udpif, ukey) && ukey_install_finish(ukey, 0);
 }
 
@@ -1740,6 +1850,20 @@ ukey_install(struct udpif *udpif, struct udpif_key *ukey)
  *
  * *error is an output parameter provided to appease the threadsafety analyser,
  * and its value matches the return value. */
+/*
+ *
+ * @udpif  :
+ * @flow   :
+ * @error  : 所有操作执行都成功, error = 0, 发生错误, error 记录错误码
+ * @result : 指向找到或创建的 ukey
+ * @return : 所有操作执行都成功, 返回 0, 发生错误, 返回错误码
+ *
+ * 将 udpif->ukeys 中 f->ufid 对应的 ukey 加锁
+ *
+ * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+ * 如果找到, 尝试对 ukey->mutex 加锁, result 指向找到的 udpif_key 对象
+ * 如果没有找到, 创建一个 udpif_key 对象 ukey, 用 flow 初始化 ukey, result 指向创建的 udpif_key 对象, 并将 ukey 加入 udpif->ukeys 中,对 ukey->mutex 加锁.
+ */
 static int
 ukey_acquire(struct udpif *udpif, const struct dpif_flow *flow,
              struct udpif_key **result, int *error)
@@ -1748,6 +1872,9 @@ ukey_acquire(struct udpif *udpif, const struct dpif_flow *flow,
     struct udpif_key *ukey;
     int retval;
 
+    /*
+     * 在 udpif->ukeys[get_ufid_hash(ufid) % N_UMAPS].cmap 的所有元素中查找满足 ukey->udif = ufid 的 ukey
+     */
     ukey = ukey_lookup(udpif, &flow->ufid);
     if (ukey) {
         retval = ovs_mutex_trylock(&ukey->mutex);
@@ -1759,10 +1886,22 @@ ukey_acquire(struct udpif *udpif, const struct dpif_flow *flow,
          * datapath gracefully (ie, don't just clear the datapath). */
         bool install;
 
+        /*
+         * 创建 udpif_key 对象, 并用 flow 初始化
+         *
+         * NOTE:
+         * 如果 flow->actions_len = 0, flow_key_len = 0, 从内核重新查询
+         * 如果 flow 的 actions 中有 OVS_ACTION_ATTR_RECIRC, 返回错误代码
+         */
         retval = ukey_create_from_dpif_flow(udpif, flow, &ukey);
         if (retval) {
             goto done;
         }
+        /*
+        * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+        * 如果没有找到, 将 ukey->mutex 加锁, 并将 new_key 加入 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中, 返回 true
+        * 如果找到, 输出冲突日志, 返回 false
+        */
         install = ukey_install_start(udpif, ukey);
         if (install) {
             ukey_install_finish__(ukey);
@@ -1798,6 +1937,7 @@ ukey_delete__(struct udpif_key *ukey)
     }
 }
 
+//从 umap 中删除 ukey
 static void
 ukey_delete(struct umap *umap, struct udpif_key *ukey)
     OVS_REQUIRES(umap->mutex)
@@ -1844,6 +1984,20 @@ should_revalidate(const struct udpif *udpif, uint64_t packets,
     return false;
 }
 
+/*
+ * 是否需要 revalidate
+ *
+ * 1. 是否需要 revalidate
+ * 2. 初始化 ukey->xcache
+ * 3. ukey 对应的 mask 和 wc 是否一致
+ *
+ * ukey->xcache :
+ * 1. 如果 ukey->xcache != NULL & ukey->reval_seq == udpif->reval_seq : 用 f->stats 初始化 ukey->xcache
+ * 2. 如果 ukey->reval_seq != udpif->reval_seq : 清空 ukey->xcache
+ * 3. 如果 ukey->xcache != NULL & ukey->reval_seq == udpif->reval_seq : 初始化 ukey->xcache
+ *
+ *
+ */
 static bool
 revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
                 const struct dpif_flow_stats *stats, uint64_t reval_seq)
@@ -1882,7 +2036,7 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
                     ? stats->n_bytes - ukey->stats.n_bytes
                     : 0);
 
-    //如果 ukey->reval_seq!= udpif->reval_seq 并且从上次到现在处理的包的数量小于 5 个.
+    //如果 ukey->reval_seq != udpif->reval_seq 并且从上次到现在处理的包的数量小于 5 个.
     if (need_revalidate && last_used
         && !should_revalidate(udpif, push.n_packets, last_used)) {
         ok = false;
@@ -1908,7 +2062,7 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
     }
 
     /*
-    * 遍历 ukey->key 并解析 ukey->key 的每一个元素初始化 flow
+    * 解析 ukey->key 初始化 flow
     */
     if (odp_flow_key_to_flow(ukey->key, ukey->key_len, &flow)
         == ODP_FIT_ERROR) {
@@ -2017,6 +2171,7 @@ delete_op_init__(struct udpif *udpif, struct ukey_op *op,
     op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
 }
 
+//将删除 ukey 对应的 flow 的操作加入 ops 中
 static void
 delete_op_init(struct udpif *udpif, struct ukey_op *op, struct udpif_key *ukey)
 {
@@ -2030,6 +2185,13 @@ delete_op_init(struct udpif *udpif, struct ukey_op *op, struct udpif_key *ukey)
     op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
 }
 
+/*
+* 遍历 opsp 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(dpif, ops, chunk)
+* 立即应用从开始到当前索引的所有操作. 并将内核应答初始化 ops[i]->u.{type}.stats]
+*
+* 1. 根据 ops[i].key 找到 flow
+* 2. 根据内核应答的 stats 和 flow 初始化 xlate_in 对象
+*/
 static void
 push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 {
@@ -2040,6 +2202,10 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
     for (i = 0; i < n_ops; i++) {
         opsp[i] = &ops[i].dop;
     }
+    /*
+    * 遍历 opsp 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(dpif, ops, chunk)
+    * 立即应用从开始到当前索引的所有操作.并将内核应答初始化 ops[i]->u.{type}.stats]
+    */
     dpif_operate(udpif->dpif, opsp, n_ops);
 
     for (i = 0; i < n_ops; i++) {
@@ -2049,6 +2215,7 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
         stats = op->dop.u.flow_del.stats;
         push = &push_buf;
 
+        //获取应答 stats 初始化 push_buf
         if (op->ukey) {
             ovs_mutex_lock(&op->ukey->mutex);
             push->used = MAX(stats->used, op->ukey->stats.used);
@@ -2060,6 +2227,7 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
             push = stats;
         }
 
+        //根据 stats 和 op->ukey 生成的 flow 初始化 xlate_in 对象
         if (push->n_packets || netflow_exists()) {
             const struct nlattr *key = op->dop.u.flow_del.key;
             size_t key_len = op->dop.u.flow_del.key_len;
@@ -2081,11 +2249,21 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
                 key_len = op->ukey->key_len;
             }
 
+            //如果 op->ukey 不为 NULL, 用 op->ukey->key 初始化 flow.
+            //否则用 op->dop.u.flow_del.key 初始化 op->ukey->key
             if (odp_flow_key_to_flow(key, key_len, &flow)
                 == ODP_FIT_ERROR) {
                 continue;
             }
 
+            /*
+             *
+             * 在 xcfg 中找 flow->in_port.odp_port 对应的 xport, 初始化 ofprotop, netflow, ofp_in_port
+             *
+             * 1. udpif->backer->odp_to_ofport_map->buckets[hash_ofp_port(flow->in_port.odp_port)] 中有 flow->in_port.odp_port 存在, 返回 port
+             * 2. port 在 xcfg->xports 中存在, 返回对应 xport
+             *
+             */
             error = xlate_lookup(udpif->backer, &flow, &ofproto, NULL, NULL,
                                  &netflow, &ofp_in_port);
             if (!error) {
@@ -2095,6 +2273,7 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
                               push->tcp_flags, NULL, NULL, NULL);
                 xin.resubmit_stats = push->n_packets ? push : NULL;
                 xin.may_learn = push->n_packets > 0;
+                //TODO
                 xlate_actions_for_side_effects(&xin);
 
                 if (netflow) {
@@ -2105,14 +2284,30 @@ push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
     }
 }
 
+/*
+* 遍历 ops 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(dpif, ops, chunk)
+* 立即应用从开始到当前索引的所有操作. 并将内核的应答初始化 ops[i]->u.{type}.stats]
+*
+* 1. 根据 ops[i].key 找到 flow
+* 2. 根据内核应答的 stats 和 flow 初始化 xlate_in 对象
+* 3. 从 umap 中删除 ops 中的所有元素
+*/
 static void
 push_ukey_ops(struct udpif *udpif, struct umap *umap,
               struct ukey_op *ops, size_t n_ops)
 {
     int i;
 
+    /*
+    * 遍历 ops 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(dpif, ops, chunk)
+    * 立即应用从开始到当前索引的所有操作. 并将内核的应答初始化 ops[i]->u.{type}.stats]
+    *
+    * 1. 根据 ops[i].key 找到 flow
+    * 2. 根据内核应答的 stats 和 flow 初始化 xlate_in 对象
+    */
     push_ukey_ops__(udpif, ops, n_ops);
     ovs_mutex_lock(&umap->mutex);
+    //从 umap 中删除 ops 中的所有元素
     for (i = 0; i < n_ops; i++) {
         ukey_delete(umap, ops[i].ukey);
     }
@@ -2131,6 +2326,27 @@ log_unexpected_flow(const struct dpif_flow *flow, int error)
     VLOG_WARN_RL(&rl, "%s", ds_cstr(&ds));
 }
 
+/*
+ * 从 dump_thread->dump->nl_dump->sock->fd 中接收数据保存在 flows 中, 遍历 flows 中每个元素 flow,
+ * 如果 flow 对应的 ukey 在 udpif->ukey 中, 对其加锁,
+ * 如果 flow 对应的 ukey 不在 udpif->ukey 中, 创建对应的 ukey, 并对其加锁
+ *
+ * 1. 如果该 flow 是否被 dump 过, 跳过.
+ * 2. 是否需要保存该 flow
+ * 3. 标记该 ukey 被 dump 过
+ * 4. 将需要删除的 flow 加入 ops
+ *
+ * 最后将 ops 中需要删除的 flow 发送给内核
+ *
+ * NOTE:
+ * flow 是否需要被保存:
+ *  1. udpif->n_flows > 2*udpif->flow_limit
+ *  2. ukey->used < now-max_idle( udpif->n_flows > udpif->flow_limit ? 100 : 20000)
+ *  3. ukey->reval_seq != revalidator->udpif->reval_seq && ukey->stats->used && (udpif->dump_duration > 200 && 从上一次revalidat 到现在处理小于 5 个包)
+ *
+ * flow 是否被 dump 过:
+ *  1. ukey->dump_seq = revalidator->udpif->dump_seq
+ */
 static void
 revalidate(struct revalidator *revalidator)
 {
@@ -2142,6 +2358,13 @@ revalidate(struct revalidator *revalidator)
     dump_seq = seq_read(udpif->dump_seq);
     reval_seq = seq_read(udpif->reval_seq);
     atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+    /*
+    * 初始化一个线程对象 thread, 返回线程对象所在的 thread->up
+    * thread->up->dpif = dump->up->dpif
+    * thread->dump = dump
+    * thread->nl_flows = malloc(NL_DUMP_BUFSIZE)
+    * thread->nl_actions = NULL
+    */
     dump_thread = dpif_flow_dump_thread_create(udpif->dump);
     for (;;) {
         struct ukey_op ops[REVALIDATE_MAX_BATCH];
@@ -2156,6 +2379,14 @@ revalidate(struct revalidator *revalidator)
         size_t n_dp_flows;
         bool kill_them_all;
 
+        /*
+         * 从 dump_thread->dump->nl_dump->sock->fd 中接收数据保存在 flows 中, 直到遇到错误或收到 ARRAY_SIZE(flows) 个 flow
+         * 返回 flows 收的的流表数量
+         * NOTE:
+         * flows 中 flow 的数量可能小于 max_flow
+         * 如果遇到 flow 没有 actions 重新从内核中查询.
+         *
+         */
         n_dumped = dpif_flow_dump_next(dump_thread, flows, ARRAY_SIZE(flows));
         if (!n_dumped) {
             break;
@@ -2175,6 +2406,12 @@ revalidate(struct revalidator *revalidator)
          *       measure.  (We reassess this condition for the next batch of
          *       datapath flows, so we will recover before all the flows are
          *       gone.) */
+        /*
+         * 获取 udpif 关联的流表的数量
+         *
+         * 如果 udpif->n_flows_mutex 被锁, 从 udpif->dpif->stats 中获取
+         * 否则直接从 upif->n_flows
+         */
         n_dp_flows = udpif_get_n_flows(udpif);
         kill_them_all = n_dp_flows > flow_limit * 2;
         max_idle = n_dp_flows > flow_limit ? 100 : ofproto_max_idle;
@@ -2185,6 +2422,13 @@ revalidate(struct revalidator *revalidator)
             bool already_dumped, keep;
             int error;
 
+            /*
+             * 将 udpif->ukeys 中 f->ufid 对应的 ukey 加锁
+             *
+             * 在 udpif->ukeys[get_ufid_hash(flow->ufid) % N_UMAPS].cmap 中查找 ukey->udif = flow->ufid 的 ukey
+             * 如果找到, 尝试对 ukey->mutex 加锁, result 指向找到的 udpif_key 对象
+             * 如果没有找到, 创建一个 udpif_key 对象 ukey, 用 flow 初始化 ukey, result 指向创建的 udpif_key 对象, 并将 ukey 加入 udpif->ukeys 中,对 ukey->mutex 加锁.
+             */
             if (ukey_acquire(udpif, f, &ukey, &error)) {
                 if (error == EBUSY) {
                     /* Another thread is processing this flow, so don't bother
@@ -2199,6 +2443,7 @@ revalidate(struct revalidator *revalidator)
                 continue;
             }
 
+            //如果已经 dump 过, 继续下一条 flow
             already_dumped = ukey->dump_seq == dump_seq;
             if (already_dumped) {
                 /* The flow has already been handled during this flow dump
@@ -2215,20 +2460,24 @@ revalidate(struct revalidator *revalidator)
             if (!used) {
                 used = ukey->created;
             }
+            //保持 flow 的条件
             if (kill_them_all || (used && used < now - max_idle)) {
                 keep = false;
             } else {
+                //TODO
                 keep = revalidate_ukey(udpif, ukey, &f->stats, reval_seq);
             }
             ukey->dump_seq = dump_seq;
             ukey->flow_exists = keep;
 
             if (!keep) {
+                //将删除 ukey 对应的 flow 的操作加入 ops 中
                 delete_op_init(udpif, &ops[n_ops++], ukey);
             }
             ovs_mutex_unlock(&ukey->mutex);
         }
 
+        //将ops 中需要删除流表的操作发送给内核
         if (n_ops) {
             push_ukey_ops__(udpif, ops, n_ops);
         }
@@ -2238,9 +2487,8 @@ revalidate(struct revalidator *revalidator)
 }
 
 /*
- *
- *
- *
+ * 是否应该处理不匹配的 revalidation
+ * TODO
  */
 static bool
 handle_missed_revalidation(struct udpif *udpif, uint64_t reval_seq,
@@ -2259,6 +2507,12 @@ handle_missed_revalidation(struct udpif *udpif, uint64_t reval_seq,
     return keep;
 }
 
+/*
+ * @revalidator : 每一个线程一个 revalidator, 总 n_revalidators
+ * @purge : 如果为 true, udpif->ukeys 中与 revalidator 关联的 ukey 都删除
+ *
+ * 向内核发送消息, 将 udpif->ukeys 中与 revalidator 关联的满足一定条件的 ukey 删除
+ */
 static void
 revalidator_sweep__(struct revalidator *revalidator, bool purge)
 {
@@ -2279,6 +2533,14 @@ revalidator_sweep__(struct revalidator *revalidator, bool purge)
         struct umap *umap = &udpif->ukeys[i];
         size_t n_ops = 0;
 
+        /*
+        * 遍历umap 的所有元素 ukey, 如果 ukey 存在但是已经不满足条件[1], 将删除 ukey 的值加入 ops
+        * 当 ops 达到最大索引就发送删除
+        *
+        * 条件[1]:
+        * ukey->dump_seq != revalidator->updif->dump_seq && ukey->reval_seq != revalidator->udpif->reval_seq
+        * && 还没有处理 revalidation.
+        */
         CMAP_FOR_EACH(ukey, cmap_node, &umap->cmap) {
             bool flow_exists, seq_mismatch;
 
@@ -2299,8 +2561,26 @@ revalidator_sweep__(struct revalidator *revalidator, bool purge)
                                                        ukey)))) {
                 struct ukey_op *op = &ops[n_ops++];
 
+                /*
+                 * op->ukey = ukey;
+                 * op->dop.type = DPIF_OP_FLOW_DEL;
+                 * op->dop.u.flow_del.key = ukey->key;
+                 * op->dop.u.flow_del.key_len = ukey->key_len;
+                 * op->dop.u.flow_del.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
+                 * op->dop.u.flow_del.pmd_id = ukey->pmd_id;
+                 * op->dop.u.flow_del.stats = &op->stats;
+                 * op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
+                 */
                 delete_op_init(udpif, op, ukey);
                 if (n_ops == REVALIDATE_MAX_BATCH) {
+                    /*
+                    * 遍历 opsp 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 udpif->dpif->dpif_operate>operate(dpif, ops, chunk)
+                    * 立即应用从开始到当前索引的所有操作. 并将内核应答初始化 ops[i]->u.{type}.stats]
+                    *
+                    * 1. 根据 ops[i].key 找到 flow
+                    * 2. 根据内核应答的 stats 和 flow 初始化 xlate_in 对象
+                    * 3. 从 umap 中删除 ops 中的所有元素
+                    */
                     push_ukey_ops(udpif, umap, ops, n_ops);
                     n_ops = 0;
                 }
@@ -2318,18 +2598,40 @@ revalidator_sweep__(struct revalidator *revalidator, bool purge)
     }
 }
 
+/*
+ * @revalidator : 每一个线程一个 revalidator, 总 n_revalidators
+ *
+ * 向内核发送消息, 将 udpif->ukeys 中与 revalidator 关联的满足一定条件的 ukey 删除
+ */
 static void
 revalidator_sweep(struct revalidator *revalidator)
 {
     revalidator_sweep__(revalidator, false);
 }
 
+/*
+ * @revalidator : 每一个线程一个 revalidator, 总 n_revalidators
+ *
+ * 向内核发送消息, 将 udpif->ukeys 中与 revalidator 关联的满足一定条件的 ukey 删除
+ */
 static void
 revalidator_purge(struct revalidator *revalidator)
 {
     revalidator_sweep__(revalidator, true);
 }
 
+
+/*
+ * 将所有的 dpif 信息应答给客户端
+ *
+ * udpif->dpif->name
+ * udpif->n_flows
+ * udpif->avg_n_flows
+ * udpif->max_n_flows
+ * udpif->dump_duration
+ * udpif->ufid_enabled
+ * udpif->revalidators[i]->id : key 数量 {i = [0, n_revalidators)}
+ */
 static void
 upcall_unixctl_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
                     const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
@@ -2377,6 +2679,8 @@ upcall_unixctl_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
  *
  * This command is only needed for advanced debugging, so it's not
  * documented in the man page. */
+
+//设置 enable_megaflows 为 false
 static void
 upcall_unixctl_disable_megaflows(struct unixctl_conn *conn,
                                  int argc OVS_UNUSED,
@@ -2392,6 +2696,8 @@ upcall_unixctl_disable_megaflows(struct unixctl_conn *conn,
  *
  * This command is only needed for advanced debugging, so it's not
  * documented in the man page. */
+
+//设置 enable_megaflows 为 true
 static void
 upcall_unixctl_enable_megaflows(struct unixctl_conn *conn,
                                 int argc OVS_UNUSED,
@@ -2407,6 +2713,7 @@ upcall_unixctl_enable_megaflows(struct unixctl_conn *conn,
  *
  * This command is only needed for advanced debugging, so it's not
  * documented in the man page. */
+//设置 enable_ufid = false
 static void
 upcall_unixctl_disable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
                            const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
@@ -2419,6 +2726,7 @@ upcall_unixctl_disable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
  *
  * This command is only needed for advanced debugging, so it's not documented
  * in the man page. */
+//设置 enable_ufid = true
 static void
 upcall_unixctl_enable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
                           const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
@@ -2432,6 +2740,7 @@ upcall_unixctl_enable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
  *
  * This command is only needed for advanced debugging, so it's not
  * documented in the man page. */
+// 设置 all_udpifs 中每一个 dpif 的 flow_limit
 static void
 upcall_unixctl_set_flow_limit(struct unixctl_conn *conn,
                               int argc OVS_UNUSED,
@@ -2450,6 +2759,10 @@ upcall_unixctl_set_flow_limit(struct unixctl_conn *conn,
     ds_destroy(&ds);
 }
 
+/*
+ * 如果 all_udpifs 只有一个元素, 对应的 udpif 增加一个 conns
+ * 否则返回 错误消息
+ */
 static void
 upcall_unixctl_dump_wait(struct unixctl_conn *conn,
                          int argc OVS_UNUSED,
@@ -2470,6 +2783,10 @@ upcall_unixctl_dump_wait(struct unixctl_conn *conn,
     }
 }
 
+/*
+ * all_udpifs 的每一个 udpif 下的 revalidators 每一个元素 revalidators[i], 向内核发送消息, 将 udpif->ukeys 中与 revalidator 关联的满足一定条件的 ukey 删除
+ *
+ */
 static void
 upcall_unixctl_purge(struct unixctl_conn *conn, int argc OVS_UNUSED,
                      const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)

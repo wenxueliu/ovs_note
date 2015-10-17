@@ -1056,6 +1056,9 @@ dpif_probe_feature(struct dpif *dpif, const char *name,
     }
 
     ofpbuf_use_stack(&reply, &stub, sizeof stub);
+    /*
+     * 向内核查询流表, 保持在 flow.
+     */
     error = dpif_flow_get(dpif, key->data, key->size, ufid,
                           PMD_ID_NULL, &reply, &flow);
     if (!error
@@ -1075,6 +1078,9 @@ dpif_probe_feature(struct dpif *dpif, const char *name,
 }
 
 /* A dpif_operate() wrapper for performing a single DPIF_OP_FLOW_GET. */
+/*
+ * 向内核查询流表, 保持在 flow.
+ */
 int
 dpif_flow_get(struct dpif *dpif,
               const struct nlattr *key, size_t key_len, const ovs_u128 *ufid,
@@ -1187,6 +1193,13 @@ dpif_flow_dump_destroy(struct dpif_flow_dump *dump)
 }
 
 /* Returns new thread-local state for use with dpif_flow_dump_next(). */
+/*
+ * 初始化一个线程对象 thread, 返回线程对象所在的 thread->up
+ * thread->up->dpif = dump->up->dpif
+ * thread->dump = dump
+ * thread->nl_flows = malloc(NL_DUMP_BUFSIZE)
+ * thread->nl_actions = NULL
+ */
 struct dpif_flow_dump_thread *
 dpif_flow_dump_thread_create(struct dpif_flow_dump *dump)
 {
@@ -1218,6 +1231,19 @@ dpif_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
  * that it remains accessible and unchanged until the first of:
  *  - The next call to dpif_flow_dump_next() for 'thread', or
  *  - The next rcu quiescent period. */
+/*
+ * @thread_ :
+ * @flows   : 保持从 thread->dump->nl_dump->sock->fd 中收到的数据
+ * @max_flows : 期望最多的 flows 的大小, 如果 flows 中 flow 的数量大于 max_flows 退出
+ *
+ * 从 thread->dump->nl_dump->sock->fd 中收数据保持保存在 flows 中, 直到遇到错误或收到 max_flows 个 flow
+ * 返回 flows 收的的流表数量
+ *
+ * NOTE:
+ * flows 中 flow 的数量可能小于 max_flow
+ * 如果遇到 flow 没有 actions 重新从内核中查询.
+ *
+ */
 int
 dpif_flow_dump_next(struct dpif_flow_dump_thread *thread,
                     struct dpif_flow *flows, int max_flows)
@@ -1360,6 +1386,10 @@ dpif_execute(struct dpif *dpif, struct dpif_execute *execute)
  * which they are specified.  Places each operation's results in the "output"
  * members documented in comments, and 0 in the 'error' member on success or a
  * positive errno on failure. */
+/*
+ * 遍历 ops 所有元素 op, 如果 op 类型为 DPIF_OP_EXECUTE 就将 dpif->dpif_operate>operate(dpif, ops, chunk)
+ * 立即应用从开始到当前索引的所有操作. 并将内核应答初始化 ops[i]->u.{type}.stats]
+ */
 void
 dpif_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
 {
@@ -1383,6 +1413,11 @@ dpif_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
              * handle itself, without help. */
             size_t i;
 
+            /*
+             * 1. 遍历 ops 的每个元素 ops[i], 根据 ops[i]->type 转换为对应的 ofpbuf, 并存入 txnsp
+             * 2. 将 txnp 中的所有请求一次发送给内核, 并接受内核的应答.
+             * 3. 解析内核的应答初始化 ops[i]->u.{type}.stats
+             */
             dpif->dpif_class->operate(dpif, ops, chunk);
 
             for (i = 0; i < chunk; i++) {
