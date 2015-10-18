@@ -645,6 +645,9 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
 /* Must be called (only) by an ofproto implementation in its constructor
  * function.  See the large comment on 'construct' in struct ofproto_class for
  * details. */
+/*
+ * 初始化 n_tables 条 ofproto->tables
+ */
 void
 ofproto_init_tables(struct ofproto *ofproto, int n_tables)
 {
@@ -4552,6 +4555,16 @@ get_conjunctions(const struct ofputil_flow_mod *fm,
  * be reverted.
  *
  * The caller retains ownership of 'fm->ofpacts'. */
+/*
+ * 1. 检查 fm->table_id 的合法性
+ * 2. 计算合适的 table_id
+ * 3. 根据 table_id 找到 table(ofproto->tables[table_id])
+ * 4. 检查 fm->flags 和 table->flags 的一致性
+ *
+ * TODO
+ *
+ */
+
 static enum ofperr
 add_flow_start(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
     OVS_REQUIRES(ofproto_mutex)
@@ -7619,10 +7632,16 @@ eviction_group_add_rule(struct rule *rule)
 /* oftables. */
 
 /* Initializes 'table'. */
+/*
+ * 初始化 table
+ *
+ * 没有显示初始化 flags, name, eviction_fields, n_eviction_fields, eviction_group_id_basis, eviction
+ */
 static void
 oftable_init(struct oftable *table)
 {
     memset(table, 0, sizeof *table);
+    //TODO
     classifier_init(&table->cls, flow_segment_u64s);
     table->max_flows = UINT_MAX;
     table->n_flows = 0;
@@ -7630,6 +7649,7 @@ oftable_init(struct oftable *table)
     heap_init(&table->eviction_groups_by_size);
     atomic_init(&table->miss_config, OFPUTIL_TABLE_MISS_DEFAULT);
 
+    //TODO
     classifier_set_prefix_fields(&table->cls, default_prefix_fields,
                                  ARRAY_SIZE(default_prefix_fields));
 

@@ -558,10 +558,27 @@ type_run(const char *type)
     }
 
 
+/*
+ * 如果 type == netdev
+ *
+ * 从 dpif 定位到所属的 dp_netdev 对象 dp
+ * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
+ * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+ * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+ *
+ * 如果 type == system
+ * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+ */
     if (dpif_run(backer->dpif)) {
         backer->need_revalidate = REV_RECONFIGURE;
     }
 
+    /*
+    * 如果 backer->udpif->dump_seq 与 backer->udpif->conn_seq 不一致, 注销所有的 struct unixctl_conn conn
+    */
     udpif_run(backer->udpif);
 
     /* If vswitchd started with other_config:flow_restore_wait set as "true",
@@ -904,9 +921,16 @@ static void check_support(struct dpif_backer *backer);
  * @type: 目前为 system, netdev
  * @backerp : all_dpif_backers 中 type 对应的 dpif_backer
  *
- * 如果 all_dpif_backers 存在 type, 对其中的 backer 引用计数加 1, 返回
- * 如果 all_dpif_backers 不存在 type, 创建 backer 并初始化 backer
+ * 获取 type 的 dpif_backer. backerp 指向该 dpif_backer
  *
+ * 具体为:
+ *
+ * 1.
+ * 如果 all_dpif_backers 存在 type, 对其中的 backer 引用计数加 1, 返回
+ * 如果 all_dpif_backers 不存在 type, 确保 name, type 对应的 datapath 已经存在于在内核和用户空间中, 创建 backer 并初始化 backer 并将其加入 all_dpif_backers 中, 用 backer, backer->dpif 创建并初始化 udpif, 将其加入 all_udpifs.
+ * 2. 将 backer-dpif 中不在初始化配置的所有端口删除
+ *
+ * 其中名称为 "ovs-"{type}
  * backer->dpif : type 对应的 dpif_class, 目前为 dpif_netlink_dp, dpif_netdev
  * backer->udpif : udpif_create(backer, backer->dpif)
  * backer->type : type
@@ -948,15 +972,26 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
 
     /* Remove any existing datapaths, since we assume we're the only
      * userspace controlling the datapath. */
+    /*
+     * 如果 type = system
+     * 1. 查询内核的所有 dpif_netlink_dp, 将其 name 加入 names
+     * 2. 遍历 names 每一个元素, 向内核发送创建名为 name 的 datapath 的消息, 并用内核应答初始化一个 dpif_netlink 对象. old_dpif 指向该对象
+     * 如果 type = netdev
+     * 1. 将 dpif_classes 中 type 对应的 dpif_class 的 name 加入 names
+     * 2. 在 dp_netdevs 中创建 name 对应的 dp_netdev 对象, 并初始化, old_dpif 指向该对象
+     *
+     */
     sset_init(&names);
     /*
     * @type  : 目前为 system 或 netdev
-    * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name. type=netdev, 包含 dp_netdev 的 name
+    * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name. dp_netdevs 中 type 对应的 dp_netdev 的 name
     *
-    * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
-    * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
+    * 1. 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+    * 2. 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
     *
-    * NOTE: 实际调用 dpif_netlink_class->enumerate 或 dpif_netdev_class->enumerate
+    * NOTE: 实际调用
+    * dpif_netdev_class->enumerate : 将 dp_netdevs 中 dpif_class = registered_dpif_class 的 dpif_class->name 加入 names
+    * dpif_netlink_class->enumerate : 查询内核的所有 dpif_netlink_dp, 将其 name 加入 names
     */
     dp_enumerate_names(type, &names);
     SSET_FOR_EACH(name, &names) {
@@ -968,12 +1003,14 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
         }
 
         /*
-        * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
-        * (
-        * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
-        * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
-        * )
-        */
+         * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
+         *
+         * NOTE
+         * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp) : 向内核发送创建 datapath 的消息, 并用内核应答初始化一个 dpif_netlink 对象. dpifp 指向该对象
+         * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netdev_class,name,false,dpifp) : 在 dp_netdevs 中创建 name 对应的 dp_netdev 对象, 并初始化, dpifp 指向该对象
+         *
+         * 详细见 do_open
+         */
         if (dpif_open(name, type, &old_dpif)) {
             VLOG_WARN("couldn't open old datapath %s to remove it", name);
         } else {
@@ -983,6 +1020,7 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     }
     sset_destroy(&names);
 
+    //至此确保 name, type 对应的 datapath 已经存在于在内核和用户空间中
     backer = xmalloc(sizeof *backer);
 
     /*
@@ -1030,7 +1068,7 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     }
     dpif_port_dump_done(&port_dump);
 
-    //将 garbage_list 中的端口从 backer-dpif
+    //将 garbage_list 中的端口从 backer-dpif 删除
     LIST_FOR_EACH_POP (garbage, list_node, &garbage_list) {
         dpif_port_del(backer->dpif, garbage->odp_port);
         free(garbage);
@@ -1043,9 +1081,15 @@ open_dpif_backer(const char *type, struct dpif_backer **backerp)
     check_support(backer);
     atomic_count_init(&backer->tnl_count, 0);
 
-    //backer->recv_set_enable 只是限制 dpif_netlink 是否接受内核的消息
-    //如果为 false, dpif_netlink 将删除所有的 channel
-    //如果为 false, dpif_netdev 什么也不做
+    /*
+     * 如果 backer->dpif->dpif_class = dpif_netlink_class
+     *     如果 enable = true; dpif->handlers != NULL, 返回 0
+     *     如果 enable = true; dpif->handlers = NULL, 刷新所有的 channels
+     *     如果 enable = false; dpif->handlers = NULL, 返回 0
+     *     如果 enable = false; dpif->handlers != NULL, 删除所有 channels
+     * 如果 backer->dpif->dpif_class = dpif_netdev_class
+     * 　　什么也不做
+     */
     error = dpif_recv_set(backer->dpif, backer->recv_set_enable);
     if (error) {
         VLOG_ERR("failed to listen on datapath of type %s: %s",
@@ -1322,10 +1366,12 @@ check_support(struct dpif_backer *backer)
 }
 
 /*
+ * 初始化 ofproto_ 所属的 ofproto_dpif 对象
  *
- *
- *
- *
+ * 2. 遍历 init_ofp_ports 中元素 node, 如果 node->name 在 ofproto->backer->dpif 中,
+ * 将其从 init_ofp_ports 中删除之后, 加入 ofproto->ports
+ * 3. 初始化流表 255 个
+ * 4. TODO
  */
 static int
 construct(struct ofproto *ofproto_)
@@ -1337,6 +1383,16 @@ construct(struct ofproto *ofproto_)
     /* Tunnel module can get used right after the udpif threads are running. */
     ofproto_tunnel_init();
 
+    /*
+     * 获取 ofproto->up.type 的 struct dpif_backer 对象(如果不存在就创建). ofproto->backer 指向该 dpif_backer
+     *
+     * 具体为:
+     *
+     * 1.
+     * 如果 all_dpif_backers 存在 type, 对其中的 backer 引用计数加 1, 返回
+     * 如果 all_dpif_backers 不存在 type, 确保 name, type 对应的 datapath 已经存在于在内核和用户空间中, 创建 backer 并初始化 backer 并将其加入 all_dpif_backers 中, 用 backer, backer->dpif 创建并初始化 udpif, 将其加入 all_udpifs.
+     * 2. 将 backer-dpif 中不在初始化配置的所有端口删除
+     */
     error = open_dpif_backer(ofproto->up.type, &ofproto->backer);
     if (error) {
         return error;
@@ -1372,6 +1428,8 @@ construct(struct ofproto *ofproto_)
     ofproto->pins_seqno = seq_read(ofproto->pins_seq);
 
 
+    //遍历 init_ofp_ports 中元素 node, 如果 node->name 在 ofproto->backer->dpif　中,
+    //将其从 init_ofp_ports 中删除之后, 加入 ofproto->ports
     SHASH_FOR_EACH_SAFE (node, next, &init_ofp_ports) {
         struct iface_hint *iface_hint = node->data;
 
@@ -1392,14 +1450,24 @@ construct(struct ofproto *ofproto_)
                 hash_string(ofproto->up.name, 0));
     memset(&ofproto->stats, 0, sizeof ofproto->stats);
 
+    /*
+    * 初始化 n_tables 条 ofproto->tables
+    */
     ofproto_init_tables(ofproto_, N_TABLES);
+    //TODO
     error = add_internal_flows(ofproto);
 
+    //初始化 ofproto_->tables[TBL_INTERNAL]->flags
     ofproto->up.tables[TBL_INTERNAL].flags = OFTABLE_HIDDEN | OFTABLE_READONLY;
 
     return error;
 }
 
+/*
+ *
+ *
+ *
+ */
 static int
 add_internal_miss_flow(struct ofproto_dpif *ofproto, int id,
                   const struct ofpbuf *ofpacts, struct rule_dpif **rulep)
@@ -1418,6 +1486,13 @@ add_internal_miss_flow(struct ofproto_dpif *ofproto, int id,
     return error;
 }
 
+/*
+ * TODO
+ *
+ *
+ *
+ *
+ */
 static int
 add_internal_flows(struct ofproto_dpif *ofproto)
 {
@@ -5598,6 +5673,9 @@ odp_port_to_ofp_port(const struct ofproto_dpif *ofproto, odp_port_t odp_port)
     }
 }
 
+/*
+ * TODO
+ */
 int
 ofproto_dpif_add_internal_flow(struct ofproto_dpif *ofproto,
                                const struct match *match, int priority,

@@ -495,10 +495,11 @@ exit:
  * to the datapath in '*dpifp', otherwise a null pointer. */
 /*
  * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
- * (
- * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp)
- * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp)
- * )
+ *
+ * NOTE
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp) : 向内核发送创建 datapath 的消息, 并用内核应答初始化一个 dpif_netlink 对象. dpifp 指向该对象
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp) : 在 dp_netdevs 中创建 name 对应的 dp_netdev 对象, 并初始化, dpifp 指向该对象
+ *
  * 详细见 do_open
  */
 int

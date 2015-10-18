@@ -720,7 +720,7 @@ dpif_netdev_init(void)
     return 0;
 }
 
-//从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 保存在 all_dps 中
+//从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 all_dps 中
 static int
 dpif_netdev_enumerate(struct sset *all_dps,
                       const struct dpif_class *dpif_class)
@@ -876,7 +876,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
  * 如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
  * 如果 name 在 dp_netdevs 并且 dp->class = class && create = false,  返回 0
  * 如果 name 在 dp_netdevs 并且 dp->class != class,  返回 EINVAL
- * 如果 name 不在 dp_netdevs 并且 create = true, dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
+ * 如果 name 不在 dp_netdevs 并且 create = true, dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpifp 指向新的 dp_netdev
  * 如果 name 不在 dp_netdevs 并且 create = false, 返回 ENODEV
  */
 static int
@@ -2637,8 +2637,9 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
     struct dp_packet *packets[NETDEV_MAX_BURST];
     int error, cnt;
 
+    //pmd->last_cycles = cycles_counter();
     cycles_count_start(pmd);
-    //将 rxq 中的数据保存在 packets 中, 其中 cnt 是包数
+    //将 rxq 中的数据保存在 packets 中, 其中 cnt 是包数, 成功返回 0
     error = netdev_rxq_recv(rxq, packets, &cnt);
     cycles_count_end(pmd, PMD_CYCLES_POLLING);
     if (!error) {
@@ -2650,6 +2651,8 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
         //每个包的元数据中 in_port.odp_port = port->port_no
         /* XXX: initialize md in netdev implementation. */
         for (i = 0; i < cnt; i++) {
+            //packets[i]->md->tunnel.ip_dst = 0;
+            //packets[i]->md->in_port.odp_port = port->port_no;
             pkt_metadata_init(&packets[i]->md, port->port_no);
         }
         cycles_count_start(pmd);
@@ -2675,7 +2678,6 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
 /* Return true if needs to revalidate datapath flows. */
 
 /*
- *
  * 从 dpif 定位到所属的 dp_netdev 对象 dp
  * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
  * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
@@ -2690,12 +2692,12 @@ dpif_netdev_run(struct dpif *dpif)
     struct dp_netdev_port *port;
     struct dp_netdev *dp = get_dp_netdev(dpif);
     /*
-    * 从 dp 和 NON_PMD_CORE_ID 定位到 dp_netdev_pmd_thread
-    * 1. 从 dp->poll_threads 中根据 NON_PMD_CORE_ID 找到 cmap_node 对象 pnode,
-    * 2. 从 pnode 定位到对应的 dp_netdev_pmd_thread 对象 pmd.
-    * 3. 如果 pmd->ref_cnt->count 是非 0, 增加 ++pmd->ref_cnt->count 返回 true,
-    * 否则 返回 NULL
-    */
+     * 从 dp 和 NON_PMD_CORE_ID 定位到 dp_netdev_pmd_thread
+     * 1. 从 dp->poll_threads 中根据 NON_PMD_CORE_ID 找到 cmap_node 对象 pnode,
+     * 2. 从 pnode 定位到对应的 dp_netdev_pmd_thread 对象 pmd.
+     * 3. 如果 pmd->ref_cnt->count 是非 0, 增加 ++pmd->ref_cnt->count 返回 true,
+     * 否则 返回 NULL
+     */
     struct dp_netdev_pmd_thread *non_pmd = dp_netdev_get_pmd(dp,
                                                              NON_PMD_CORE_ID);
     uint64_t new_tnl_seq;
@@ -2707,6 +2709,19 @@ dpif_netdev_run(struct dpif *dpif)
             int i;
 
             for (i = 0; i < netdev_n_rxq(port->netdev); i++) {
+                /*
+                * @non_pmd : 线程 poll module driver
+                * @port: 端口
+                * @port->rxq[i] : 接受队列
+                *
+                * 将 port->rxq[i] 中的数据保存在 packets 中.  遍历 packets 每一元素 packet,
+                * 1. 查找出 packets[i] 提取 key 在 pmd->flow_cache 是否存在对应的 flow:
+                * 如果存在, 并且 flow->batch 不为 null, 将 packets[i] 加入 flow->batch 并更新 flow->batch
+                * 如果存在, 并且 flow->batch 为 null, 将 flow  加入 batches
+                * 如果不存在, 将 packets[i] 提取的 key 加入 keys
+                * 2. 对应 1 中的 keys(没有找到匹配的 flow ). 从 pmd->cls 中查找, 如果找到加入 pmd->flow_cache
+                *    如果没有找到调用 upcall, 并 upcall 指定的 actions 执行对应的 actions. 之后递归重新查找。
+                */
                 dp_netdev_process_rxq_port(non_pmd, port, port->rxq[i]);
             }
         }
@@ -3309,6 +3324,7 @@ packet_batch_execute(struct packet_batch *batch,
     dp_netdev_flow_used(flow, batch->packet_count, batch->byte_count,
                         batch->tcp_flags, now);
 
+    //actions = flow->actions
     actions = dp_netdev_flow_get_actions(flow);
 
     dp_netdev_execute_actions(pmd, batch->packets, batch->packet_count, true,
@@ -3603,7 +3619,7 @@ dp_netdev_input(struct dp_netdev_pmd_thread *pmd,
 #endif
     //没有找到 packets[i] 对应的 key　不在 pmd->flow_cache 列表
     struct netdev_flow_key keys[PKT_ARRAY_SIZE];
-    //pmd->flow_cache 中有对应的 flow, 但是 flow->batches = null, 加入 batches
+    //pmd->flow_cache 中有对应的 flow, 但是 flow->batch = null, 加入 batches
     struct packet_batch batches[PKT_ARRAY_SIZE];
     long long now = time_msec();
     size_t newcnt, n_batches, i;

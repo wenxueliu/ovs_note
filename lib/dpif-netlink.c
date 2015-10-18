@@ -324,7 +324,7 @@ dpif_netlink_open(const struct dpif_class *class OVS_UNUSED, const char *name,
     dp_request.user_features |= OVS_DP_F_VPORT_PIDS;
     /*
     *
-    * 由 dp_request 构造 NETLINK_GENERIC 协议消息, 发送请求, 并将 应答保持在 buf 中, 将应答解析为 dpif_netlink_dp 保持在 dp 中
+    * 由 dp_request 构造 NETLINK_GENERIC 协议消息, 发送请求, 并将应答保持在 buf 中, 将应答解析为 dpif_netlink_dp 保持在 dp 中
     *
     * 1. 由 dp_request 构造 NETLINK 消息.
     * 2. 如果 NETLINK_GENERIC 在 pools 中存在, 找到对应的 sock
@@ -865,6 +865,13 @@ dpif_netlink_run(struct dpif *dpif_)
     if (dpif->refresh_channels) {
         dpif->refresh_channels = false;
         fat_rwlock_wrlock(&dpif->upcall_lock);
+        /*
+        * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+        *
+        * 1. 如果 dpif->n_handlers != n_handlers, 销毁已经存在的 channels, 重新初始化 dpif 的 n_handlers 个 handler
+        * 2. 置 dpif 每个 handler 的 event_offset n_events 为 0
+        * 3. 遍历内核所有端口, 设置端口的 upcall_pids, 删除不在用的 channel
+        */
         dpif_netlink_refresh_channels(dpif, dpif->n_handlers);
         fat_rwlock_unlock(&dpif->upcall_lock);
     }
@@ -3227,7 +3234,7 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
  * @enable : 是否接受数据包
  *
  * 如果 enable = true; dpif->handlers != NULL, 返回 0
- * 如果 enable = true; dpif->handlers = NULL,  TODO
+ * 如果 enable = true; dpif->handlers = NULL, 刷新所有的 channels
  * 如果 enable = false; dpif->handlers = NULL, 返回 0
  * 如果 enable = false; dpif->handlers != NULL, 删除所有 channels
  *
