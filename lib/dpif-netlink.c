@@ -1400,7 +1400,7 @@ dpif_netlink_port_get_pid(const struct dpif *dpif_, odp_port_t port_no,
 }
 
 /*
- * 由 flow 构造 Netlink 消息发送给内核
+ * 由 flow 构造 Netlink 消息发送给内核, 请求删除所有流表
  *
  * 1. 由 flow 构造 genl Netlink 消息, 保存在 request_buf 中
  * 2. 将 request_buf 包装到 transaction 中通过 NETLINK_GENERIC 协议发送给内核, 如果 bufp 不为 NULL, 将应答信息保持在 bufp
@@ -1688,12 +1688,17 @@ dpif_netlink_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
 }
 
 /*
- * 如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
- * 否则 循环接收消息, 当收到端口新增, 删除, 改变的消息时, 返回 0.
- * 当端口被删除的时候, refresh_channels = true
- *
  * @dpif :
  * @devnamep : 被改变, 创建, 或删除的端口的名称
+ * @return  : ENOBUFS, dpif->port_notifier = NULL; 接受 dpif->port_notifier 出现错误, EAGAIN 中断信息; 0 接受消息成功, 端口发生变化
+ *
+ * 从 dpif_ 定位到 dpif_netlink
+ * 如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
+ * 否则非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0
+ *
+ * NOTE:
+ * 当端口被删除的时候, refresh_channels = true
+ *
  *
  */
 static int
@@ -1724,6 +1729,7 @@ dpif_netlink_port_poll(const struct dpif *dpif_, char **devnamep)
         return ENOBUFS;
     }
 
+    //非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0
     for (;;) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         uint64_t buf_stub[4096 / 8];
@@ -1733,7 +1739,7 @@ dpif_netlink_port_poll(const struct dpif *dpif_, char **devnamep)
         ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
 
         /*
-        * 阻塞地接受 sock->fd 消息保存在 buf
+        * 非阻塞地接受 sock->fd 消息保存在 buf
         *
         * 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
         *

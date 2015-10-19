@@ -525,6 +525,10 @@ static void process_dpif_port_change(struct dpif_backer *,
                                      const char *devname);
 static void process_dpif_port_error(struct dpif_backer *, int error);
 
+/*
+ * 如果 name 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中. 返回 ofproto_dpif
+ * TODO :　如果多个 ofproto 满足条件, 只返回第一个 ?
+ */
 static struct ofproto_dpif *
 lookup_ofproto_dpif_by_port_name(const char *name)
 {
@@ -540,10 +544,7 @@ lookup_ofproto_dpif_by_port_name(const char *name)
 }
 
 /*
- *
- *
- *
- *
+ * TODO
  */
 static int
 type_run(const char *type)
@@ -557,21 +558,20 @@ type_run(const char *type)
         return 0;
     }
 
-
-/*
- * 如果 type == netdev
- *
- * 从 dpif 定位到所属的 dp_netdev 对象 dp
- * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
- * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
- * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
- * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
- * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
- * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
- *
- * 如果 type == system
- * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
- */
+    /*
+    * 如果 type == netdev
+    *
+    * 从 backer->dpif 定位到所属的 dp_netdev 对象 dp
+    * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
+    * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+    * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+    * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+    * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+    * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+    *
+    * 如果 type == system
+    * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+    */
     if (dpif_run(backer->dpif)) {
         backer->need_revalidate = REV_RECONFIGURE;
     }
@@ -589,24 +589,46 @@ type_run(const char *type)
 
         backer->recv_set_enable = true;
 
+        /*
+         * type = "system"
+         * 刷新 backer->dpif->handlers 中所有的 channel
+         *
+         * type = "netdev"
+         * 什么也不做
+         */
         error = dpif_recv_set(backer->dpif, backer->recv_set_enable);
         if (error) {
             VLOG_ERR("Failed to enable receiving packets in dpif.");
             return error;
         }
+        /*
+         * type="system": 向内核发送消息, 请求删除 backer->dpif 对应 dpif_netlink 的 dp_ifindex 中所有流表
+         * type="netdev": 删除 bakcer->dpif 对应 dp_netdev 下 poll_threads 每个线程 pmd 下的 flow_table
+         */
         dpif_flow_flush(backer->dpif);
         backer->need_revalidate = REV_RECONFIGURE;
     }
 
     if (backer->recv_set_enable) {
+        /*
+        * 如果 n_handlers 与之前的配置不一样, 先删除所有的 handler, 设置之后, 重新创建并初始化
+        * 其中 n_handlers 还包括 dpif_netlink->n_handlers
+        * 注: 会停止所有的 handlers 线程
+        */
         udpif_set_threads(backer->udpif, n_handlers, n_revalidators);
     }
 
+    /*
+     * type = "system" : 什么也不做
+     * type = "netdev" : 如果 dp->n_dpdk_rxqs 或 dp->pmd_cmask 与 n_rxqs 与 cmask 不同, 删除 dp->poll_threads 所有元素之后重新初始化
+     */
     dpif_poll_threads_set(backer->dpif, n_dpdk_rxqs, pmd_cpu_mask);
 
+    //遍历 all_ofproto_dpifs 找到与 backer 匹配的 ofproto, 重新配置 tunnel, 并删除不在使用的端口对应的元素
     if (backer->need_revalidate) {
         struct ofproto_dpif *ofproto;
         struct simap_node *node;
+        //保持不再使用的 port
         struct simap tmp_backers;
 
         /* Handle tunnel garbage collection. */
@@ -620,6 +642,7 @@ type_run(const char *type)
                 continue;
             }
 
+            //重新配置 tunnel
             HMAP_FOR_EACH (iter, up.hmap_node, &ofproto->up.ports) {
                 char namebuf[NETDEV_VPORT_NAME_BUFSIZE];
                 const char *dp_port;
@@ -628,6 +651,10 @@ type_run(const char *type)
                     continue;
                 }
 
+                //如果 dp_port 对应 netdev 存在与 tmp_backers, 从 tmp_backers 中删除, 加入 backer->tnl_backers
+                //如果 dp_port 对应 netdev 不存在与 tmp_backers, 也不存在于 backer->tnl_backers, 加入 backer->tnl_backers
+                //如果 dp_port 对应 netdev 不存在与 tmp_backers, 存在于 backer->tnl_backers, 重置 iter->odp_port 为 node->data
+                //从 tmp_backers 中删除, 加入 backer->tnl_backers
                 dp_port = netdev_vport_get_dpif_port(iter->up.netdev,
                                                      namebuf, sizeof namebuf);
                 node = simap_find(&tmp_backers, dp_port);
@@ -658,6 +685,7 @@ type_run(const char *type)
             }
         }
 
+        //删除 backer->dpif 中无用的 port
         SIMAP_FOR_EACH (node, &tmp_backers) {
             dpif_port_del(backer->dpif, u32_to_odp(node->data));
         }
@@ -675,6 +703,7 @@ type_run(const char *type)
         }
         backer->need_revalidate = 0;
 
+        //用 all_ofproto_dpifs 重新配置 cfgp
         HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_node, &all_ofproto_dpifs) {
             struct ofport_dpif *ofport;
             struct ofbundle *bundle;
@@ -683,7 +712,13 @@ type_run(const char *type)
                 continue;
             }
 
+            /*
+            * 将 cfgp 拷贝给 new_xcfg
+            */
             xlate_txn_start();
+            /*
+             * new_xcfg->xbridges 加入 ofproto 对应的 xbridge, 如果不存在就创建对应的 xbridge. 将 xbridge 加入 new_xcfg->xbridges, 并用其他参数初始化 xbridge
+             */
             xlate_ofproto_set(ofproto, ofproto->up.name,
                               ofproto->backer->dpif, ofproto->ml,
                               ofproto->stp, ofproto->rstp, ofproto->ms,
@@ -694,6 +729,9 @@ type_run(const char *type)
                               &ofproto->backer->support);
 
             HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
+                /*
+                 * 在 new_xcfg 中查找 ofbundle 对应的 xbundle, 如果没有找到就创建之. 将 xbundle 加入 new_xcfg->xbundles, 并用其他参数初始化 xbundle
+                 */
                 xlate_bundle_set(ofproto, bundle, bundle->name,
                                  bundle->vlan_mode, bundle->vlan,
                                  bundle->trunks, bundle->use_priority_tags,
@@ -705,6 +743,9 @@ type_run(const char *type)
                 int stp_port = ofport->stp_port
                     ? stp_port_no(ofport->stp_port)
                     : -1;
+                /*
+                * 在 new_xcfg->xports 中查找 ofport 对应的 xport. 找不到创建之, 将 xport 加入 new_xcfg->xports, 并用其他参数初始化 xport
+                */
                 xlate_ofport_set(ofproto, ofport->bundle, ofport,
                                  ofport->up.ofp_port, ofport->odp_port,
                                  ofport->up.netdev, ofport->cfm, ofport->bfd,
@@ -717,15 +758,22 @@ type_run(const char *type)
             xlate_txn_commit();
         }
 
+        //通知 backer->udpif->reval_seq 改变了. 唤醒等待 backer->udpif->reval_seq 的线程
+        //wait() : seq_wait(udpif_dump_seq(ofproto->backer->udpif), ofproto->dump_seq);
         udpif_revalidate(backer->udpif);
     }
-
+    /*
+    * 等待 bakcer->dpif 端口变化, 如果没有变化, 直接返回, 发生变化, 处理变化
+    */
     process_dpif_port_changes(backer);
 
     return 0;
 }
 
 /* Check for and handle port changes in 'backer''s dpif. */
+/*
+ * 等待 bakcer->dpif 端口变化, 如果没有变化, 直接返回, 发生变化, 处理变化
+ */
 static void
 process_dpif_port_changes(struct dpif_backer *backer)
 {
@@ -733,27 +781,62 @@ process_dpif_port_changes(struct dpif_backer *backer)
         char *devname;
         int error;
 
+        /*
+        *
+        * dpif->type:"system" :
+        *     如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
+        *     否则非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0, 返回错误
+        *     返回只能是 EAGAIN, ENOBUFS, 0
+        *     NOTE:devnamep : 被改变, 创建, 或删除的端口的名称/
+        * dpif->type:"netdev" :
+        *     从 dpif 定位到 dpif_netdev, 读取 dpif_netdev->dp->port_seq
+        *     如果 dpif_netdev->last_port_seq != dpif_netdev->dp->port_seq 返回 ENOBUFS
+        *     如果 dpif_netdev->last_port_seq == dpif_netdev->dp->port_seq 返回 EAGAIN
+        *     NOTE:devnamep : 没有用到, 保持原参数
+        *
+        * 返回 ENOBUFS, EAGAIN, 0
+        */
         error = dpif_port_poll(backer->dpif, &devname);
         switch (error) {
+        //端口没有变化
         case EAGAIN:
             return;
 
+        //dpif_netdev 发生端口改变
         case ENOBUFS:
             process_dpif_all_ports_changed(backer);
             break;
 
+        //dpif_netlink 发生端口改变
         case 0:
             process_dpif_port_change(backer, devname);
             free(devname);
             break;
 
+        //其他错误, 目前不会出现
         default:
+            /*
+            * 清空 backer 对应 ofproto 的 port_poll_set
+            */
             process_dpif_port_error(backer, error);
             break;
         }
     }
 }
 
+/*
+ * 从 all_ofproto_dpifs 和 backer->dpif 获取所有对应 dpif 的端口的名称, TODO
+ *
+ *
+ * 正确理解该函数需要理清 ofproto->ports ofproto->ports.port_by_name ofproto->up.ports, ofproto->backer->dpif ofproto->port_poll_set 的关系
+ *
+ * ofproto->up.ports, ofproto->backer->dpif 中的端口,
+ * 如果不在任一 ofproto->ports 中, 在 ofproto->backer->dpif 中, 从 ofproto->backer->dpif 中删除
+ * 如果不在某一 ofproto->ports 中, 不在 ofproto->backer->dpif 中, 加入 ofproto->port_poll_set 什么也不做
+ * 如果在某一 ofproto->ports 中, 不在 ofproto->backer->dpif 中, 加入 ofproto->port_poll_set
+ * 如果在某一 ofproto->ports 中, 在 ofproto->backer->dpif 中, 在 ofproto->ports.port_by_name, 但与 ofproto->backer->dpif 端口, ofproto->backer->dpif 的端口不在 backer->odp_to_ofport_map 中, 删掉重新添加
+ * 其他什么也不做
+ */
 static void
 process_dpif_all_ports_changed(struct dpif_backer *backer)
 {
@@ -763,6 +846,7 @@ process_dpif_all_ports_changed(struct dpif_backer *backer)
     struct sset devnames;
     const char *devname;
 
+    //从 all_ofproto_dpifs 获取对应的 backer 对应的 ofproto 的 up.ports 的设备名加入 devnames
     sset_init(&devnames);
     HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_node, &all_ofproto_dpifs) {
         if (ofproto->backer == backer) {
@@ -773,16 +857,36 @@ process_dpif_all_ports_changed(struct dpif_backer *backer)
             }
         }
     }
+    //从 backer->dpif 定位 dp_netdev, 将 dp_netdev->ports 的名字加入 devnames
     DPIF_PORT_FOR_EACH (&dpif_port, &dump, backer->dpif) {
         sset_add(&devnames, dpif_port.name);
     }
 
     SSET_FOR_EACH (devname, &devnames) {
+        /*
+         * 如果 devname 与 backer->dpif->base_name 冲突, 直接返回
+         * 如果在 tnl_backers 中, 直接返回
+         * 1. 不存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 不存在于 backer->dpif 中, 什么也不做.
+         * 2. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 不存在于 backer->dpif 中, 增加到 ofproto->port_poll_set
+         * 3. 不存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 从 backer->dpif 中删除
+         * 4. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 不存在与 ofport->up.port_by_name 中, 什么也不做
+         * 5. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 存在与 ofport->up.port_by_name 中, 并且端口号不一致, 从backer->odp_to_ofport_map 中删除, 更正后重新添加到  backer->odp_to_ofport_map 中
+         */
         process_dpif_port_change(backer, devname);
     }
     sset_destroy(&devnames);
 }
 
+/*
+ * @backer  :
+ * @devname : 端口名
+ *
+ * 1. 不存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 不存在于 backer->dpif 中, 什么也不做.
+ * 2. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 不存在于 backer->dpif 中, 增加到 ofproto->port_poll_set
+ * 3. 不存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 从 backer->dpif 中删除
+ * 4. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 不存在与 ofport->up.port_by_name 中, 什么也不做
+ * 5. 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中, 存在于 backer->dpif 中, 存在与 ofport->up.port_by_name 中, 并且端口号不一致, 从backer->odp_to_ofport_map 中删除, 更正后重新添加到  backer->odp_to_ofport_map 中
+ */
 static void
 process_dpif_port_change(struct dpif_backer *backer, const char *devname)
 {
@@ -790,10 +894,12 @@ process_dpif_port_change(struct dpif_backer *backer, const char *devname)
     struct dpif_port port;
 
     /* Don't report on the datapath's device. */
+    //如果 devname 与 backer->dpif->base_name 冲突, 直接返回
     if (!strcmp(devname, dpif_base_name(backer->dpif))) {
         return;
     }
 
+    //如果在 tnl_backers 中, 直接返回
     HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_node,
                    &all_ofproto_dpifs) {
         if (simap_contains(&ofproto->backer->tnl_backers, devname)) {
@@ -801,7 +907,22 @@ process_dpif_port_change(struct dpif_backer *backer, const char *devname)
         }
     }
 
+    /*
+     * 如果 devname 存在于 all_ofproto_dpifs 下某一 ofproto_dpif 的 ports 中. 返回 ofproto_dpif
+     */
     ofproto = lookup_ofproto_dpif_by_port_name(devname);
+    /*
+     * 1. 找到 devname 对应的 port
+     *  type="system":
+     *      向内核发送获取 backer->dpif 中 port_no 的消息. 如果 port != NULL, port 保持了找到的端口对象
+     *  type="netdev":
+     *      由 backer->dpif 定位到 dp_netdev, 从 dp_netdev->ports 中找到 dp_netdev->ports[i]->netdev->name = devname 的 port, 并返回 0. 如果没有找到返回错误代码
+     *
+     * 2. 如果 ofproto != NULL, ofproto->port_poll_errno != ENOBUFS, 将 devname 加入 ofproto->port_poll_set, 设置 ofproto->port_poll_errno = 0
+     *    如果 ofproto != NULL, ofproto->port_poll_errno == ENOBUFS, backer->odp_to_ofport_map 中删除 devname 在 ofproto->up.port_by_name 的 ofport, 重置后再添加
+     *    如果 ofproto == NULL, ofproto->port_poll_errno != ENOBUFS, port 从 backer->dpif 中删除
+     *    如果 ofproto == NULL, ofproto->port_poll_errno == ENOBUFS, port 从 backer->dpif 中删除
+     */
     if (dpif_port_query_by_name(backer->dpif, devname, &port)) {
         /* The port was removed.  If we know the datapath,
          * report it through poll_set().  If we don't, it may be
@@ -841,6 +962,9 @@ process_dpif_port_change(struct dpif_backer *backer, const char *devname)
 }
 
 /* Propagate 'error' to all ofprotos based on 'backer'. */
+/*
+ * 清空 backer 对应 ofproto 的 port_poll_set
+ */
 static void
 process_dpif_port_error(struct dpif_backer *backer, int error)
 {
@@ -1607,7 +1731,11 @@ destruct(struct ofproto *ofproto_)
 
 /*
  * 核心实现
- *
+ * 1. 将 ofproto->pins 的所有包发送给控制器
+ * 2. 运行 netflow, sflow, ipfix, boundle, stp, rstp, mac_learn, mcast_snooping, ofboundle
+ * 3. 遍历 ofproto->up.ports 的每一个端口, 调用　port_run(ofport)
+ * 4. 删除过期流表
+ * 5. boundle 重平衡
  */
 static int
 run(struct ofproto *ofproto_)
@@ -3457,6 +3585,10 @@ ofport_update_peer(struct ofport_dpif *ofport)
     free(peer_name);
 }
 
+/*
+ * 设置 ofport
+ * TODO
+ */
 static void
 port_run(struct ofport_dpif *ofport)
 {
@@ -3762,6 +3894,9 @@ port_is_lacp_current(const struct ofport *ofport_)
 
 /* If 'rule' is an OpenFlow rule, that has expired according to OpenFlow rules,
  * then delete it entirely. */
+/*
+ * 先检查 hard_timeout, 再检查 idle_timeout, 如果任一满足条件删除流表
+ */
 static void
 rule_expire(struct rule_dpif *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -3800,6 +3935,9 @@ rule_expire(struct rule_dpif *rule)
 
     if (reason >= 0) {
         COVERAGE_INC(ofproto_dpif_expired);
+        /*
+        * 将 rule 加入 rule_collection, 然后删除
+        */
         ofproto_rule_expire(&rule->up, reason);
     }
 }

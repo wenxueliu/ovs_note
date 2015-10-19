@@ -6066,6 +6066,10 @@ ofpact_bitmap_format(uint64_t ofpacts_bitmap, struct ds *s)
 }
 
 /* Returns true if 'action' outputs to 'port', false otherwise. */
+/*
+ * 如果 ofpact->type = OFPACT_OUTPUT, 并且 ofpact->port = port 或 ofpact->type = OFPACT_ENQUEUE, 并且 ofpact->port = port
+ * 返回 true, 否则返回 false
+ */
 static bool
 ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
 {
@@ -6129,6 +6133,9 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
 
 /* Returns true if any action in the 'ofpacts_len' bytes of 'ofpacts' outputs
  * to 'port', false otherwise. */
+/*
+ * 如果 ofpacts 中有 OFPACT_OUTPUT 或 OFPACT_ENQUEUE 且端口与 port 一直, 返回 true
+ */
 bool
 ofpacts_output_to_port(const struct ofpact *ofpacts, size_t ofpacts_len,
                        ofp_port_t port)
@@ -6136,6 +6143,10 @@ ofpacts_output_to_port(const struct ofpact *ofpacts, size_t ofpacts_len,
     const struct ofpact *a;
 
     OFPACT_FOR_EACH (a, ofpacts, ofpacts_len) {
+        /*
+         * 如果 ofpact->type = OFPACT_OUTPUT, 并且 ofpact->port = port 或 ofpact->type = OFPACT_ENQUEUE, 并且 ofpact->port = port
+         * 返回 true, 否则返回 false
+         */
         if (ofpact_outputs_to_port(a, port)) {
             return true;
         }

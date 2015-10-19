@@ -446,6 +446,7 @@ struct xlate_cfg {
  * 类似内核 RCU 读写锁, 类似写时复制
  */
 static OVSRCU_TYPE(struct xlate_cfg *) xcfgp = OVSRCU_INITIALIZER(NULL);
+//在配置改变时, 保存临时配置
 static struct xlate_cfg *new_xcfg = NULL;
 
 static bool may_receive(const struct xport *, struct xlate_ctx *);
@@ -545,6 +546,7 @@ xlate_report_actions(struct xlate_ctx *ctx, const char *title,
     }
 }
 
+//将 xbridge 加入 xcfg
 static void
 xlate_xbridge_init(struct xlate_cfg *xcfg, struct xbridge *xbridge)
 {
@@ -554,6 +556,9 @@ xlate_xbridge_init(struct xlate_cfg *xcfg, struct xbridge *xbridge)
                 hash_pointer(xbridge->ofproto, 0));
 }
 
+/*
+ * 将 xbundle 加入 xcfg->xbundles
+ */
 static void
 xlate_xbundle_init(struct xlate_cfg *xcfg, struct xbundle *xbundle)
 {
@@ -563,6 +568,7 @@ xlate_xbundle_init(struct xlate_cfg *xcfg, struct xbundle *xbundle)
                 hash_pointer(xbundle->ofbundle, 0));
 }
 
+//将 xport 加入 xcfg->xport
 static void
 xlate_xport_init(struct xlate_cfg *xcfg, struct xport *xport)
 {
@@ -573,6 +579,7 @@ xlate_xport_init(struct xlate_cfg *xcfg, struct xport *xport)
                 hash_ofp_port(xport->ofp_port));
 }
 
+//用参数 xbridge 后面参数设置 xbridge
 static void
 xlate_xbridge_set(struct xbridge *xbridge,
                   struct dpif *dpif,
@@ -631,6 +638,7 @@ xlate_xbridge_set(struct xbridge *xbridge,
     xbridge->support = *support;
 }
 
+//用后面参数初始化 xbundle
 static void
 xlate_xbundle_set(struct xbundle *xbundle,
                   enum port_vlan_mode vlan_mode, int vlan,
@@ -657,6 +665,7 @@ xlate_xbundle_set(struct xbundle *xbundle,
     }
 }
 
+//其他参数初始化 xport
 static void
 xlate_xport_set(struct xport *xport, odp_port_t odp_port,
                 const struct netdev *netdev, const struct cfm *cfm,
@@ -698,6 +707,9 @@ xlate_xport_set(struct xport *xport, odp_port_t odp_port,
     }
 }
 
+/*
+ * 将 xbridge 拷贝给 new_xbridge, 并将 new_xbridge 加入 new_cfg
+ */
 static void
 xlate_xbridge_copy(struct xbridge *xbridge)
 {
@@ -812,6 +824,9 @@ xlate_txn_commit(void)
 /* Copies the current xlate configuration in xcfgp to new_xcfg.
  *
  * This needs to be called prior to editing the xlate configuration. */
+/*
+ * 将 cfgp 拷贝给 new_xcfg
+ */
 void
 xlate_txn_start(void)
 {
@@ -831,6 +846,9 @@ xlate_txn_start(void)
     }
 
     HMAP_FOR_EACH (xbridge, hmap_node, &xcfg->xbridges) {
+        /*
+        * 将 xbridge 拷贝给 new_xbridge, 并将 new_xbridge 加入 new_cfg
+        */
         xlate_xbridge_copy(xbridge);
     }
 }
@@ -855,6 +873,9 @@ xlate_xcfg_free(struct xlate_cfg *xcfg)
     free(xcfg);
 }
 
+/*
+ * new_xcfg->xbridges 加入 ofproto 对应的 xbridge, 如果不存在就创建对应的 xbridge. 将 xbridge 加入 new_xcfg->xbridges, 并用其他参数初始化 xbridge
+ */
 void
 xlate_ofproto_set(struct ofproto_dpif *ofproto, const char *name,
                   struct dpif *dpif,
@@ -871,17 +892,22 @@ xlate_ofproto_set(struct ofproto_dpif *ofproto, const char *name,
 
     ovs_assert(new_xcfg);
 
+    /*
+    * 在 xcfg->xbridges 中找到 ofproto_dpif 对应的 xbridge. 找不到返回 NULL
+    */
     xbridge = xbridge_lookup(new_xcfg, ofproto);
     if (!xbridge) {
         xbridge = xzalloc(sizeof *xbridge);
         xbridge->ofproto = ofproto;
 
+        //将 xbridge 加入 new_xcfg
         xlate_xbridge_init(new_xcfg, xbridge);
     }
 
     free(xbridge->name);
     xbridge->name = xstrdup(name);
 
+    //用参数 xbridge 后面参数设置 xbridge
     xlate_xbridge_set(xbridge, dpif, ml, stp, rstp, ms, mbridge, sflow, ipfix,
                       netflow, forward_bpdu, has_in_band, support);
 }
@@ -928,6 +954,9 @@ xlate_remove_ofproto(struct ofproto_dpif *ofproto)
     xlate_xbridge_remove(new_xcfg, xbridge);
 }
 
+/*
+ * 在 new_xcfg 中查找 ofbundle 对应的 xbundle, 如果没有找到就创建之. 将 xbundle 加入 new_xcfg->xbundles, 并用其他参数初始化 xbundle
+ */
 void
 xlate_bundle_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
                  const char *name, enum port_vlan_mode vlan_mode, int vlan,
@@ -939,18 +968,25 @@ xlate_bundle_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
 
     ovs_assert(new_xcfg);
 
+    /*
+    * new_xcfg->xbundle 中查找 ofbundle 对应的 xbundle, 找不到返回 NULL
+    */
     xbundle = xbundle_lookup(new_xcfg, ofbundle);
     if (!xbundle) {
         xbundle = xzalloc(sizeof *xbundle);
         xbundle->ofbundle = ofbundle;
         xbundle->xbridge = xbridge_lookup(new_xcfg, ofproto);
 
+        /*
+        * new_xcfg->xbundles 加入 xbundle
+        */
         xlate_xbundle_init(new_xcfg, xbundle);
     }
 
     free(xbundle->name);
     xbundle->name = xstrdup(name);
 
+    //用后面参数初始化 xbundle
     xlate_xbundle_set(xbundle, vlan_mode, vlan, trunks,
                       use_priority_tags, bond, lacp, floodable);
 }
@@ -987,6 +1023,9 @@ xlate_bundle_remove(struct ofbundle *ofbundle)
     xlate_xbundle_remove(new_xcfg, xbundle);
 }
 
+/*
+ * 在 new_xcfg->xports 中查找 ofport 对应的 xport. 找不到创建之, 将 xport 加入 new_xcfg->xports, 并用其他参数初始化 xport
+ */
 void
 xlate_ofport_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
                  struct ofport_dpif *ofport, ofp_port_t ofp_port,
@@ -1004,6 +1043,9 @@ xlate_ofport_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
 
     ovs_assert(new_xcfg);
 
+    /*
+    * 在 new_xcfg->xports 中查找 ofport 对应的 xport. 找不到返回 NULL
+    */
     xport = xport_lookup(new_xcfg, ofport);
     if (!xport) {
         xport = xzalloc(sizeof *xport);
@@ -1011,11 +1053,13 @@ xlate_ofport_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
         xport->xbridge = xbridge_lookup(new_xcfg, ofproto);
         xport->ofp_port = ofp_port;
 
+        //将 xport 加入 new_xcfg->xport
         xlate_xport_init(new_xcfg, xport);
     }
 
     ovs_assert(xport->ofp_port == ofp_port);
 
+    //其他参数初始化 xport
     xlate_xport_set(xport, odp_port, netdev, cfm, bfd, lldp,
                     stp_port_no, rstp_port, config, state, is_tunnel,
                     may_enable);
@@ -1041,6 +1085,11 @@ xlate_ofport_set(struct ofproto_dpif *ofproto, struct ofbundle *ofbundle,
         struct skb_priority_to_dscp *pdscp;
         uint32_t skb_priority;
 
+        /*
+         * type = "netdev" : 设置 skb_priority = qdscp_list[i].queue
+         * type = "system" : if  qdscp_list[i].queue < 0xf000, skb_priority =  0x00010000 + qdscp_list[i].queue + 1, 否则 skb_priority = 0
+         * 返回 skb_priority
+         */
         if (dpif_queue_to_priority(xport->xbridge->dpif, qdscp_list[i].queue,
                                    &skb_priority)) {
             continue;
@@ -1209,6 +1258,9 @@ xlate_lookup(const struct dpif_backer *backer, const struct flow *flow,
     return 0;
 }
 
+/*
+ * 在 xcfg->xbridges 中找到 ofproto_dpif 对应的 xbridge. 找不到返回 NULL
+ */
 static struct xbridge *
 xbridge_lookup(struct xlate_cfg *xcfg, const struct ofproto_dpif *ofproto)
 {
@@ -1230,6 +1282,9 @@ xbridge_lookup(struct xlate_cfg *xcfg, const struct ofproto_dpif *ofproto)
     return NULL;
 }
 
+/*
+ * xcfg->xbundle 中查找 ofbundle 对应的 xbundle, 找不到返回 NULL
+ */
 static struct xbundle *
 xbundle_lookup(struct xlate_cfg *xcfg, const struct ofbundle *ofbundle)
 {
@@ -1251,6 +1306,9 @@ xbundle_lookup(struct xlate_cfg *xcfg, const struct ofbundle *ofbundle)
     return NULL;
 }
 
+/*
+ * 在 xcfg->xports 中查找 ofport 对应的 xport. 找不到返回 NULL
+ */
 static struct xport *
 xport_lookup(struct xlate_cfg *xcfg, const struct ofport_dpif *ofport)
 {

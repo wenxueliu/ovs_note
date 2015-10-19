@@ -288,6 +288,9 @@ cls_rule_is_catchall(const struct cls_rule *rule)
  * actually removed via ovsrcu_postpone().
  *
  * 'rule_' must be in a classifier. */
+/*
+ * 将 rule->cls_match->remove_version = remove_version
+ */
 void
 cls_rule_make_invisible_in_version(const struct cls_rule *rule,
                                    cls_version_t remove_version)
@@ -1461,6 +1464,7 @@ classifier_rule_overlaps(const struct classifier *cls,
  * commands and by OpenFlow 1.0 aggregate and flow stats.
  *
  * Ignores rule->priority. */
+//rule 是 criteria 的子集
 bool
 cls_rule_is_loose_match(const struct cls_rule *rule,
                         const struct minimatch *criteria)

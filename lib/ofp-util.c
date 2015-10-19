@@ -6013,6 +6013,7 @@ ofputil_encode_flow_monitor_cancel(uint32_t id)
     return msg;
 }
 
+//将 OFPRAW_NXST_FLOW_MONITOR_REPLY 的 msg 加入 replies
 void
 ofputil_start_flow_update(struct ovs_list *replies)
 {

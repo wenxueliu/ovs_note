@@ -524,6 +524,7 @@ ofproto_enumerate_names(const char *type, struct sset *names)
     return class ? class->enumerate_names(type, names) : EAFNOSUPPORT;
 }
 
+//ofproto->tables_version += 1
 static void
 ofproto_bump_tables_version(struct ofproto *ofproto)
 {
@@ -1677,11 +1678,9 @@ process_port_change(struct ofproto *ofproto, int error, char *devname)
 }
 
 /*
- * TODO 有误
  * 目前 datapath_type 只能为 system, netdev
  * 调用 ofproto_dpif_class->type_run(datapath_type) 实际调用
- *      dpif_netlink_class->type_run(datapath_type)
- *      dpif_netdev_class->type_run(datapath_type)
+ * TODO
  */
 int
 ofproto_type_run(const char *datapath_type)
@@ -1717,12 +1716,18 @@ ofproto_type_wait(const char *datapath_type)
     }
 }
 
+/*
+ *
+ *
+ *
+ */
 int
 ofproto_run(struct ofproto *p)
 {
     int error;
     uint64_t new_seq;
 
+    //ofproto_dpif_class->run(p)
     error = p->ofproto_class->run(p);
     if (error && error != EAGAIN) {
         VLOG_ERR_RL(&rl, "%s: run failed (%s)", p->name, ovs_strerror(error));
@@ -2813,6 +2818,15 @@ ofproto_rule_destroy__(struct rule *rule)
     rule->ofproto->ofproto_class->rule_dealloc(rule);
 }
 
+/*
+ * ofproto_rule_send_removed(rule)
+ * rule->ofproto->ofproto_class->rule_destruct(rule);
+ * ofproto_rule_destroy__(rule);
+ *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+ *      rule_actions_destroy(rule_get_actions(rule));
+ *      ovs_mutex_destroy(&rule->mutex);
+ *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+ */
 static void
 rule_destroy_cb(struct rule *rule)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -2824,6 +2838,10 @@ rule_destroy_cb(struct rule *rule)
         ofproto_rule_send_removed(rule);
     }
     rule->ofproto->ofproto_class->rule_destruct(rule);
+    //cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+    //rule_actions_destroy(rule_get_actions(rule));
+    //ovs_mutex_destroy(&rule->mutex);
+    //rule->ofproto->ofproto_class->rule_dealloc(rule);
     ofproto_rule_destroy__(rule);
 }
 
@@ -2850,6 +2868,16 @@ ofproto_rule_try_ref(struct rule *rule)
  * Use of RCU allows short term use (between RCU quiescent periods) without
  * keeping a reference.  A reference must be taken if the rule needs to
  * stay around accross the RCU quiescent periods. */
+/*
+ * 如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+ * ofproto_rule_send_removed(rule)
+ * rule->ofproto->ofproto_class->rule_destruct(rule);
+ * ofproto_rule_destroy__(rule);
+ *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+ *      rule_actions_destroy(rule_get_actions(rule));
+ *      ovs_mutex_destroy(&rule->mutex);
+ *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+ */
 void
 ofproto_rule_unref(struct rule *rule)
 {
@@ -2858,6 +2886,19 @@ ofproto_rule_unref(struct rule *rule)
     }
 }
 
+/*
+ *  rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+ *  rule->ofproto->ofproto_class->rule_delete(rule)
+ *
+ *  如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+ *  ofproto_rule_send_removed(rule)
+ *  rule->ofproto->ofproto_class->rule_destruct(rule);
+ *  ofproto_rule_destroy__(rule);
+ *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+ *      rule_actions_destroy(rule_get_actions(rule));
+ *      ovs_mutex_destroy(&rule->mutex);
+ *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+ */
 static void
 remove_rule_rcu__(struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -2870,14 +2911,50 @@ remove_rule_rcu__(struct rule *rule)
         OVS_NOT_REACHED();
     }
     ofproto->ofproto_class->rule_delete(rule);
+    /*
+     * 如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+     * ofproto_rule_send_removed(rule)
+     * rule->ofproto->ofproto_class->rule_destruct(rule);
+     * ofproto_rule_destroy__(rule);
+     *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+     *      rule_actions_destroy(rule_get_actions(rule));
+     *      ovs_mutex_destroy(&rule->mutex);
+     *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+     */
     ofproto_rule_unref(rule);
 }
 
+/*
+ *  rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+ *  rule->ofproto->ofproto_class->rule_delete(rule)
+ *
+ *  如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+ *  ofproto_rule_send_removed(rule)
+ *  rule->ofproto->ofproto_class->rule_destruct(rule);
+ *  ofproto_rule_destroy__(rule);
+ *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+ *      rule_actions_destroy(rule_get_actions(rule));
+ *      ovs_mutex_destroy(&rule->mutex);
+ *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+ */
 static void
 remove_rule_rcu(struct rule *rule)
     OVS_EXCLUDED(ofproto_mutex)
 {
     ovs_mutex_lock(&ofproto_mutex);
+    /*
+     *  rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+     *  rule->ofproto->ofproto_class->rule_delete(rule)
+     *
+     *  如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+     *  ofproto_rule_send_removed(rule)
+     *  rule->ofproto->ofproto_class->rule_destruct(rule);
+     *  ofproto_rule_destroy__(rule);
+     *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+     *      rule_actions_destroy(rule_get_actions(rule));
+     *      ovs_mutex_destroy(&rule->mutex);
+     *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+     */
     remove_rule_rcu__(rule);
     ovs_mutex_unlock(&ofproto_mutex);
 }
@@ -2908,6 +2985,19 @@ remove_rules_rcu(struct rule **rules)
                 bitmap_set1(tables, rule->table_id);
                 classifier_defer(cls);
             }
+            /*
+             *  rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+             *  rule->ofproto->ofproto_class->rule_delete(rule)
+             *
+             *  如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+             *  ofproto_rule_send_removed(rule)
+             *  rule->ofproto->ofproto_class->rule_destruct(rule);
+             *  ofproto_rule_destroy__(rule);
+             *      cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+             *      rule_actions_destroy(rule_get_actions(rule));
+             *      ovs_mutex_destroy(&rule->mutex);
+             *      rule->ofproto->ofproto_class->rule_dealloc(rule);
+             */
             remove_rule_rcu__(rule);
         }
 
@@ -3057,6 +3147,10 @@ hash_learned_cookie(ovs_be64 cookie_, uint8_t table_id)
     return hash_3words(cookie, cookie >> 32, table_id);
 }
 
+/*
+ * TODO
+ *
+ */
 static void
 learned_cookies_update_one__(struct ofproto *ofproto,
                              const struct ofpact_learn *learn,
@@ -3108,6 +3202,11 @@ next_learn_with_delete(const struct rule_actions *actions,
     return NULL;
 }
 
+/*
+ * TODO
+ *
+ *
+ */
 static void
 learned_cookies_update__(struct ofproto *ofproto,
                          const struct rule_actions *actions,
@@ -3132,6 +3231,10 @@ learned_cookies_inc(struct ofproto *ofproto,
     learned_cookies_update__(ofproto, actions, +1, NULL);
 }
 
+/*
+ * TODO
+ *
+ */
 static void
 learned_cookies_dec(struct ofproto *ofproto,
                     const struct rule_actions *actions,
@@ -3756,6 +3859,9 @@ cookies_insert(struct ofproto *ofproto, struct rule *rule)
                   hash_cookie(rule->flow_cookie));
 }
 
+/*
+ * 从 ofproto->cookies 中删除 rule->cookie_node
+ */
 static void
 cookies_remove(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -3975,6 +4081,20 @@ rule_collection_destroy(struct rule_collection *rules)
 }
 
 /* Schedules postponed removal of rules, destroys 'rules'. */
+/*
+ * 遍历 rules 每一个元素
+ *     rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+ *     rule->ofproto->ofproto_class->rule_delete(rule)
+ *
+ *     如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+ *     ofproto_rule_send_removed(rule)
+ *     rule->ofproto->ofproto_class->rule_destruct(rule);
+ *     ofproto_rule_destroy__(rule);
+ *         cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+ *         rule_actions_destroy(rule_get_actions(rule));
+ *         ovs_mutex_destroy(&rule->mutex);
+ *         rule->ofproto->ofproto_class->rule_dealloc(rule);
+ */
 static void
 rule_collection_remove_postponed(struct rule_collection *rules)
     OVS_REQUIRES(ofproto_mutex)
@@ -5074,6 +5194,11 @@ modify_flow_start_strict(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
 
 /* OFPFC_DELETE implementation. */
 
+/*
+ * rules 中的每条 rule:
+ * 1. ofproto->tables[rule->table_id]->n_flows--
+ * 2. rule->cr->cls_match->remove_version = version
+ */
 static void
 delete_flows_start__(struct ofproto *ofproto, cls_version_t version,
                      const struct rule_collection *rules)
@@ -5084,10 +5209,18 @@ delete_flows_start__(struct ofproto *ofproto, cls_version_t version,
         struct oftable *table = &ofproto->tables[rule->table_id];
 
         table->n_flows--;
+        //将 rule->cr->cls_match->remove_version = remove_version
         cls_rule_make_invisible_in_version(&rule->cr, version);
     }
 }
 
+/*
+ * 遍历 rules 每条 rule:
+ * 如果 ofproto->connmgr->ofconn 中存在 ofmonitor 与 rule 匹配,
+ * 满足一定条件的情况下, 将 rule 对应的 ofputil_flow_update 加入 ofconn->updates 中
+ * 释放 rule 相关数据成员内存
+ *
+ */
 static void
 delete_flows_finish__(struct ofproto *ofproto,
                       struct rule_collection *rules,
@@ -5105,15 +5238,44 @@ delete_flows_finish__(struct ofproto *ofproto,
              * before the rule is actually destroyed. */
             rule->removed_reason = reason;
 
+            /*
+            * 遍历 mgr->all_conns 的每一个 ofconn 中
+            *
+            * 如果存在 ofmonitor 与 rule 匹配, 在满足一定条件的情况下, 将 rule 对应的 ofputil_flow_update 加入
+            * ofconn->updates 中
+            *
+            * 满足一定的条件:
+            * 1. ofconn->sent_abbrev_update = false
+            * 2. flags & NXFMF_OWN || ofconn != abbrev_ofconn || ofconn->monitor_paused
+            */
             ofmonitor_report(ofproto->connmgr, rule, NXFME_DELETED, reason,
                              req ? req->ofconn : NULL,
                              req ? req->request->xid : 0, NULL);
+            /*
+            * 释放 rule 的数据成员分配的内存
+            */
             ofproto_rule_remove__(ofproto, rule);
+            //TODO
             learned_cookies_dec(ofproto, rule_get_actions(rule),
                                 &dead_cookies);
         }
+        /*
+         * 遍历 rules 每一个元素
+         *     rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
+         *     rule->ofproto->ofproto_class->rule_delete(rule)
+         *
+         *     如果 rule->ref_count = 1, 调用 rule_destroy_cb(rule) 即
+         *     ofproto_rule_send_removed(rule)
+         *     rule->ofproto->ofproto_class->rule_destruct(rule);
+         *     ofproto_rule_destroy__(rule);
+         *         cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
+         *         rule_actions_destroy(rule_get_actions(rule));
+         *         ovs_mutex_destroy(&rule->mutex);
+         *         rule->ofproto->ofproto_class->rule_dealloc(rule);
+         */
         rule_collection_remove_postponed(rules);
 
+        //TODO
         learned_cookies_flush(ofproto, &dead_cookies);
     }
 }
@@ -5130,9 +5292,22 @@ delete_flows__(struct rule_collection *rules,
     if (rules->n) {
         struct ofproto *ofproto = rules->rules[0]->ofproto;
 
+        /*
+        * rules 中的每条 rule:
+        * 1. ofproto->tables[rule->table_id]->n_flows--
+        * 2. rule->cr->cls_match->remove_version = ofproto->tables_version + 1
+        */
         delete_flows_start__(ofproto, ofproto->tables_version + 1, rules);
+        //ofproto->tables_version += 1
         ofproto_bump_tables_version(ofproto);
+        /*
+         * 遍历 rules 每条 rule:
+         * 如果 ofproto->connmgr->ofconn 中存在 ofmonitor 与 rule 匹配,
+         * 满足一定条件的情况下, 将 rule 对应的 ofputil_flow_update 加入 ofconn->updates 中
+         * 释放 rule 相关数据成员内存
+         */
         delete_flows_finish__(ofproto, rules, reason, req);
+        //TODO
         ofmonitor_flush(ofproto->connmgr);
     }
 }
@@ -5250,6 +5425,9 @@ ofproto_rule_send_removed(struct rule *rule)
  *
  * ofproto implementation ->run() functions should use this function to expire
  * OpenFlow flows. */
+/*
+ * 将 rule 加入 rule_collection, 然后删除
+ */
 void
 ofproto_rule_expire(struct rule *rule, uint8_t reason)
     OVS_REQUIRES(ofproto_mutex)
@@ -7454,6 +7632,10 @@ eviction_group_resized(struct oftable *table, struct eviction_group *evg)
  *   - Removes 'evg' from 'table'.
  *
  *   - Frees 'evg'. */
+/*
+ * 经 evg 从 table->eviction_groups_by_id 和 table->eviction_groups_by_size
+ * 中删除, 将 evg->rules 所属的 rule->eviction_group = NULL, 释放 evg 的堆
+ */
 static void
 eviction_group_destroy(struct oftable *table, struct eviction_group *evg)
     OVS_REQUIRES(ofproto_mutex)
@@ -7471,6 +7653,9 @@ eviction_group_destroy(struct oftable *table, struct eviction_group *evg)
 }
 
 /* Removes 'rule' from its eviction group, if any. */
+/*
+ * 将 rule->evg_node 从 rule->eviction_group 中删除.
+ */
 static void
 eviction_group_remove_rule(struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -7774,14 +7959,23 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
 
 /* Removes 'rule' from the ofproto data structures.  Caller may have deferred
  * the removal from the classifier. */
+/*
+ * 释放 rule 的数据成员分配的内存
+ */
 static void
 ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
 {
     ovs_assert(!rule->removed);
 
+    /*
+    * 从 ofproto->cookies 中删除 rule->cookie_node
+    */
     cookies_remove(ofproto, rule);
 
+    /*
+    * 将 rule->evg_node 从 rule->eviction_group 中删除.
+    */
     eviction_group_remove_rule(rule);
     if (!list_is_empty(&rule->expirable)) {
         list_remove(&rule->expirable);

@@ -1405,6 +1405,9 @@ dpif_netdev_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
     return error;
 }
 
+/*
+ *从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. portp 指向找到的 port
+ */
 static int
 dpif_netdev_port_query_by_name(const struct dpif *dpif, const char *devname,
                                struct dpif_port *dpif_port)
@@ -1414,6 +1417,7 @@ dpif_netdev_port_query_by_name(const struct dpif *dpif, const char *devname,
     int error;
 
     ovs_mutex_lock(&dp->port_mutex);
+    //从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. portp 指向找到的 port
     error = get_port_by_name(dp, devname, &port);
     if (!error && dpif_port) {
         answer_port_query(port, dpif_port);
@@ -2500,6 +2504,7 @@ dpif_netdev_pmd_set(struct dpif *dpif, unsigned int n_rxqs, const char *cmask)
     if (pmd_config_changed(dp, n_rxqs, cmask)) {
         struct dp_netdev_port *port;
 
+        //将 dp->poll_threads 中每一个元素删除
         dp_netdev_destroy_all_pmds(dp);
 
         CMAP_FOR_EACH (port, node, &dp->ports) {

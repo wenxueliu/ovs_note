@@ -793,6 +793,16 @@ dpif_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
  *
  * The caller owns the data in 'port' and must free it with
  * dpif_port_destroy() when it is no longer needed. */
+/*
+ * @dpif ;
+ * @port : 指向找到的 port
+ * @return : 查找到返回 0
+ *
+ *  type="system":
+ *      向内核发送获取 dpif 中 port_no 的消息. 如果 dpif_port != NULL, 将返回的消息保持在 dpif_port
+ *  type="netdev":
+ *      由 dpif 定位到 dp_netdev, 从 dp_netdev->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. 如果没有找到返回错误代码
+ */
 int
 dpif_port_query_by_name(const struct dpif *dpif, const char *devname,
                         struct dpif_port *port)
@@ -950,6 +960,23 @@ dpif_port_dump_done(struct dpif_port_dump *dump)
  * Returns EAGAIN if the set of ports in 'dpif' has not changed.  May also
  * return other positive errno values to indicate that something has gone
  * wrong. */
+/*
+ * @dpif
+ * @devnamep : 
+ * @return : ENOBUFS, EAGAIN, 0
+ *
+ * dpif->type:"system" :
+ *     如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
+ *     否则非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0, 返回错误
+ *     返回只能是 EAGAIN, ENOBUFS, 0
+ *     NOTE:devnamep : 被改变, 创建, 或删除的端口的名称/
+ * dpif->type:"netdev" :
+ *     从 dpif 定位到 dpif_netdev, 读取 dpif_netdev->dp->port_seq
+ *     如果 dpif_netdev->last_port_seq != dpif_netdev->dp->port_seq 返回 ENOBUFS
+ *     如果 dpif_netdev->last_port_seq == dpif_netdev->dp->port_seq 返回 EAGAIN
+ *     NOTE:devnamep : 没有用到, 保持原参数
+ *
+ */
 int
 dpif_port_poll(const struct dpif *dpif, char **devnamep)
 {
@@ -1695,6 +1722,10 @@ dpif_get_netflow_ids(const struct dpif *dpif,
  * value used for setting packet priority.
  * On success, returns 0 and stores the priority into '*priority'.
  * On failure, returns a positive errno value and stores 0 into '*priority'. */
+/*
+ * type = "netdev" : 设置 priority = queue_id
+ * type = "system" : if queue_id < 0xf000, *priority =  0x00010000 + queue_id + 1, 否则 *priority = 0
+ */
 int
 dpif_queue_to_priority(const struct dpif *dpif, uint32_t queue_id,
                        uint32_t *priority)

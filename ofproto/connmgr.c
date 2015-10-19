@@ -2360,6 +2360,16 @@ ofmonitor_destroy(struct ofmonitor *m)
     }
 }
 
+/*
+ * 遍历 mgr->all_conns 的每一个 ofconn 中
+ *
+ * 如果存在 ofmonitor 与 rule 匹配, 在满足一定条件的情况下, 将 rule 对应的 ofputil_flow_update 加入
+ * ofconn->updates 中
+ *
+ * 满足一定的条件:
+ * 1. ofconn->sent_abbrev_update = false
+ * 2. flags & NXFMF_OWN || ofconn != abbrev_ofconn || ofconn->monitor_paused
+ */
 void
 ofmonitor_report(struct connmgr *mgr, struct rule *rule,
                  enum nx_flow_update_event event,
@@ -2399,6 +2409,7 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
         enum nx_flow_monitor_flags flags = 0;
         struct ofmonitor *m;
 
+        //检查 ofconn 是否存在监控 rule 的 ofmonitor
         if (ofconn->monitor_paused) {
             /* Only send NXFME_DELETED notifications for flows that were added
              * before we paused. */
@@ -2408,21 +2419,39 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
             }
         }
 
+        /*
+         * 主要检查 ofconn->monitors 中是否存在与 rule 匹配的元素. 即是否存在监控 rule 事件 event 的 ofmonitor
+         *
+         * 如果 ofconn->monitors 的元素 m
+         *  m->table_id = rule->table_id
+         *  m->out_port = rule->actions 中 OFPACT_OUTPUT 或 OFPACT_ENQUEUE 的端口 或 m->out_port = old_actions 中 OFPACT_OUTPUT 或 OFPACT_ENQUEUE 的端口
+         *  m->flags 与 event 一致
+         *  m->match 包含 rule->cr
+         *
+         * 就将 m->flags 置位 flags
+         */
         HMAP_FOR_EACH (m, ofconn_node, &ofconn->monitors) {
             if (m->flags & update
                 && (m->table_id == 0xff || m->table_id == rule->table_id)
+                /*
+                * 如果 port = OFPP_ANY 或 rule->actions 中 OFPACT_OUTPUT 或 OFPACT_ENQUEUE 的端口与 port 一直, 返回 true
+                * 否则返回 false
+                */
                 && (ofproto_rule_has_out_port(rule, m->out_port)
                     || (old_actions
                         && ofpacts_output_to_port(old_actions->ofpacts,
                                                   old_actions->ofpacts_len,
                                                   m->out_port)))
+                    /* m->match 包含 rule->cr*/
                 && cls_rule_is_loose_match(&rule->cr, &m->match)) {
                 flags |= m->flags;
             }
         }
 
+        //如果ofconn->monitors 中存在 ofmonitor 匹配 rule
         if (flags) {
             if (list_is_empty(&ofconn->updates)) {
+                //将 OFPRAW_NXST_FLOW_MONITOR_REPLY 的 msg 加入 ofconn->updates
                 ofputil_start_flow_update(&ofconn->updates);
                 ofconn->sent_abbrev_update = false;
             }
@@ -2453,12 +2482,14 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
                     fu.ofpacts = NULL;
                     fu.ofpacts_len = 0;
                 }
+                //将 fu 加入 ofconn->updates 
                 ofputil_append_flow_update(&fu, &ofconn->updates);
             } else if (!ofconn->sent_abbrev_update) {
                 struct ofputil_flow_update fu;
 
                 fu.event = NXFME_ABBREV;
                 fu.xid = abbrev_xid;
+                //将 fu 加入 ofconn->updates 
                 ofputil_append_flow_update(&fu, &ofconn->updates);
 
                 ofconn->sent_abbrev_update = true;
