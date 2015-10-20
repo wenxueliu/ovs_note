@@ -1515,6 +1515,11 @@ search_subtable(const struct cls_subtable *subtable,
  *       the rule is visible in 'version'.
  *
  * Ignores target->priority. */
+
+/*
+ * 遍历 cls->subtables 每一个 subtable 的 rules_list, 找到匹配的 rule, 初始化
+ * cursor->rule
+ */
 struct cls_cursor
 cls_cursor_start(const struct classifier *cls, const struct cls_rule *target,
                  cls_version_t version)
@@ -1530,6 +1535,7 @@ cls_cursor_start(const struct classifier *cls, const struct cls_rule *target,
     /* Find first rule. */
     PVECTOR_CURSOR_FOR_EACH (subtable, &cursor.subtables,
                              &cursor.cls->subtables) {
+        //遍历 subtable->rules_list 返回匹配的 rule
         const struct cls_rule *rule = search_subtable(subtable, &cursor);
 
         if (rule) {
@@ -1542,6 +1548,10 @@ cls_cursor_start(const struct classifier *cls, const struct cls_rule *target,
     return cursor;
 }
 
+/*
+ * 1. 遍历 cursor->subtable->rules_list 找到与 cursor->rule 匹配的 cls_rule
+ * 2. 1 失败, 遍历 cursor->subtables 找到与 cursor->rule 匹配的 cls_rule
+ */
 static const struct cls_rule *
 cls_cursor_next(struct cls_cursor *cursor)
 {
@@ -1569,9 +1579,17 @@ cls_cursor_next(struct cls_cursor *cursor)
 
 /* Sets 'cursor->rule' to the next matching cls_rule in 'cursor''s iteration,
  * or to null if all matching rules have been visited. */
+/*
+ * 1. 遍历 cursor->subtable->rules_list 找到与 cursor->rule 匹配的 cls_rule
+ * 2. 1 失败, 遍历 cursor->subtables 找到与 cursor->rule 匹配的 cls_rule
+ */
 void
 cls_cursor_advance(struct cls_cursor *cursor)
 {
+    /*
+     * 1. 遍历 cursor->subtable->rules_list 找到与 cursor->rule 匹配的 cls_rule
+     * 2. 1 失败, 遍历 cursor->subtables 找到与 cursor->rule 匹配的 cls_rule
+     */
     cursor->rule = cls_cursor_next(cursor);
 }
 

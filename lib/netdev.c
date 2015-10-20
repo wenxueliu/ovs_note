@@ -908,6 +908,7 @@ netdev_get_name(const struct netdev *netdev)
  * EOPNOTSUPP if 'netdev' does not have an MTU (as e.g. some tunnels do not).
  * On other failure, returns a positive errno value.  On failure, sets '*mtup'
  * to 0. */
+//获取 netdev 的 mtu, 保持在 mtup
 int
 netdev_get_mtu(const struct netdev *netdev, int *mtup)
 {

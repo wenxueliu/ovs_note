@@ -134,7 +134,7 @@ struct ofbundle {
     /* Configuration. */
     struct ovs_list ports;      /* Contains "struct ofport"s. */
     enum port_vlan_mode vlan_mode; /* VLAN mode */
-    int vlan;                   /* -1=trunk port, else a 12-bit VLAN ID. */
+    unt vlan;                   /* -1=trunk port, else a 12-bit VLAN ID. */
     unsigned long *trunks;      /* Bitmap of trunked VLANs, if 'vlan' == -1.
                                  * NULL if all VLANs are trunked. */
     struct lacp *lacp;          /* LACP if LACP is enabled, otherwise NULL. */
@@ -1789,6 +1789,7 @@ run(struct ofproto *ofproto_)
         struct ofport_dpif *ofport;
 
         HMAP_FOR_EACH (ofport, up.hmap_node, &ofproto->up.ports) {
+            //设置 ofport
             port_run(ofport);
         }
 
@@ -1814,6 +1815,7 @@ run(struct ofproto *ofproto_)
         ofproto->backer->need_revalidate = REV_MCAST_SNOOPING;
     }
 
+    //删除过期流表
     new_dump_seq = seq_read(udpif_dump_seq(ofproto->backer->udpif));
     if (ofproto->dump_seq != new_dump_seq) {
         struct rule *rule, *next_rule;
@@ -3638,6 +3640,11 @@ port_run(struct ofport_dpif *ofport)
     ofport->may_enable = enable;
 }
 
+/*
+ * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
+ * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+ * 查找到的端口初始化 ofproto_port
+ */
 static int
 port_query_by_name(const struct ofproto *ofproto_, const char *devname,
                    struct ofproto_port *ofproto_port)
@@ -3808,6 +3815,15 @@ port_dump_start(const struct ofproto *ofproto_ OVS_UNUSED, void **statep)
     return 0;
 }
 
+/*
+ * 如果 state->ghost = NULL, 遍历 ofproto->ghost_ports, ofproto->ports
+ * 如果 state->ghost != NULL, 遍历 ofproto->ghost_ports
+ *
+ * state_->ghost != NULL, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找到初始化 port, state_
+ * state_->ghost != NULL, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找不到返回 EOF
+ * state_->ghost == NULL, 遍历 ofproto->ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找到返回初始化 port, state_
+ * state_->ghost == NULL, 遍历 ofproto->ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找不到返回 EOF; 如果找到初始化 port, state;
+ */
 static int
 port_dump_next(const struct ofproto *ofproto_, void *state_,
                struct ofproto_port *port)
@@ -3825,6 +3841,11 @@ port_dump_next(const struct ofproto *ofproto_, void *state_,
     while ((node = sset_at_position(sset, &state->bucket, &state->offset))) {
         int error;
 
+        /*
+         * 如果 node->name 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
+         * 如果 node->name 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+         * 查找到的端口初始化 state->port
+         */
         error = port_query_by_name(ofproto_, node->name, &state->port);
         if (!error) {
             *port = state->port;
@@ -3857,6 +3878,11 @@ port_dump_done(const struct ofproto *ofproto_ OVS_UNUSED, void *state_)
     return 0;
 }
 
+/*
+ * 如果 ofproto->port_poll_errno != 0, 返回 ofproto->port_poll_errno
+ * 如果 ofproto->port_poll_set = NULL, 返回 EAGAIN
+ * 否则 从 ofproto->port_poll_set 弹出一个元素赋值给 devnamep
+ */
 static int
 port_poll(const struct ofproto *ofproto_, char **devnamep)
 {
@@ -3944,6 +3970,12 @@ rule_expire(struct rule_dpif *rule)
 
 /* Executes, within 'ofproto', the actions in 'rule' or 'ofpacts' on 'packet'.
  * 'flow' must reflect the data in 'packet'. */
+/*
+ * 1. 用参数初始化 dpif_execute 对象 execute
+ * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ *
+ * TODO: 为什么要调用 xlate_actions(&xin, &xout) ?
+ */
 int
 ofproto_dpif_execute_actions(struct ofproto_dpif *ofproto,
                              const struct flow *flow,
@@ -3960,24 +3992,35 @@ ofproto_dpif_execute_actions(struct ofproto_dpif *ofproto,
 
     ovs_assert((rule != NULL) != (ofpacts != NULL));
 
+    //1. 初始化 rule.stats
+
+    //用 flow, packet, time_msec() 初始化 stats
     dpif_flow_stats_extract(flow, packet, time_msec(), &stats);
 
     if (rule) {
+        /*
+        * 如果 rule->new_rule 不为 NULL, 用 stats 更新 rule->new_rule 的 stats
+        * 否则用 stats 更新 rule->stats
+        */
         rule_dpif_credit_stats(rule, &stats);
     }
 
     uint64_t odp_actions_stub[1024 / 8];
     struct ofpbuf odp_actions = OFPBUF_STUB_INITIALIZER(odp_actions_stub);
+    //2. 用 xin 后面的参数初始化 xin
     xlate_in_init(&xin, ofproto, flow, flow->in_port.ofp_port, rule,
                   stats.tcp_flags, packet, NULL, &odp_actions);
     xin.ofpacts = ofpacts;
     xin.ofpacts_len = ofpacts_len;
     xin.resubmit_stats = &stats;
+    //3. 将 xin 转为 xout
     xlate_actions(&xin, &xout);
 
+    //4. 初始化 execute
     execute.actions = odp_actions.data;
     execute.actions_len = odp_actions.size;
 
+    //用 flow 初始化 packet->md
     pkt_metadata_from_flow(&packet->md, flow);
     execute.packet = packet;
     execute.needs_help = (xout.slow & SLOW_ACTION) != 0;
@@ -3990,6 +4033,9 @@ ofproto_dpif_execute_actions(struct ofproto_dpif *ofproto,
     }
     execute.packet->md.in_port.odp_port = ofp_port_to_odp_port(ofproto, in_port);
 
+    /*
+     * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+     */
     error = dpif_execute(ofproto->backer->dpif, &execute);
 
     xlate_out_uninit(&xout);
@@ -4357,6 +4403,10 @@ rule_get_stats(struct rule *rule_, uint64_t *packets, uint64_t *bytes,
     ovs_mutex_unlock(&rule->stats_mutex);
 }
 
+/*
+ * 1. 用参数初始化 dpif_execute 对象 execute
+ * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ */
 static void
 rule_dpif_execute(struct rule_dpif *rule, const struct flow *flow,
                   struct dp_packet *packet)
@@ -4366,11 +4416,20 @@ rule_dpif_execute(struct rule_dpif *rule, const struct flow *flow,
     ofproto_dpif_execute_actions(ofproto, flow, rule, NULL, 0, packet);
 }
 
+/*
+ * 1. 用参数初始化 dpif_execute 对象 execute
+ * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ */
 static enum ofperr
 rule_execute(struct rule *rule, const struct flow *flow,
              struct dp_packet *packet)
 {
+    /*
+     * 1. 用参数初始化 dpif_execute 对象 execute
+     * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+     */
     rule_dpif_execute(rule_dpif_cast(rule), flow, packet);
+    //释放　packet 内存
     dp_packet_delete(packet);
     return 0;
 }
@@ -5767,6 +5826,7 @@ vsp_add(struct ofport_dpif *port, ofp_port_t realdev_ofp_port, int vid)
     ovs_mutex_unlock(&ofproto->vsp_mutex);
 }
 
+// 将 ofp_port_t 转换为 odp_port_t
 static odp_port_t
 ofp_port_to_odp_port(const struct ofproto_dpif *ofproto, ofp_port_t ofp_port)
 {

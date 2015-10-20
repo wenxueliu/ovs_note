@@ -4609,8 +4609,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
 }
 
 /*
- * 初始化 xlate_in 对象. (实际用 upcall 对象各个成员)
- *
+ * 初始化 xlate_in 对象 xin.
  */
 void
 xlate_in_init(struct xlate_in *xin, struct ofproto_dpif *ofproto,

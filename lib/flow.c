@@ -429,6 +429,10 @@ invalid:
  *      has at least the content used for the fields of interest for the flow,
  *      otherwise UINT16_MAX.
  */
+/*
+ * 用 packet 初始化 flow
+ *
+ */
 void
 flow_extract(struct dp_packet *packet, struct flow *flow)
 {
@@ -459,6 +463,7 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
     uint8_t nw_frag, nw_tos, nw_ttl, nw_proto;
 
     /* Metadata. */
+    //将 packet->md 加入 mf
     if (md->tunnel.ip_dst) {
         miniflow_push_words(mf, tunnel, &md->tunnel,
                             offsetof(struct flow_tnl, metadata) /
@@ -484,6 +489,7 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
     dp_packet_reset_offsets(packet);
 
     /* Must have full Ethernet header to proceed. */
+    //解析 packet 的数据链路层到 mf
     if (OVS_UNLIKELY(size < sizeof(struct eth_header))) {
         goto out;
     } else {

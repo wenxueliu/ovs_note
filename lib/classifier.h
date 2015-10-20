@@ -446,6 +446,9 @@ struct cls_cursor cls_cursor_start(const struct classifier *,
                                    cls_version_t);
 void cls_cursor_advance(struct cls_cursor *);
 
+/*
+ * 通过遍历 CLS->subtables->subtable->rules_list 列表. 通过 rules_list 定位到 cls_rule, 通过 cls_rule 定位到 rule.
+ */
 #define CLS_FOR_EACH(RULE, MEMBER, CLS)             \
     CLS_FOR_EACH_TARGET(RULE, MEMBER, CLS, NULL, CLS_MAX_VERSION)
 #define CLS_FOR_EACH_TARGET(RULE, MEMBER, CLS, TARGET, VERSION)         \

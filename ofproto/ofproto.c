@@ -1666,6 +1666,11 @@ ofproto_delete(const char *name, const char *type)
             : class->del(type, name));
 }
 
+/*
+ * 如果 error = ENOBUFS, 重新初始化 ofproto
+ * 如果 error = 0, 更新 ofport
+ *
+ */
 static void
 process_port_change(struct ofproto *ofproto, int error, char *devname)
 {
@@ -1727,7 +1732,14 @@ ofproto_run(struct ofproto *p)
     int error;
     uint64_t new_seq;
 
-    //ofproto_dpif_class->run(p)
+    /*
+    *  ofproto_dpif_class->run(p)
+    * 1. 将 ofproto->pins 的所有包发送给控制器
+    * 2. 运行 netflow, sflow, ipfix, boundle, stp, rstp, mac_learn, mcast_snooping, ofboundle
+    * 3. 遍历 ofproto->up.ports 的每一个端口, 设置 ofport 相关成员
+    * 4. 删除过期流表
+    * 5. boundle 重平衡
+    */
     error = p->ofproto_class->run(p);
     if (error && error != EAGAIN) {
         VLOG_ERR_RL(&rl, "%s: run failed (%s)", p->name, ovs_strerror(error));
@@ -1739,9 +1751,17 @@ ofproto_run(struct ofproto *p)
      *
      * ofproto/ofproto.c
      */
+    /*
+     * 遍历 ofproto->rule_executes 中的所有 execute:
+     * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+     */
     run_rule_executes(p);
 
     /* Restore the eviction group heap invariant occasionally. */
+    /*
+     * 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group, 
+     * 如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
+     */
     if (p->eviction_group_timer < time_msec()) {
         size_t i;
 
@@ -1764,17 +1784,23 @@ ofproto_run(struct ofproto *p)
             }
 
             ovs_mutex_lock(&ofproto_mutex);
+            /*
+             * 通过遍历 CLS->subtables->subtable->rules_list 列表. 通过 rules_list 定位到 cls_rule, 通过 cls_rule 定位到 rule.
+             */
             CLS_FOR_EACH (rule, cr, &table->cls) {
                 if (rule->idle_timeout || rule->hard_timeout) {
                     if (!rule->eviction_group) {
+                        //当 rule 所属的 table->eviction 不为 NULL, rule 有过期时间, 就将 rule 加入对应的 eviction_group 中
                         eviction_group_add_rule(rule);
                     } else {
+                        //rule->evg_node->priority = rule_eviction_priority(p, rule)
                         heap_raw_change(&rule->evg_node,
                                         rule_eviction_priority(p, rule));
                     }
                 }
             }
 
+            //让 evg->rules 保持按照 priority 递减排序
             HEAP_FOR_EACH (evg, size_node, &table->eviction_groups_by_size) {
                 heap_rebuild(&evg->rules);
             }
@@ -2267,9 +2293,11 @@ reinit_ports(struct ofproto *p)
     COVERAGE_INC(ofproto_reinit_ports);
 
     sset_init(&devnames);
+    //遍历 p->ports 加入 devnames
     HMAP_FOR_EACH (ofport, hmap_node, &p->ports) {
         sset_add(&devnames, netdev_get_name(ofport->netdev));
     }
+    //遍历 p->ports 和 p->ghost_ports 的所有端口保持在 ofproto_port, 将 ofproto_port.name 加入 devnames
     OFPROTO_PORT_FOR_EACH (&ofproto_port, &dump, p) {
         sset_add(&devnames, ofproto_port.name);
     }
@@ -2280,6 +2308,8 @@ reinit_ports(struct ofproto *p)
     sset_destroy(&devnames);
 }
 
+//TODO
+//分配端口号的机理
 static ofp_port_t
 alloc_ofp_port(struct ofproto *ofproto, const char *netdev_name)
 {
@@ -2345,6 +2375,9 @@ dealloc_ofp_port(struct ofproto *ofproto, ofp_port_t ofp_port)
 /* Opens and returns a netdev for 'ofproto_port' in 'ofproto', or a null
  * pointer if the netdev cannot be opened.  On success, also fills in
  * '*pp'.  */
+/*
+ * 打开 ofproto_port->name 和 ofproto_port->type 对应的 netdev 设备, 并用 ofport_port 初始化 pp
+ */
 static struct netdev *
 ofport_open(struct ofproto *ofproto,
             struct ofproto_port *ofproto_port,
@@ -2389,6 +2422,7 @@ ofport_open(struct ofproto *ofproto,
 /* Returns true if most fields of 'a' and 'b' are equal.  Differences in name,
  * port number, and 'config' bits other than OFPUTIL_PC_PORT_DOWN are
  * disregarded. */
+// 如果 a 与 b 相同, 返回 true, 否则返回 false
 static bool
 ofport_equal(const struct ofputil_phy_port *a,
              const struct ofputil_phy_port *b)
@@ -2407,6 +2441,8 @@ ofport_equal(const struct ofputil_phy_port *a,
 /* Adds an ofport to 'p' initialized based on the given 'netdev' and 'opp'.
  * The caller must ensure that 'p' does not have a conflicting ofport (that is,
  * one with the same name or port number). */
+
+//构造一个 ofport 对象, 用 p, netdev, pp 初始化, 并发送给控制端口改变信息
 static void
 ofport_install(struct ofproto *p,
                struct netdev *netdev, const struct ofputil_phy_port *pp)
@@ -2477,6 +2513,7 @@ ofport_remove_with_name(struct ofproto *ofproto, const char *name)
  *
  * Does not handle a name or port number change.  The caller must implement
  * such a change as a delete followed by an add.  */
+//用 pp 初始化 port, 并将 port 的改变发送给控制器
 static void
 ofport_modified(struct ofport *port, struct ofputil_phy_port *pp)
 {
@@ -2632,6 +2669,13 @@ ofproto_port_get_stats(const struct ofport *port, struct netdev_stats *stats)
     return error;
 }
 
+/*
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name == ofproto_port->name, 删除 name, port 对应旧设备, 更新新设备及配置
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name != ofproto_port->name, 删除 name 和 port 对应的旧设备, 更新新设备及配置
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不存在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不存在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
+ *
+ */
 static void
 update_port(struct ofproto *ofproto, const char *name)
 {
@@ -2643,20 +2687,28 @@ update_port(struct ofproto *ofproto, const char *name)
     COVERAGE_INC(ofproto_update_port);
 
     /* Fetch 'name''s location and properties from the datapath. */
+    /*
+    * ofproto->ghost_ports 或 ofproto->ports 中查询 name 对应的 ofproto_port,
+    * 打开 ofproto_port->name(name) 和 ofproto_port->type 对应的 netdev 设备, 并初始化 pp
+    */
     netdev = (!ofproto_port_query_by_name(ofproto, name, &ofproto_port)
               ? ofport_open(ofproto, &ofproto_port, &pp)
               : NULL);
 
     if (netdev) {
+        //找到 ofproto->ports 中 ofproto_port 对应的 port
         port = ofproto_get_port(ofproto, ofproto_port.ofp_port);
+        //port 和 ofproto_port 的 ofp_port 和 name 都相同, 更新端口配置, 关闭旧的 netdev
         if (port && !strcmp(netdev_get_name(port->netdev), name)) {
             struct netdev *old_netdev = port->netdev;
 
             /* 'name' hasn't changed location.  Any properties changed? */
             if (!ofport_equal(&port->pp, &pp)) {
+                //用 pp 初始化 port, 并将 port 的改变发送给控制器
                 ofport_modified(port, &pp);
             }
 
+            //TODO
             update_mtu(ofproto, port);
 
             /* Install the newly opened netdev in case it has changed.
@@ -2670,14 +2722,19 @@ update_port(struct ofproto *ofproto, const char *name)
             }
 
             netdev_close(old_netdev);
+
         } else {
             /* If 'port' is nonnull then its name differs from 'name' and thus
              * we should delete it.  If we think there's a port named 'name'
              * then its port number must be wrong now so delete it too. */
+            //port 和 ofproto_port 的 ofp_port 相同, name 不同
             if (port) {
+                //发送端口删除的消息给控制器, 销毁 port
                 ofport_remove(port);
             }
+            //从 ofproto->port_by_name 中找到 name 的 port, 删除发送端口删除的消息给控制器, 销毁 name 对应 port
             ofport_remove_with_name(ofproto, name);
+            //构造一个 ofport 对象, 用 ofproto, netdev, pp 初始化, 并发送给控制端口改变信息
             ofport_install(ofproto, netdev, &pp);
         }
     } else {
@@ -2712,6 +2769,9 @@ init_ports(struct ofproto *p)
                           ofp_to_u16(iface_hint->ofp_port));
             }
 
+            /*
+             * 打开 ofproto_port->name 和 ofproto_port->type 对应的 netdev 设备, 并用 ofport_port 初始化 pp
+             */
             netdev = ofport_open(p, &ofproto_port, &pp);
             if (netdev) {
                 ofport_install(p, netdev, &pp);
@@ -2775,6 +2835,7 @@ update_mtu(struct ofproto *p, struct ofport *port)
     struct netdev *netdev = port->netdev;
     int dev_mtu, old_min;
 
+    //获取 netdev 的 mtu, 保持在 dev_mtu
     if (netdev_get_mtu(netdev, &dev_mtu)) {
         port->mtu = 0;
         return;
@@ -3099,6 +3160,10 @@ rule_execute_destroy(struct rule_execute *e)
 
 /* Executes all "rule_execute" operations queued up in ofproto->rule_executes,
  * by passing them to the ofproto provider. */
+/*
+ * 遍历 ofproto->rule_executes 中的所有 execute:
+ * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ */
 static void
 run_rule_executes(struct ofproto *ofproto)
     OVS_EXCLUDED(ofproto_mutex)
@@ -3110,10 +3175,16 @@ run_rule_executes(struct ofproto *ofproto)
     LIST_FOR_EACH_SAFE (e, next, list_node, &executes) {
         struct flow flow;
 
+        //用 e->packet 初始化 flow
         flow_extract(e->packet, &flow);
         flow.in_port.ofp_port = e->in_port;
+        /*
+         * 1. 用参数初始化 dpif_execute 对象 execute
+         * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+         */
         ofproto->ofproto_class->rule_execute(e->rule, &flow, e->packet);
 
+        //释放 e 的内存
         rule_execute_destroy(e);
     }
 }
@@ -5536,6 +5607,10 @@ handle_flow_mod__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
     ofmonitor_flush(ofproto->connmgr);
     ovs_mutex_unlock(&ofproto_mutex);
 
+    /*
+    * 遍历 ofproto->rule_executes 中的所有 execute:
+    * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+    */
     run_rule_executes(ofproto);
     return error;
 }
@@ -7140,6 +7215,10 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
         ofmonitor_flush(ofproto->connmgr);
         ovs_mutex_unlock(&ofproto_mutex);
 
+        /*
+         * 遍历 ofproto->rule_executes 中的所有 execute:
+         * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+         */
         run_rule_executes(ofproto);
     }
 
@@ -7676,6 +7755,10 @@ eviction_group_remove_rule(struct rule *rule)
 
 /* Hashes the 'rule''s values for the eviction_fields of 'rule''s table, and
  * returns the hash value. */
+/*
+ * 计算 rule 所属的 eviction_group
+ *
+ */
 static uint32_t
 eviction_group_hash_rule(struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -7714,6 +7797,10 @@ eviction_group_hash_rule(struct rule *rule)
 
 /* Returns an eviction group within 'table' with the given 'id', creating one
  * if necessary. */
+/*
+ * 如果 id 对应的 eviction_group 存在, 直接返回
+ * 如果 id 对应的 eviction_group 不存在, 添加之后返回
+ */
 static struct eviction_group *
 eviction_group_find(struct oftable *table, uint32_t id)
     OVS_REQUIRES(ofproto_mutex)
@@ -7736,6 +7823,13 @@ eviction_group_find(struct oftable *table, uint32_t id)
 /* Returns an eviction priority for 'rule'.  The return value should be
  * interpreted so that higher priorities make a rule a more attractive
  * candidate for eviction. */
+/*
+ * 计算流表项在 eviction_group 中的权限
+ *
+ * 与 rule->hard_timeout, rule->modified, rule->idle_timeout, rule->used, rule->importance 相关
+ *
+ * 值越高越容易被删除, 该值与上面属性成反相关
+ */
 static uint64_t
 rule_eviction_priority(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -7790,6 +7884,7 @@ rule_eviction_priority(struct ofproto *ofproto, struct rule *rule)
  * own).
  *
  * The caller must ensure that 'rule' is not already in an eviction group. */
+//当 rule 所属的 table->eviction 不为 NULL, rule 有过期时间, 就将 rule 加入对应的 eviction_group 中
 static void
 eviction_group_add_rule(struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -7805,6 +7900,10 @@ eviction_group_add_rule(struct rule *rule)
     if (table->eviction && has_timeout) {
         struct eviction_group *evg;
 
+        /*
+         * 如果 id 对应的 eviction_group 存在, 直接返回
+         * 如果 id 对应的 eviction_group 不存在, 添加之后返回
+         */
         evg = eviction_group_find(table, eviction_group_hash_rule(rule));
 
         rule->eviction_group = evg;

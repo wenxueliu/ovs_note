@@ -138,6 +138,7 @@ heap_raw_remove(struct heap *heap, struct heap_node *node)
  * called.)
  *
  * This takes time O(n) in the current size of the heap. */
+//能保证权限大小排序么?
 void
 heap_rebuild(struct heap *heap)
 {
@@ -148,6 +149,7 @@ heap_rebuild(struct heap *heap)
     }
 }
 
+//用最后一个节点代替 head->array[i] 节点的值
 static void
 put_node(struct heap *heap, struct heap_node *node, size_t i)
 {
@@ -165,6 +167,9 @@ swap_nodes(struct heap *heap, size_t i, size_t j)
     put_node(heap, old_i, j);
 }
 
+/*
+ * 保证 i 和它的父节点的 priority 每个节点的 priority 的父节点都比自己的 priority 大.
+ */
 static bool
 float_up(struct heap *heap, size_t i)
 {
@@ -182,6 +187,9 @@ float_up(struct heap *heap, size_t i)
     return moved;
 }
 
+/*
+ * 从 i 开始直到遇到子节点比当前节点 priority 小 或 i 是叶子节点
+ */
 static void
 float_down(struct heap *heap, size_t i)
 {
@@ -206,6 +214,10 @@ float_down(struct heap *heap, size_t i)
     }
 }
 
+/*
+ * 从 i 开始, 其父节点路径中每个节点的 priority 小于该节点父节点的 priority
+ * 从 i 开始, 其子节点路径中每个节点的 priority 部分的递减的
+ */
 static void
 float_up_or_down(struct heap *heap, size_t i)
 {

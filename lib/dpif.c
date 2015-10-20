@@ -998,6 +998,10 @@ dpif_port_poll_wait(const struct dpif *dpif)
 /* Extracts the flow stats for a packet.  The 'flow' and 'packet'
  * arguments must have been initialized through a call to flow_extract().
  * 'used' is stored into stats->used. */
+/*
+ * 用 flow, packet 和 used 初始化 stats
+ *
+ */
 void
 dpif_flow_stats_extract(const struct flow *flow, const struct dp_packet *packet,
                         long long int used, struct dpif_flow_stats *stats)
@@ -1341,6 +1345,9 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet **packets, int cnt,
         execute.packet = packet;
         execute.needs_help = false;
         execute.probe = false;
+        /*
+        * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+        */
         aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &execute, true, aux->error);
 
@@ -1391,6 +1398,9 @@ dpif_execute_needs_help(const struct dpif_execute *execute)
 }
 
 /* A dpif_operate() wrapper for performing a single DPIF_OP_EXECUTE. */
+/*
+ * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ */
 int
 dpif_execute(struct dpif *dpif, struct dpif_execute *execute)
 {
