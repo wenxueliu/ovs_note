@@ -21,6 +21,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * 构造一颗二叉树, 从根节点开始, 正常情况下以 priority 的递减排序
+ */
 /* A heap node, to be embedded inside the data structure in the heap. */
 struct heap_node {
     size_t idx;

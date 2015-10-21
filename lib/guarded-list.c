@@ -80,6 +80,7 @@ guarded_list_pop_front(struct guarded_list *list)
     return node;
 }
 
+//将 list 移动到 elements, 返回元素个数, list 重新初始化
 size_t
 guarded_list_pop_all(struct guarded_list *list, struct ovs_list *elements)
 {

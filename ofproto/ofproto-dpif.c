@@ -2043,6 +2043,7 @@ port_construct(struct ofport *port_)
     return 0;
 }
 
+//TODO
 static void
 port_destruct(struct ofport *port_)
 {

@@ -40,6 +40,35 @@
 extern "C" {
 #endif
 
+/*
+ * poll_fd_wait_at(int fd, short int events, const char *where)
+ *
+ * 1. 当前线程对应的 poll_loop 对象(不存在就创建), 
+ * 2. 在 poll_loop 中查找 fd 对应的 poll_node:
+ *    如果找到就设置该节点的监听的事件为 events
+ *    如果找不到创建之后, 设置该节点的监听的事件为 events
+ *
+ * poll_timer_wait_at(long long int msec, const char *where)
+ *
+ * 1. 如果 msec <= 0, 则 poll_loop->timeout_when = LLONG_MIN
+ * 2. 如果 now + msec <= LLONG_MAX, 如果 now + msec < poll_loop->timeout_when, 设置 poll_loop()->timeout_when = now + msec
+ * 3. 如果 now + msec <= LLONG_MAX, poll_loop()->timeout_when = LLONG_MAX
+ *
+ * poll_timer_wait_until_at(long long int when, const char *where)
+ *
+ * 如果 when < poll_loop->timeout_when; 设置 poll_loop()->timeout_when = when; poll_loop()->timeout_where = where
+ *
+ * poll_immediate_wake_at(const char *where)
+ *
+ * 调用 poll_timer_wait_at(0, where);
+ *
+ * poll_block(void) TODO
+ * 1. 分配 poll_loop->poll_nodes 个 pollfds
+ * 2. 遍历当前线程的所有 poll_node, 将 poll_node->fd 加入 pollfds
+ * 3. 等待事件发生
+ * 4. 删除 poll_loop 中所有节点
+ *
+ */
 
 /* Schedule events to wake up the following poll_block().
  *

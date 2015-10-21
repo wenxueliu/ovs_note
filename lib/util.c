@@ -195,6 +195,7 @@ xmalloc_cacheline(size_t size)
     int error;
 
     COVERAGE_INC(util_xalloc);
+    //CACHE_LINE_SIZE 64
     error = posix_memalign(&p, CACHE_LINE_SIZE, size ? size : 1);
     if (error != 0) {
         out_of_memory();
@@ -219,6 +220,7 @@ xmalloc_cacheline(size_t size)
                    + ROUND_UP(MEM_ALIGN + size, CACHE_LINE_SIZE));
 
     /* Locate the payload and store a pointer to the base at the beginning. */
+    //up(x/y) * y
     payload = (void **) ROUND_UP((uintptr_t) base, CACHE_LINE_SIZE);
     *payload = base;
 

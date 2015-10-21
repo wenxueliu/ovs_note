@@ -98,7 +98,12 @@ find_poll_node(struct poll_loop *loop, int fd, HANDLE wevent)
 /*
  *  对于 fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
  *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
- *
+ */
+/*
+ * 1. 获取当前线程对应的 poll_loop 对象(不存在就创建)
+ * 2. 在 poll_loop 中查找 fd 或 wevent 对应的 poll_node:
+ *    如果找到就设置该节点的监听的事件为 events
+ *    如果找不到创建之后, 设置该节点的监听的事件为 events
  */
 static void
 poll_create_node(int fd, HANDLE wevent, short int events, const char *where)
@@ -356,12 +361,14 @@ poll_block(void)
 
     /* Register fatal signal events before actually doing any real work for
      * poll_block. */
+    //TODO
     fatal_signal_wait();
 
     if (loop->timeout_when == LLONG_MIN) {
         COVERAGE_INC(poll_zero_timeout);
     }
 
+    //TODO
     timewarp_run();
     pollfds = xmalloc(hmap_count(&loop->poll_nodes) * sizeof *pollfds);
 
@@ -406,6 +413,7 @@ poll_block(void)
         }
     }
 
+    //删除 loop 所有节点
     free_poll_nodes(loop);
     loop->timeout_when = LLONG_MAX;
     loop->timeout_where = NULL;
@@ -415,6 +423,7 @@ poll_block(void)
     /* Handle any pending signals before doing anything else. */
     fatal_signal_run();
 
+    //TODO
     seq_woke();
 }
 
@@ -428,6 +437,7 @@ free_poll_loop(void *loop_)
     free(loop);
 }
 
+//每个线程都获取该线程关联的全局唯一的 pool_loop 对象(如果不存在就创建)
 static struct poll_loop *
 poll_loop(void)
 {

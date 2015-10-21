@@ -258,6 +258,7 @@ time_alarm(unsigned int secs)
  *        never return -EINTR.)
  *
  * Stores the number of milliseconds elapsed during poll in '*elapsed'. */
+//TODO
 int
 time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
           long long int timeout_when, int *elapsed)
@@ -276,8 +277,11 @@ time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
     start = time_msec();
 
     timeout_when = MIN(timeout_when, deadline);
+    //TODO
     quiescent = ovsrcu_is_quiescent();
 
+    //最多等待 INT_MAX
+    //最少等待 0
     for (;;) {
         long long int now = time_msec();
         int time_left;
@@ -290,6 +294,7 @@ time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
             time_left = timeout_when - now;
         }
 
+        //TODO
         if (!quiescent) {
             if (!time_left) {
                 ovsrcu_quiesce();
@@ -322,6 +327,7 @@ time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
             ovsrcu_quiesce_end();
         }
 
+        //如果超时
         if (deadline <= time_msec()) {
 #ifndef _WIN32
             fatal_signal_handler(SIGALRM);

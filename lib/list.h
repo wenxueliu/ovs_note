@@ -169,6 +169,7 @@ list_replace(struct ovs_list *element, const struct ovs_list *position)
 static inline void
 list_moved(struct ovs_list *list, const struct ovs_list *orig)
 {
+    //如果 list 是空的
     if (list->next == orig) {
         list_init(list);
     } else {
@@ -179,9 +180,12 @@ list_moved(struct ovs_list *list, const struct ovs_list *orig)
 /* Initializes 'dst' with the contents of 'src', compensating for moving it
  * around in memory.  The effect is that, if 'src' was the head of a list, now
  * 'dst' is the head of a list containing the same elements. */
+//TODO 仔细推敲与 replace 的区别
+//这里 dst 保持的就是 src 的内容. 而 replace 用 dst 代替 src 的内容. 语义不一样.
 static inline void
 list_move(struct ovs_list *dst, struct ovs_list *src)
 {
+    //让 dst 指向 src 指向的内存地址, 即列表元素的地址
     *dst = *src;
     list_moved(dst, src);
 }

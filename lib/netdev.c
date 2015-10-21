@@ -382,8 +382,8 @@ netdev_is_reserved_name(const char *name)
 dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中, 并调用对应的初始化方法
  * 2. 如果 name 对应的 netdev 在 netdev_shash 中, 将 netdev 的引用计数加 1.
  * 如果 name 对应的 netdev 不在 netdev_shash 中, 继续
- * 3. 如果 type 在 netdev_classes 中, 调用 alloc 分配一个 netdev * 对象,初始化,加入 netdev_shash.
- * 如果  type 不在 netdev_classes 中, 返回错误消息
+ * 3. 如果 type 在 netdev_classes 中, 调用 alloc 分配一个 netdev * 对象,初始化, 加入 netdev_shash.
+ * 如果 type 不在 netdev_classes 中, 返回错误消息
  *
  * 这里加 1 的意义?
  */

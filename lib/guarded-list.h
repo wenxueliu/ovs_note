@@ -22,6 +22,9 @@
 #include "list.h"
 #include "ovs-thread.h"
 
+/*
+ * list 的多线程版本
+ */
 struct guarded_list {
     struct ovs_mutex mutex;
     struct ovs_list list;

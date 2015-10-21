@@ -168,7 +168,7 @@ swap_nodes(struct heap *heap, size_t i, size_t j)
 }
 
 /*
- * 保证 i 和它的父节点的 priority 每个节点的 priority 的父节点都比自己的 priority 大.
+ * 从 i 开始与父节点比较, 如果当前节点的 priority 大于 父节点, 交换父节点, 从父节点开始继续, 直到找到父节点的 priority 大于当前节点.
  */
 static bool
 float_up(struct heap *heap, size_t i)
@@ -215,8 +215,7 @@ float_down(struct heap *heap, size_t i)
 }
 
 /*
- * 从 i 开始, 其父节点路径中每个节点的 priority 小于该节点父节点的 priority
- * 从 i 开始, 其子节点路径中每个节点的 priority 部分的递减的
+ * 从 i 开始, 其父节点路径中每个节点的 priority 小于该节点父节点的 priority, 则 TODO
  */
 static void
 float_up_or_down(struct heap *heap, size_t i)

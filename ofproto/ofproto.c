@@ -1667,9 +1667,8 @@ ofproto_delete(const char *name, const char *type)
 }
 
 /*
- * 如果 error = ENOBUFS, 重新初始化 ofproto
- * 如果 error = 0, 更新 ofport
- *
+ * 如果 error = ENOBUFS, 更新 ofproto->ports 和 ofport->ghost_ports 的全部端口
+ * 如果 error = 0, 更新 devname 对应的 ofport
  */
 static void
 process_port_change(struct ofproto *ofproto, int error, char *devname)
@@ -1722,9 +1721,16 @@ ofproto_type_wait(const char *datapath_type)
 }
 
 /*
- *
- *
- *
+ * 1. 将 ofproto->pins 的所有包发送给控制器
+ * 2. 运行 netflow, sflow, ipfix, boundle, stp, rstp, mac_learn, mcast_snooping, ofboundle
+ * 3. 遍历 ofproto->up.ports 的每一个端口, 设置 ofport 相关成员
+ * 4. 删除过期流表
+ * 5. 遍历 ofproto->rule_executes 中的所有 execute 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ * 6. 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group,
+ *    如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
+ * 7. 更新 ofproto->port_poll_set 中每个元素对应的 ofport
+ * 8. 当发生配置更新时, 遍历 ofport->ports 中每一个端口 port, 如果 port->change_seq != port->netdev->change_seq, 表明 port 属性已经更改,更新之
+ * 9. 最主要的就是将包发送出去, 然后调用回调函数处理应答. 此外, connmgr 中其他运行起来
  */
 int
 ofproto_run(struct ofproto *p)
@@ -1752,14 +1758,13 @@ ofproto_run(struct ofproto *p)
      * ofproto/ofproto.c
      */
     /*
-     * 遍历 ofproto->rule_executes 中的所有 execute:
-     * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+     * 遍历 ofproto->rule_executes 中的所有 execute 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
      */
     run_rule_executes(p);
 
     /* Restore the eviction group heap invariant occasionally. */
     /*
-     * 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group, 
+     * 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group,
      * 如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
      */
     if (p->eviction_group_timer < time_msec()) {
@@ -1808,14 +1813,26 @@ ofproto_run(struct ofproto *p)
         }
     }
 
+    /*
+     * 更新 ofproto->port_poll_set 中每个元素对应的 ofport
+     *
+     * 如果 ofproto->port_poll_errno != 0, 返回 ofproto->port_poll_errno
+     * 如果 ofproto->port_poll_set = NULL, 返回 EAGAIN
+     * 否则 从 ofproto->port_poll_set 弹出一个元素赋值给 devname, 更新  devname 对应的 ofport
+     */
     if (p->ofproto_class->port_poll) {
         char *devname;
 
         while ((error = p->ofproto_class->port_poll(p, &devname)) != EAGAIN) {
+            /*
+             * 如果 error = ENOBUFS, 更新 ofproto->ports 和 ofport->ghost_ports 的全部端口
+             * 如果 error = 0, 更新 devname 对应的 ofport
+             */
             process_port_change(p, error, devname);
         }
     }
 
+    //当发生配置更新时, 遍历 ofport->ports 中每一个端口 port, 如果 port->change_seq != port->netdev->change_seq, 表明 port 属性已经更改,更新之
     new_seq = seq_read(connectivity_seq_get());
     if (new_seq != p->change_seq) {
         struct sset devnames;
@@ -1828,6 +1845,7 @@ ofproto_run(struct ofproto *p)
          * destroyed, so it's not safe to update ports directly from the
          * HMAP_FOR_EACH loop, or even to use HMAP_FOR_EACH_SAFE.  Instead, we
          * need this two-phase approach. */
+        //遍历 p->ports, 将 change_seq 发生改变的 ofport 的 name 加入 devnames
         sset_init(&devnames);
         HMAP_FOR_EACH (ofport, hmap_node, &p->ports) {
             uint64_t port_change_seq;
@@ -1838,6 +1856,7 @@ ofproto_run(struct ofproto *p)
                 sset_add(&devnames, netdev_get_name(ofport->netdev));
             }
         }
+        //遍历 devnames 每个元素 name, 更新 name 对应的 devname 设备
         SSET_FOR_EACH (devname, &devnames) {
             update_port(p, devname);
         }
@@ -1846,7 +1865,15 @@ ofproto_run(struct ofproto *p)
         p->change_seq = new_seq;
     }
 
-    //与控制器交换
+    /*
+     * 最主要的就是将包发送出去, 然后调用回调函数处理应答. 此外, connmgr 中其他运行起来
+     * 1. 更新 in_band 对象
+     * 2. 遍历 all_conns 中每一个元素 ofconn, 将 ofconn->schedulers 中的包发送出去, 用 handle_openflow 处理对方应答
+     * 3. 如果该 ofconn 的 monitor 有被设置为停止的, 唤醒.
+     * 4. 如果激活而且有其他控制连接, 断了连接时间超过 next_bogus_packet_in, 发送伪造 PACKET_IN, 否则, 等待 2s; 否则设置不在发送伪造包
+     * 5. 遍历 mgr->services, 如果有请求,　就创建对应的 ofconn 连接, 没有就跳过
+     * 6. 遍历 mgr->n_snoops, 如果收到请求, 加入角色最高的 ofconn 的 monitor
+     */
     connmgr_run(p->connmgr, handle_openflow);
 
     return error;
@@ -2068,6 +2095,12 @@ ofproto_port_add(struct ofproto *ofproto, struct netdev *netdev,
  *
  * The caller owns the data in 'ofproto_port' and must free it with
  * ofproto_port_destroy() when it is no longer needed. */
+
+/*
+ * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
+ * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+ * 查找到的端口初始化 port
+ */
 int
 ofproto_port_query_by_name(const struct ofproto *ofproto, const char *devname,
                            struct ofproto_port *port)
@@ -2281,6 +2314,9 @@ ofproto_flush_flows(struct ofproto *ofproto)
     connmgr_flushed(ofproto->connmgr);
 }
 
+/*
+ * 将 p->ports 和 p->ghost_ports 的所有端口名加入 devnames, 对 devnames 每个 devname 对应的 ofport 进行更新.
+ */
 static void
 reinit_ports(struct ofproto *p)
 {
@@ -2364,6 +2400,7 @@ alloc_ofp_port(struct ofproto *ofproto, const char *netdev_name)
     return u16_to_ofp(port_idx);
 }
 
+//更新 ofp_port 在 ofproto->ofport_usage 的 last_used
 static void
 dealloc_ofp_port(struct ofproto *ofproto, ofp_port_t ofp_port)
 {
@@ -2376,7 +2413,12 @@ dealloc_ofp_port(struct ofproto *ofproto, ofp_port_t ofp_port)
  * pointer if the netdev cannot be opened.  On success, also fills in
  * '*pp'.  */
 /*
- * 打开 ofproto_port->name 和 ofproto_port->type 对应的 netdev 设备, 并用 ofport_port 初始化 pp
+ * 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
+ * 如果找到 error = 0, netdev 指向找到的设备,
+ * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
+ *             如果 ofproto_port.type 不在 netdev_classes 中, error = EAFNOSUPPORT, netdev = NULL
+ * 用 ofproto_port, netdev 初始化 pp
+ * 详情参见 lib/netdev.c
  */
 static struct netdev *
 ofport_open(struct ofproto *ofproto,
@@ -2387,6 +2429,13 @@ ofport_open(struct ofproto *ofproto,
     struct netdev *netdev;
     int error;
 
+    /*
+     * 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
+     * 如果找到 error = 0, netdev 指向找到的设备,
+     * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
+     *             如果 ofproto_port.type 不在 netdev_classes 中, error = EAFNOSUPPORT, netdev = NULL
+     * 详情参见 lib/netdev.c
+     */
     error = netdev_open(ofproto_port->name, ofproto_port->type, &netdev);
     if (error) {
         VLOG_WARN_RL(&rl, "%s: ignoring port %s (%"PRIu16") because netdev %s "
@@ -2401,10 +2450,12 @@ ofport_open(struct ofproto *ofproto,
         if (!strcmp(ofproto->name, ofproto_port->name)) {
             ofproto_port->ofp_port = OFPP_LOCAL;
         } else {
+            //TODO
             ofproto_port->ofp_port = alloc_ofp_port(ofproto,
                                                     ofproto_port->name);
         }
     }
+    //用 ofproto_port, netdev 初始化 pp
     pp->port_no = ofproto_port->ofp_port;
     netdev_get_etheraddr(netdev, pp->hw_addr);
     ovs_strlcpy(pp->name, ofproto_port->name, sizeof pp->name);
@@ -2490,16 +2541,24 @@ error:
 }
 
 /* Removes 'ofport' from 'p' and destroys it. */
+/*
+ * 向控制器发送删除端口的消息, 并销毁 port 对象的数据成员和 port 对象本身
+ */
 static void
 ofport_remove(struct ofport *ofport)
 {
     connmgr_send_port_status(ofport->ofproto->connmgr, NULL, &ofport->pp,
                              OFPPR_DELETE);
+    //销毁 port 对象的数据成员和 port 对象本身
     ofport_destroy(ofport);
 }
 
 /* If 'ofproto' contains an ofport named 'name', removes it from 'ofproto' and
  * destroys it. */
+/*
+ * 从 ofproto->port_by_name 中找到 name 对应的 ofport, 向控制器发送删除端口的消息, 并销毁 port 对象的数据成员和 port 对象本身
+ * 从 ofproto->port_by_name 中没有找到 name 对应的 ofport, 什么也不做
+ */
 static void
 ofport_remove_with_name(struct ofproto *ofproto, const char *name)
 {
@@ -2567,6 +2626,11 @@ ofproto_port_unregister(struct ofproto *ofproto, ofp_port_t ofp_port)
     }
 }
 
+/*
+ * 将 port 从 port->ofproto->ports 和 port->ofproto->port_by_name 中删除
+ * 减少 port->netdev 的引用计数
+ * 释放 port 对象
+ */
 static void
 ofport_destroy__(struct ofport *port)
 {
@@ -2577,16 +2641,25 @@ ofport_destroy__(struct ofport *port)
     shash_delete(&ofproto->port_by_name,
                  shash_find(&ofproto->port_by_name, name));
 
+    //减少 port->netdev 的引用计数
     netdev_close(port->netdev);
     ofproto->ofproto_class->port_dealloc(port);
 }
 
+//销毁 port 对象的数据成员和 port 对象本身
 static void
 ofport_destroy(struct ofport *port)
 {
     if (port) {
+        //更新 port->ofp_port 在 port->ofproto->ofport_usage 的 last_used
         dealloc_ofp_port(port->ofproto, port->ofp_port);
+        //TODO 释放 port 数据成员
         port->ofproto->ofproto_class->port_destruct(port);
+        /*
+         * 将 port 从 port->ofproto->ports 和 port->ofproto->port_by_name 中删除
+         * 减少 port->netdev 的引用计数
+         * 释放 port 对象
+         */
         ofport_destroy__(port);
      }
 }
@@ -2670,11 +2743,13 @@ ofproto_port_get_stats(const struct ofport *port, struct netdev_stats *stats)
 }
 
 /*
- * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name == ofproto_port->name, 删除 name, port 对应旧设备, 更新新设备及配置
- * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name != ofproto_port->name, 删除 name 和 port 对应的旧设备, 更新新设备及配置
- * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不存在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
- * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不存在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
+ * 更新 name 对应的 ofport
  *
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name == ofproto_port->name, 删除 name, port 对应旧设备, 更新新设备及配置
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name != ofproto_port->name, 分别删除 name 和 port 对应的旧设备, 更新新设备及配置
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
+ * 如果 name 不在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name, port 对应旧设备, 更新新设备及配置
+ * 如果 name 不在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name
  */
 static void
 update_port(struct ofproto *ofproto, const char *name)
@@ -2688,9 +2763,17 @@ update_port(struct ofproto *ofproto, const char *name)
 
     /* Fetch 'name''s location and properties from the datapath. */
     /*
-    * ofproto->ghost_ports 或 ofproto->ports 中查询 name 对应的 ofproto_port,
-    * 打开 ofproto_port->name(name) 和 ofproto_port->type 对应的 netdev 设备, 并初始化 pp
-    */
+     * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
+     * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+     * 查找到的端口初始化 ofproto_port.
+     *
+     * 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
+     * 如果找到 error = 0, netdev 指向找到的设备,
+     * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
+     *             如果 ofproto_port.type 不在 netdev_classes 中, error = EAFNOSUPPORT, netdev = NULL
+     * 用 ofproto_port, netdev 初始化 pp
+     * 详情参见 lib/netdev.c
+     */
     netdev = (!ofproto_port_query_by_name(ofproto, name, &ofproto_port)
               ? ofport_open(ofproto, &ofproto_port, &pp)
               : NULL);
@@ -2732,13 +2815,20 @@ update_port(struct ofproto *ofproto, const char *name)
                 //发送端口删除的消息给控制器, 销毁 port
                 ofport_remove(port);
             }
-            //从 ofproto->port_by_name 中找到 name 的 port, 删除发送端口删除的消息给控制器, 销毁 name 对应 port
+            /*
+             * 从 ofproto->port_by_name 中找到 name 对应的 ofport, 向控制器发送删除端口的消息, 并销毁 port 对象的数据成员和 port 对象本身
+             * 从 ofproto->port_by_name 中没有找到 name 对应的 ofport, 什么也不做
+             */
             ofport_remove_with_name(ofproto, name);
             //构造一个 ofport 对象, 用 ofproto, netdev, pp 初始化, 并发送给控制端口改变信息
             ofport_install(ofproto, netdev, &pp);
         }
     } else {
         /* Any port named 'name' is gone now. */
+        /*
+         * 从 ofproto->port_by_name 中找到 name 对应的 ofport, 向控制器发送删除端口的消息, 并销毁 port 对象的数据成员和 port 对象本身
+         * 从 ofproto->port_by_name 中没有找到 name 对应的 ofport, 什么也不做
+         */
         ofport_remove_with_name(ofproto, name);
     }
     ofproto_port_destroy(&ofproto_port);
