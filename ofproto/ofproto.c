@@ -5468,7 +5468,11 @@ delete_flows__(struct rule_collection *rules,
          * 释放 rule 相关数据成员内存
          */
         delete_flows_finish__(ofproto, rules, reason, req);
-        //TODO
+        /*
+         *  遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+         *  如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+         *  如果 ofconn->monitor_counter->n_bytes 大于 128 * 1024, 构造 pause 消息, 记录 monitor_seqno, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, pause->list_node 加入 ofconn->rconn->txq 链表尾.
+         */
         ofmonitor_flush(ofproto->connmgr);
     }
 }
@@ -5694,6 +5698,11 @@ handle_flow_mod__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
         ofproto_bump_tables_version(ofproto);
         ofproto_flow_mod_finish(ofproto, ofm, req);
     }
+    /*
+     *  遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+     *  如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+     *  如果 ofconn->monitor_counter->n_bytes 大于 128 * 1024, 构造 pause 消息, 记录 monitor_seqno, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, pause->list_node 加入 ofconn->rconn->txq 链表尾.
+     */
     ofmonitor_flush(ofproto->connmgr);
     ovs_mutex_unlock(&ofproto_mutex);
 
@@ -7302,6 +7311,11 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
             }
         }
 
+        /*
+         *  遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
+         *  如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+         *  如果 ofconn->monitor_counter->n_bytes 大于 128 * 1024, 构造 pause 消息, 记录 monitor_seqno, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, pause->list_node 加入 ofconn->rconn->txq 链表尾.
+         */
         ofmonitor_flush(ofproto->connmgr);
         ovs_mutex_unlock(&ofproto_mutex);
 

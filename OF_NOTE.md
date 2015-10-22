@@ -1,8 +1,43 @@
 
 ## 控制器连接管理
 
-* PACKET_IN 默认发送长度是 128 字节
 * Slave 角色只能得到端口变化状态
+
+###OpenFlow 连接(ofconn)
+
+每个控制器对应一个 ofconn, 可以是多个控制器
+
+###稳定连接(rconn)
+
+每次待发送的消息保持一份到 该稳定链接的所有 monitor(rconn->monitors), 拷贝一份到一个传输队列(rconn->txq).
+
+###链路监控(ofmonitor)
+
+monitor_seqno: 全局变量, 每次流表的添加和修改 monitor_seqno 加 1
+monitor_counter : 每次发送消息都会更新计数, 包括 bytes 和 packets, 当 bytes 到达 128 * 1024, 发送停止消息.
+
+###链路 buffer(ofconn->pktbuf)
+
+buffer_id : 32位, 第 0-7 位为 buffer_ids 即 buffers 中的索引, 用于区别不同的 buffer, 第 9-31 是 cookie id, 用于同一 buffer 的包
+每一个 buffer 都有过期时间, 为 OVERWRITE_MSECS (5000 ms)
+
+buffer-id = 0 | (1 << 24 ) - 1 是处于 fail_open 模式下特用的 buffer_id
+
+###PACKET_IN (ofconn->schedulers)
+
+PACKET_IN 默认发送长度是 128 字节, 如果是显示的　ACTION 要求,由具体的 PACKET_IN 包大小决定
+
+如果对 PACKET_IN 进行速率限制, PACKET_IN 都保持在 ofconn->schedulers 中. ofconn->schedulers 包含两个元素, 0: 表示 PACKET_IN 是 NO_MATCH, 1 表示是其他原因(如果 ACTION 到控制器)
+
+如果没有对 PACKET_IN 进行速率限制, 都是直接发送
+
+ofconn->schedulers[i]->queues (i=0,1) 包含一系列以端口为索引的链表, 每个链表保存同一端口的 PACKET_IN 数据包
+
+
+
+
+
+
 
 ###数据结构
 
@@ -2820,11 +2855,11 @@ static struct ofpbuf * dequeue_packet(struct pinsched *ps, struct pinqueue *q)
 
 static void advance_txq(struct pinsched *ps)
 
-    轮询从 ps->queues 中取出一个 pinqueue 对象
+    轮询从 ps->queues 中取出一个 pinqueue 对象,  ps->next_txq 指向该对象
 
 static struct ofpbuf *get_tx_packet(struct pinsched *ps)
 
-    每次调用, 轮询从 ps 取出一个 pinqueue 对象 q, 从 q->packets 中取出第一个数据包, 返回.
+    通过 ps->next_txq 遍历 ps, 从 ps->next_txq->packets 中删除一个数据包. 返回该数据包
 
 static bool get_token(struct pinsched *ps)
 

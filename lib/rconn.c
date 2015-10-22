@@ -548,6 +548,7 @@ timeout_ACTIVE(const struct rconn *rc)
     return UINT_MAX;
 }
 
+//从 rc->txq 中取出一条消息发送出去
 static void
 run_ACTIVE(struct rconn *rc)
     OVS_REQUIRES(rc->mutex)
@@ -566,6 +567,10 @@ run_ACTIVE(struct rconn *rc)
          * and we don't want to transition back to IDLE if so, because then we
          * can end up queuing a packet with vconn == NULL and then *boom*. */
         state_transition(rc, S_IDLE);
+        /*
+         * 如果 rc 处于连接状态,遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
+         * 否则 直接释放 b 的内存
+         */
         rconn_send__(rc, make_echo_request(version), NULL);
         return;
     }
@@ -611,6 +616,8 @@ run_DISCONNECTED(struct rconn *rc OVS_UNUSED)
 /* Performs whatever activities are necessary to maintain 'rc': if 'rc' is
  * disconnected, attempts to (re)connect, backing off as necessary; if 'rc' is
  * connected, attempts to send packets in the send queue, if any. */
+
+//尝试让 rc->vconn 和 rc->monitors 都处于连接建立状态, 从 rc->txq 中取出一条消息发送出去
 void
 rconn_run(struct rconn *rc)
     OVS_EXCLUDED(rc->mutex)
@@ -619,9 +626,11 @@ rconn_run(struct rconn *rc)
     size_t i;
 
     ovs_mutex_lock(&rc->mutex);
+    //尝试与 rc->vconn 建立连接
     if (rc->vconn) {
         int error;
 
+        //如果还没建立连接, 尝试建立连接
         vconn_run(rc->vconn);
 
         error = vconn_get_status(rc->vconn);
@@ -634,6 +643,7 @@ rconn_run(struct rconn *rc)
         struct ofpbuf *msg;
         int retval;
 
+        //如果还没建立连接, 尝试建立连接
         vconn_run(rc->monitors[i]);
 
         /* Drain any stray message that came in on the monitor connection. */
@@ -647,6 +657,7 @@ rconn_run(struct rconn *rc)
         i++;
     }
 
+    //从 rc->txq 中取出一条消息发送出去
     do {
         old_state = rc->state;
         switch (rc->state) {
@@ -692,6 +703,10 @@ rconn_run_wait(struct rconn *rc)
 /* Attempts to receive a packet from 'rc'.  If successful, returns the packet;
  * otherwise, returns a null pointer.  The caller is responsible for freeing
  * the packet (with ofpbuf_delete()). */
+/*
+ * 从 rc->vconn 接收消息, 将接受的消息, 遍历 rc->monitors 每个元素 monitor, 将 buffer 发送给 monitor 所对应的连接
+ * 如果发送失败, 将对应的 monitor 删除, 断开连接
+ */
 struct ofpbuf *
 rconn_recv(struct rconn *rc)
     OVS_EXCLUDED(rc->mutex)
@@ -702,8 +717,10 @@ rconn_recv(struct rconn *rc)
     if (rc->state & (S_ACTIVE | S_IDLE)) {
         int error = vconn_recv(rc->vconn, &buffer);
         if (!error) {
+            //遍历 rc->monitors 每个元素 monitor, 将 buffer 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除
             copy_to_monitor(rc, buffer);
-            //作用?
+            //如果连接已经建立 30 s, 或 buff->type 是已经建立连接的消息类型, 设置 probably_admitted = true, 更新 last_admitted
+            //TODO 作用?
             if (rc->probably_admitted || is_admitted_msg(buffer)
                 || time_now() - rc->last_connected >= 30) {
                 rc->probably_admitted = true;
@@ -737,9 +754,8 @@ rconn_recv_wait(struct rconn *rc)
 }
 
 /*
- * 如果 rc 处于连接状态, 将 b 发送给 rc->monitors 的每一个成员所对应的连接, b->list_node 加入 rc->txq 链表尾, 等待发送
+ * 如果 rc 处于连接状态,遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
  * 否则 直接释放 b 的内存
- *
  */
 static int
 rconn_send__(struct rconn *rc, struct ofpbuf *b,
@@ -748,6 +764,7 @@ rconn_send__(struct rconn *rc, struct ofpbuf *b,
 {
     if (rconn_is_connected(rc)) {
         COVERAGE_INC(rconn_queued);
+        //遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除
         copy_to_monitor(rc, b);
 
         if (counter) {
@@ -816,6 +833,11 @@ rconn_send(struct rconn *rc, struct ofpbuf *b,
  * There is no rconn_send_wait() function: an rconn has a send queue that it
  * takes care of sending if you call rconn_run(), which will have the side
  * effect of waking up poll_block(). */
+
+/*
+ * 如果 ofconn->packet_in_counter->n_packets < 100, 且 rc 处于连接状态, 遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
+ * 否则, 将 pin 丢弃(即是否内存), 返回 EAGAIN
+ */
 int
 rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b,
                       struct rconn_packet_counter *counter, int queue_limit)
@@ -825,6 +847,10 @@ rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b,
 
     ovs_mutex_lock(&rc->mutex);
     if (rconn_packet_counter_n_packets(counter) < queue_limit) {
+        /*
+         * 如果 rc 处于连接状态,遍历 rc->monitors 每个元素 monitor, 将 b 加入 monitor 所对应的连接 txq 中, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
+         * 否则 直接释放 b 的内存
+         */
         error = rconn_send__(rc, b, counter);
     } else {
         COVERAGE_INC(rconn_overflow);
@@ -1311,7 +1337,7 @@ close_monitor(struct rconn *rc, size_t idx, int retval)
     rc->monitors[idx] = rc->monitors[--rc->n_monitors];
 }
 
-//将 b 发送给所有的 rc->monitors 所对应的连接
+//遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除
 static void
 copy_to_monitor(struct rconn *rc, const struct ofpbuf *b)
     OVS_REQUIRES(rc->mutex)

@@ -1486,6 +1486,13 @@ ofconn_may_recv(const struct ofconn *ofconn)
     return count < OFCONN_REPLY_MAX;
 }
 
+/*
+ * 从 ofconn->rconn->txq 取 PACKET_IN 消息发送 ofconn->rc->vconn, 并接受应答,调用 handle_openflow 处理
+ *
+ * 1. 在满足速率限制的前提下, 从 ofconn->schedulers 每个元素中取 50 个元素加入 ofconn->rconn->txq 中;
+ * 2. 尝试让 ofconn->rconn->vconn 和 ofconn->rconn->monitors 都处于连接建立状态, 从 rc->txq 中取出一条消息发送出去
+ * 3. 接受对端的数据包, 调用 handle_openflow 进行处理. 在等待应答的包大于 100 或已经接收到 50 个包返回
+ */
 static void
 ofconn_run(struct ofconn *ofconn,
            void (*handle_openflow)(struct ofconn *,
@@ -1499,20 +1506,29 @@ ofconn_run(struct ofconn *ofconn,
         struct ovs_list txq;
 
         pinsched_run(ofconn->schedulers[i], &txq);
+        /*
+         * 将 txq 列表每个元素加入 ofconn->rconn->tx 中, 等待发送
+         *
+         * 遍历 txq 每个元素 pin
+         * 如果 ofconn->packet_in_counter->n_packets < 100, 且 rc 处于连接状态, 遍历 rc->monitors 每个元素 monitor, 将 b 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
+         * 否则, 将 pin 丢弃(即是否内存), 返回 EAGAIN
+         *
+         */
         do_send_packet_ins(ofconn, &txq);
     }
 
-    //2. ofconn->rconn 中的 vconn 与 monitors 与对端完成连接建立, 并将 ofconn->rconn-txq 中的数据包发送给对端
+    //2. 尝试让 rc->vconn 和 rc->monitors 都处于连接建立状态, 从 rc->txq 中取出一条消息发送出去
     rconn_run(ofconn->rconn);
 
     /* Limit the number of iterations to avoid starving other tasks. */
-    //3. 接受对端的数据包, 调用 handle_openflow 进行处理. 在等待应答的包大于100 或已经接收到 50 个包返回
+    //3. 从 ofconn->rconn->vconn 接受对端的数据包, 调用 handle_openflow 进行处理. 在等待应答的包大于 100 或已经接收到 50 个包返回
     for (i = 0; i < 50 && ofconn_may_recv(ofconn); i++) {
         struct ofpbuf *of_msg = rconn_recv(ofconn->rconn);
         if (!of_msg) {
             break;
         }
 
+        //TODO
         if (mgr->fail_open) {
             fail_open_maybe_recover(mgr->fail_open);
         }
@@ -1910,6 +1926,13 @@ connmgr_send_packet_in(struct connmgr *mgr,
         if (ofconn_wants_packet_in_on_miss(ofconn, pin)
             && ofconn_receives_async_msg(ofconn, OAM_PACKET_IN, reason)
             && ofconn->controller_id == pin->controller_id) {
+            /*
+             * 构造一个 PACKET_IN 消息,
+             *
+             * 如果没有对 PACKET_IN 速率进行限制, 遍历 rc->monitors 每个元素 monitor, 将 PACKET_IN 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 b->header, b->list_node 加入 rc->txq 链表尾, 等待发送
+             *
+             * 如果对 PACKET_IN 进行了速率限制, 将 PACKET_IN 加入 ofconn->schedulers[i]->queues 中 port_no 对应的 pinqueue 中.
+             */
             schedule_packet_in(ofconn, *pin, reason);
         }
     }
@@ -1917,6 +1940,12 @@ connmgr_send_packet_in(struct connmgr *mgr,
 
 /*
  * 将 txq 列表每个元素加入 ofconn->rconn->tx 中, 等待发送
+ *
+ * 遍历 txq 每个元素 pin
+ * 如果 ofconn->packet_in_counter->n_packets < 100, 且 ofconn->rconn 处于连接状态, 遍历 ofconn->rconn->monitors 每个元素 monitor, 将 pin 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 pin->header, pin->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+ * 否则, 将 pin 丢弃(即是否内存), 返回 EAGAIN
+ *
+ * TODO: 硬代码 100 是否合适
  */
 static void
 do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
@@ -1924,6 +1953,10 @@ do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
     struct ofpbuf *pin;
 
     LIST_FOR_EACH_POP (pin, list_node, txq) {
+        /*
+         * 如果 ofconn->packet_in_counter->n_packets < 100, 且 ofconn->rconn 处于连接状态, 遍历 ofconn->rconn->monitors 每个元素 monitor, 将 pin 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 pin->header, pin->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
+         * 否则, 将 pin 丢弃(即是否内存), 返回 EAGAIN
+         */
         if (rconn_send_with_limit(ofconn->rconn, pin,
                                   ofconn->packet_in_counter, 100) == EAGAIN) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
@@ -1937,7 +1970,14 @@ do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
 /* Takes 'pin', composes an OpenFlow packet-in message from it, and passes it
  * to 'ofconn''s packet scheduler for sending. */
 
-//将一个异步 PACKET_IN 消息加入 ofconn->rconn.
+/*
+ * 构造一个 PACKET_IN 消息,
+ *
+ * 如果没有对 PACKET_IN 速率进行限制, 遍历 ofconn->rconn->monitors 每个元素 monitor, 将 PACKET_IN 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter, 将 PACKET_IN 加入 rc->txq 链表尾, 等待发送
+ *
+ * NOTE:
+ * 如果对 PACKET_IN 进行了速率限制, 将 PACKET_IN 加入 ofconn->schedulers[i]->queues 中 port_no 对应的 pinqueue 中.
+ */
 static void
 schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
                    enum ofp_packet_in_reason wire_reason)
@@ -1979,15 +2019,30 @@ schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin,
         pin.up.packet_len = controller_max_len;
     }
 
-    //将 ofputil_encode_packet_in() 加入 txq
     /* Make OFPT_PACKET_IN and hand over to packet scheduler. */
+    /*
+     * 如果 ps 为 NULL, 将 packet 加入 txq
+     * 如果 ps->n_queued = 0 && ps->token_bucket->tokens > 100, 表明不进行速率限制, 将 ps->n_normal++, packet 加入 txq
+     * 否则, 进行速率限制, 将 packet 加入 port_no 对应的 pinqueue.
+     *
+     * NOTE:
+     * 如果超过速率, 找到 ps->queues 中最长的队列(如果有多个一样长的,随机选择一个)删除一个包
+     */
     pinsched_send(ofconn->schedulers[pin.up.reason == OFPR_NO_MATCH ? 0 : 1],
                   pin.up.flow_metadata.flow.in_port.ofp_port,
                   ofputil_encode_packet_in(&pin.up,
                                            ofconn_get_protocol(ofconn),
                                            ofconn->packet_in_format),
                   &txq);
-    //将 txq 加入 ofconn->rconn->txq 中
+    /*
+     * 将 txq 列表每个元素加入 ofconn->rconn->tx 中, 等待发送
+     *
+     * 遍历 txq 每个元素 pin
+     * 如果 ofconn->packet_in_counter->n_packets < 100, 且 ofconn->rconn 处于连接状态, 遍历 ofconn->rconn->monitors 每个元素 monitor, 将 pin 发送给 monitor 所对应的连接, 如果发送失败, 将对应的 monitor 删除, 更新 counter 之后保持在 pin->header, pin->list_node 加入 rc->txq 链表尾, 等待发送
+     * 否则, 将 pin 丢弃(即是否内存), 返回 EAGAIN
+     *
+     * TODO: 硬代码 100 是否合适
+     */
     do_send_packet_ins(ofconn, &txq);
 }
 
@@ -2501,7 +2556,7 @@ ofmonitor_report(struct connmgr *mgr, struct rule *rule,
 /*
  *  遍历 mgr->all_conns 中的每一个 ofconn, 对每个 ofconn->updates 中的 msg,
  *  如果 ofconn->rconn 处于连接状态, 将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾, 等待发送
- *  如果 msg->size 之和大于 128 * 1024 就发送监控停止消息, 停止 monitor_seqno++ 的 monitor
+ *  如果 ofconn->monitor_counter->n_bytes 大于 128 * 1024, 构造 pause 消息, 记录 monitor_seqno, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员, pause->list_node 加入 ofconn->rconn->txq 链表尾.
  */
 void
 ofmonitor_flush(struct connmgr *mgr)
@@ -2518,9 +2573,11 @@ ofmonitor_flush(struct connmgr *mgr)
             //将 msg 拷贝给 ofconn->rconn->monitors 的每一个成员, msg->list_node 加入 ofconn->rconn->txq 链表尾
             ofconn_send(ofconn, msg, ofconn->monitor_counter);
             n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
-            //如果当前 monitor 都在运行, 而 n_bytes 大于 128 K, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员,
-            //pause->list_node 加入 ofconn->rconn->txq 链表尾
-            //TODO: WHY ? 这里主要是流控
+            /*
+             * 如果当前 monitor 都在运行, 而 n_bytes 大于 128 K, 构造 pause 消息, 将 pause 拷贝给 ofconn->rconn->monitors 的每一个成员,
+             * pause->list_node 加入 ofconn->rconn->txq 链表尾
+             * TODO: WHY ? 这里主要是流控
+             */
             if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {
                 struct ofpbuf *pause;
 
@@ -2537,7 +2594,7 @@ ofmonitor_flush(struct connmgr *mgr)
 /*
  * 遍历 ofconn->monitors 的每个 monitor, 根据 monitor->table 找到流表, 根据
  * monitor->match 找到对应的 rules, 将 rules 加入 ofconn->rconn->txq 中等待发送
- * 1. 遍历 ofconn->monitors 中的每一个 ofmonitor m
+ * 1. 遍历 ofconn->monitors 中的每一个 ofmonitor 对象 m
  * 2. 在 m->ofconn->connmgr->ofproto 中找到 table_id = m->table_id  的 table
  *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
  * 3. 遍历 rules 每个元素加入 msgs 中
@@ -2586,6 +2643,16 @@ ofmonitor_may_resume(const struct ofconn *ofconn)
             && !rconn_packet_counter_n_packets(ofconn->monitor_counter));
 }
 
+/*
+ *  遍历 mgr->all_conns 的所有 ofconn:
+ *
+ *  如果该 ofconn 的 monitor 有被设置为停止的, 唤醒.
+ *  否则什么也不做
+ *
+ *  其中唤醒操作包括:
+ *  遍历 ofconn->monitors 的每个 monitor, 根据 monitor->table 找到流表, 根据
+ *  monitor->match 找到对应的 rules, 将 rules 加入 ofconn->rconn->txq 中等待发送
+ */
 static void
 ofmonitor_run(struct connmgr *mgr)
 {

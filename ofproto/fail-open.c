@@ -209,6 +209,7 @@ fail_open_recover(struct fail_open *fo)
     fo->next_bogus_packet_in = LLONG_MAX;
 
     match_init_catchall(&match);
+    //TODO 删除所有流表
     ofproto_delete_flow(fo->ofproto, &match, FAIL_OPEN_PRIORITY);
 }
 

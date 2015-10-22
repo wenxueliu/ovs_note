@@ -3415,6 +3415,10 @@ ofputil_decode_packet_in(struct ofputil_packet_in *pin,
     return 0;
 }
 
+/*
+ * 构造 OF1.0 PACKET_IN 消息
+ * TODO
+ */
 static struct ofpbuf *
 ofputil_encode_ofp10_packet_in(const struct ofputil_packet_in *pin)
 {
@@ -3434,6 +3438,10 @@ ofputil_encode_ofp10_packet_in(const struct ofputil_packet_in *pin)
     return packet;
 }
 
+/*
+ * 构造 1.0 版本 PACKET_IN 消息
+ * TODO
+ */
 static struct ofpbuf *
 ofputil_encode_nx_packet_in(const struct ofputil_packet_in *pin)
 {
@@ -3522,6 +3530,11 @@ ofputil_encode_ofp12_packet_in(const struct ofputil_packet_in *pin,
     return packet;
 }
 
+/*
+ *
+ *
+ *
+ */
 /* Converts abstract ofputil_packet_in 'pin' into a PACKET_IN message
  * in the format specified by 'packet_in_format'.  */
 struct ofpbuf *

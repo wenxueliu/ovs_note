@@ -58,6 +58,15 @@ token_bucket_set(struct token_bucket *tb,
 /* Attempts to remove 'n' tokens from 'tb'.  Returns true if successful, false
  * if 'tb' contained fewer than 'n' tokens (and thus 'n' tokens could not be
  * removed) . */
+/*
+ * 从 tb->tokens 减 n, 如果大于 n 返回 true, 否则返回 false;
+ *
+ * 如果 tb->tokens 小于 n, 更新 tb->tokens, 如果还小于 n, 返回 false,
+ * 否则, 返回 true
+ *
+ * tb->tokens : 正常情况下 MIN((now - tb->last_fill) * tb->rate, tb->burst)
+ *
+ */
 bool
 token_bucket_withdraw(struct token_bucket *tb, unsigned int n)
 {

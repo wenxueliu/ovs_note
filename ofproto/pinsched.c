@@ -56,6 +56,12 @@ struct pinsched {
     unsigned long long n_queue_dropped; /* # dropped due to queue overflow. */
 };
 
+/*
+ * 轮询从 ps->queues 中取出一个 pinqueue 对象, ps->next_txq 指向该对象
+ *
+ * 如果 ps->next_txq != NULL, ps->next_txq->node = NULL, 从 ps->queues->buckets 从 (node->hash & hmap->mask) + 1) 开始找到不为 NULL 的节点 node, ps->next_txq = node, 否则为 node, ps->next_txq = NULL;
+ * 如果 ps->next_txq == NULL, 从 ps->queues->buckets 从 0 开始找到不为 NULL 的节点 node, ps->next_txq = node, 否则为 node, ps->next_txq = NULL;
+ */
 static void
 advance_txq(struct pinsched *ps)
 {
@@ -70,7 +76,7 @@ advance_txq(struct pinsched *ps)
 /* Removes the front element from 'q->packets' Undefined behavior if
    'p->packets' is empty before removal. */
 
-//删除 q->packets 第一个数据包. 返回被删除的数据包
+//删除 q->packets 第一个数据. 返回被删除的数据包
 static struct ofpbuf *
 dequeue_packet(struct pinsched *ps, struct pinqueue *q)
 {
@@ -103,6 +109,8 @@ pinqueue_destroy(struct pinsched *ps, struct pinqueue *q)
     free(q);
 }
 
+//从 ps 中获取 port_no 对应的 pinqueue
+//TODO ps 不能为 NULL, 当然这可以作为约定
 static struct pinqueue *
 pinqueue_get(struct pinsched *ps, ofp_port_t port_no)
 {
@@ -124,6 +132,7 @@ pinqueue_get(struct pinsched *ps, ofp_port_t port_no)
 }
 
 /* Drop a packet from the longest queue in 'ps'. */
+//找到 ps->queues 中最长的队列(如果有多个一样长的,随机选择一个)删除一个包
 static void
 drop_packet(struct pinsched *ps)
 {
@@ -158,6 +167,11 @@ drop_packet(struct pinsched *ps)
 }
 
 /* Remove and return the next packet to transmit (in round-robin order). */
+/*
+ * 通过 ps->next_txq 遍历 ps, 从 ps->next_txq->packets 中删除一个数据包. 返回该数据包
+ *
+ * TODO 如果 pinsched 进行了 hash 重分配, 会有什么样的影响 ?
+ */
 static struct ofpbuf *
 get_tx_packet(struct pinsched *ps)
 {
@@ -168,7 +182,9 @@ get_tx_packet(struct pinsched *ps)
         advance_txq(ps);
     }
 
+    //TODO 如果 q = NULL
     q = ps->next_txq;
+    //删除 q->packets 第一个数据. 返回被删除的数据包
     packet = dequeue_packet(ps, q);
     advance_txq(ps);
     if (q->n == 0) {
@@ -181,13 +197,23 @@ get_tx_packet(struct pinsched *ps)
 /* Attempts to remove enough tokens from 'ps' to transmit a packet.  Returns
  * true if successful, false otherwise.  (In the latter case no tokens are
  * removed.) */
+//TODO
+//ps->token_bucket->tokens 是否大于 1000
 static bool
 get_token(struct pinsched *ps)
 {
+    //ps->token_bucket->tokens 是否大于 1000
     return token_bucket_withdraw(&ps->token_bucket, 1000);
 }
 
-//packet 参数校验
+/*
+ * 如果 ps 为 NULL, 将 packet 加入 txq
+ * 如果 ps->n_queued = 0 && ps->token_bucket->tokens > 100, 表明不进行速率限制, 将 ps->n_normal++, packet 加入 txq
+ * 否则, 进行速率限制, 将 packet 加入 port_no 对应的 pinqueue.
+ *
+ * NOTE:
+ * 如果超过速率, 找到 ps->queues 中最长的队列(如果有多个一样长的,随机选择一个)删除一个包
+ */
 void
 pinsched_send(struct pinsched *ps, ofp_port_t port_no,
               struct ofpbuf *packet, struct ovs_list *txq)
@@ -211,11 +237,14 @@ pinsched_send(struct pinsched *ps, ofp_port_t port_no,
         ofpbuf_trim(packet);
 
         /*
-         * 初始化时 burst * 1000 因此, 这里 ps->n_queued * 1000, 当然这里
+         * 初始化时 burst * 1000 因此, 这里 ps->n_queued * 1000
+         *
+         * NOTE:
          * ps->n_queued * 1000 溢出的概率并不大
          *
          */
         if (ps->n_queued * 1000 >= ps->token_bucket.burst) {
+            //找到 ps->queues 中最长的队列(如果有多个一样长的,随机选择一个)删除一个包
             drop_packet(ps);
         }
         q = pinqueue_get(ps, port_no);
@@ -226,6 +255,7 @@ pinsched_send(struct pinsched *ps, ofp_port_t port_no,
     }
 }
 
+//在满足限速的条件下, 从 ps 中取出　50 个数据包加入 txq 中
 void
 pinsched_run(struct pinsched *ps, struct ovs_list *txq)
 {

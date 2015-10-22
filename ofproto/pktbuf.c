@@ -39,8 +39,11 @@ COVERAGE_DEFINE(pktbuf_reuse_error);
  * different packets that have occupied a single buffer.  Thus, the more
  * buffers we have, the lower-quality the cookie... */
 
-/* @id : buffer_id, 低 0-7 位为 buffer number, 第 9-31 是 cookie id
- * cookie 是 id 与 buffer 是否对应的标志
+/* ofconn->pktbuf : 保持 buffer_id 的包
+ * buffer_id : 32位
+ * 第 0-7 位为 buffer_ids 即 buffers 中的索引, 用于区别不同的 buffer;
+ * 第 9-31 是 cookie id, 用于同一 buffer 的包;
+ * 每一个 buffer 都有过期时间, 为 OVERWRITE_MSECS (5000 ms)
  */
 
 #define PKTBUF_BITS     8
@@ -107,6 +110,13 @@ make_id(unsigned int buffer_idx, unsigned int cookie)
  * guaranteed to be true forever).  On failure, returns UINT32_MAX.
  *
  * The caller retains ownership of 'buffer'. */
+/*
+ * 生成一个 PACKET_IN buffer.
+ * 1. 指向 pb->packets[pb->buffer_idx], 如果 pb->packets[pb->buffer_idx] 不为 NULL, 且过期, 先释放对应内存. 如果没有过期直接返回
+ * 2. 内容为 buffer
+ * 3. 输入端口为 in_port
+ * 返回 buffer_id = pb->buffer_idx | pb->packets[pb->buffer_idx]->cookie << 24
+ */
 uint32_t
 pktbuf_save(struct pktbuf *pb, const void *buffer, size_t buffer_size,
             ofp_port_t in_port)
