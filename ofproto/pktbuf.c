@@ -184,7 +184,8 @@ pktbuf_get_null(void)
  *
  * On failure, stores NULL in in '*bufferp' and UINT16_MAX in '*in_port'. */
 
-/* 如果 id 中的 cookie 与 ofconn->pkgbuf 中的 cookie 对应, 那么
+/*
+ * 如果 id >> PKTBUF_MASK 与 ofconn->pkgbuf 中的 cookie 对应, 那么
  *
  *      bufferp = ofconn->pktbuf->packet[id & PKTBUF_MASK]->buff,
  *      in_port = ofconn->pktbuf->packet[id & PKTBUF_MASK]->in_port

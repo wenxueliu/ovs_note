@@ -500,6 +500,9 @@ emc_cache_init(struct emc_cache *flow_cache)
     }
 }
 
+/*
+ * 主要是否 flow_cache->entries[i]->flow 指针, 其他会自动是否
+ */
 static void
 emc_cache_uninit(struct emc_cache *flow_cache)
 {
@@ -549,6 +552,22 @@ enum pmd_info_type {
     PMD_INFO_CLEAR_STATS  /* set the cycles count to 0 */
 };
 
+/*
+ * 用 pmd 初始化 reply, stats, cycles
+ *
+ * reply 信息:
+ * main_thread
+ * numa_id pmd->numa_id core_id pmd->core_id
+ * emc hits
+ * megaflow hits
+ * miss
+ * lost
+ *
+ * polling cycles
+ * processing cycles
+ * avg cycles per packet
+ * avg processing cycles per packet
+ */
 static void
 pmd_info_show_stats(struct ds *reply,
                     struct dp_netdev_pmd_thread *pmd,
@@ -654,6 +673,9 @@ pmd_info_clear_stats(struct ds *reply OVS_UNUSED,
     }
 }
 
+/*
+ * 应答 ovsdb 数据 pmd-stats-show, pmd-stats-clear 命令
+ */
 static void
 dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
                      void *aux)
@@ -705,6 +727,7 @@ dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
     ds_destroy(&reply);
 }
 
+//将 dpif-netdev/pmd-stats-show, dpif-netdev/pmd-stats-clear 加入 commands 中
 static int
 dpif_netdev_init(void)
 {
@@ -761,6 +784,7 @@ dpif_netdev_port_open_type(const struct dpif_class *class, const char *type)
                   : "tap";
 }
 
+//创建并初始化 dpif_netdev 对象
 static struct dpif *
 create_dpif_netdev(struct dp_netdev *dp)
 {
@@ -779,7 +803,9 @@ create_dpif_netdev(struct dp_netdev *dp)
 
 /* Choose an unused, non-zero port number and return it on success.
  * Return ODPP_NONE on failure. */
-//如果 name 以 br 开始 端口起始为 100 加上 br 后的数字
+/*
+ * 从 1 开始查找 dp->ports 中没有用的端口
+ */
 static odp_port_t
 choose_port(struct dp_netdev *dp, const char *name)
     OVS_REQUIRES(dp->port_mutex)
@@ -820,7 +846,9 @@ choose_port(struct dp_netdev *dp, const char *name)
     return ODPP_NONE;
 }
 
-//dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
+/*
+ * dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
+ */
 static int
 create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
@@ -855,7 +883,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     dp->n_dpdk_rxqs = NR_QUEUE;
 
     ovs_mutex_lock(&dp->port_mutex);
-    //初始化 port 对象并加入 dp->ports. type 为 tap
+    //初始化 port 对象并加入 dp->ports. type 为 tap, 即用户态的 datapath
     error = do_add_port(dp, name, "internal", ODPP_LOCAL);
     ovs_mutex_unlock(&dp->port_mutex);
     if (error) {
@@ -889,6 +917,7 @@ dpif_netdev_open(const struct dpif_class *class, const char *name,
     ovs_mutex_lock(&dp_netdev_mutex);
     dp = shash_find_data(&dp_netdevs, name);
     if (!dp) {
+        //dp_netdevs 增加 name 的 dp_netdev 对象并初始化该对象, dpp 指向新的 dp_netdev
         error = create ? create_dp_netdev(name, class, &dp) : ENODEV;
     } else {
         error = (dp->class != class ? EINVAL
@@ -896,6 +925,7 @@ dpif_netdev_open(const struct dpif_class *class, const char *name,
                  : 0);
     }
     if (!error) {
+        //创建并初始化 dpif_netdev 对象
         *dpifp = create_dpif_netdev(dp);
         dp->dpif = *dpifp;
     }
@@ -967,6 +997,7 @@ dp_netdev_unref(struct dp_netdev *dp)
 }
 
 //从 dpif 定位到 dp_netdev 对象 dp, 如果 dp->ref_cnt = 0, 从 dp_netdevs 中删除 dp_netdev, 并释放 dp 内存
+// 对 dpif 对应的 dp_netdev 引用计数减一
 static void
 dpif_netdev_close(struct dpif *dpif)
 {
@@ -976,6 +1007,7 @@ dpif_netdev_close(struct dpif *dpif)
     free(dpif);
 }
 
+//如果 dpif 对应的 dp_netdev 还没有销毁, 引用技术减一
 static int
 dpif_netdev_destroy(struct dpif *dpif)
 {
@@ -1094,7 +1126,7 @@ do_add_port(struct dp_netdev *dp, const char *devname, const char *type,
     int i;
 
     /* Reject devices already in 'dp'. */
-    //从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. portp 指向找到的 port
+    //从 dp->ports 中找到 dp->ports[i]->netdev->name = devname 的 port, 并返回 0. port 指向找到的 port
     if (!get_port_by_name(dp, devname, &port)) {
         return EEXIST;
     }

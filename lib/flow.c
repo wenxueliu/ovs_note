@@ -431,7 +431,6 @@ invalid:
  */
 /*
  * 用 packet 初始化 flow
- *
  */
 void
 flow_extract(struct dp_packet *packet, struct flow *flow)

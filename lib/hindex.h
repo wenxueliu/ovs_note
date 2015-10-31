@@ -127,6 +127,7 @@ void hindex_remove(struct hindex *, struct hindex_node *);
  *
  * Evaluates HASH only once.
  */
+//以 HASH 为索引, 在 HINDEX[HASH & HINDEX->mask] 遍历每一个节点 node, 找到 node->hash = HASH 的节点 node,  由 node 定位到所属的 NODE.
 #define HINDEX_FOR_EACH_WITH_HASH(NODE, MEMBER, HASH, HINDEX)               \
     for (INIT_CONTAINER(NODE, hindex_node_with_hash(HINDEX, HASH), MEMBER); \
          NODE != OBJECT_CONTAINING(NULL, NODE, MEMBER);                     \

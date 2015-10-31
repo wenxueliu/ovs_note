@@ -20,7 +20,33 @@
 配置
 
 flow-restore-wait : true | false, false : 删除所有流表
-flow-limit : 
+flow-limit : 在flow table中flow entry的数量
+stats-update-interval ：将统计信息写入数据库的间隔时间
+
+flow-restore-wait :
+
+ 为hot-upgrade使用的，如果设为true则不处理任何的包。一般使用的过程为，先停掉ovs-vswitchd，然后将这个值设为true，启
+ 动ovs-vswitchd，这个时候不处理任何包，然后使用ovs-ofctl将flow table
+ restore到一个正确的状态，最后设置这个值为false，开始处理包
+
+enable-statistics 是否统计
+
+    statistics : cpu 统计cpu数量，线程
+    statistics : load_average system load
+    statistics : memory 总RAM，swap
+    statistics : process_NAME ：with NAME replaced by a process name，统计memory size, cpu time等
+    statistics : file_systems：mount point, size, used
+
+ovs-vsctl del-port br0 eth-0-5
+ovs-vsctl del-port br0 eth-0-6
+ovs-vsctl add-bond br0 bond2 eth-0-5 eth-0-5 bond_mode=balance-slb -- set interface eth-0-5 type=switch -- set interface eth-0-6 type=switch
+
+#限速
+
+sudo ovs-vsctl list interface tap1
+sudo ovs-vsctl set interface tap1 ingress_policing_burst=100
+sudo ovs-vsctl set interface tap1 ingress_policing_rate=1000
+sudo ovs-vsctl list Interface tap1
 
 组表
 
@@ -42,6 +68,44 @@ ovs-vsctl set Bridge br0 flow_tables:1=@N1 -- \
 
 ovs-vsctl set Flow_Table table0 prefixes=ip_dst,ip_src
 ovs-vsctl set Flow_Table table1 prefixes=[]
+
+ovs-vsctl add-port ovs-switch p0 -- set Interface p0 ofport_request=100
+
+创建一个端口 p0，设置端口 p0 的 OpenFlow 端口编号为
+100（如果在创建端口的时候没有指定 OpenFlow 端口编号，OVS 会自动生成一个）。
+
+ovs-vsctl set Interface p0 type=internal
+
+设置网络接口设备的类型为“internal”。对于 internal 类型的的网络接口，OVS 会同时在
+Linux 系统中创建一个可以用来收发数据的模拟网络设备。我们可以为这个网络设备配置
+IP 地址、进行数据监听等等。
+
+ovs-dpctl show
+
+system@ovs-system:
+lookups: hit:12173 missed:712 lost:0
+flows: 0
+port 0: ovs-system (internal)
+    port 1: ovs-switch (internal)
+    port 2: p0 (internal)
+    port 3: p1 (internal)
+    port 4: p2 (internal)
+
+屏蔽所有进入 OVS 的以太网广播数据包
+
+ovs-ofctl add-flow ovs-switch "table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, actions=drop"
+
+屏蔽 STP 协议的广播数据包
+
+ovs-ofctl add-flow ovs-switch "table=0, dl_dst=01:80:c2:00:00:00/ff:ff:ff:ff:ff:f0, actions=drop"
+
+生成数据包
+
+ovs-appctl ofproto/trace ovs-switch in_port=100,dl_src=66:4e:cc:ae:4d:20, dl_dst=46:54:8a:95:dd:f8 -generate
+
+ovsdb-client dump
+
+
 
 http://openvswitch.org/pipermail/discuss/2014-December/015968.html
 

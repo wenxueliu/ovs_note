@@ -1,3 +1,14 @@
+##设备管理
+
+dpif_netlink_open
+
+向内核发送创建 datapath 的消息, 内核将创建一个 datapath, 返回给用户空间, 用户空间解析内核应答
+创建 dpif_netlink_dp 对象. 之后用 dpif_netlink_dp 创建 dpif_netlink 对象及　dpif 对象
+
+vport_create_socksp
+
+创建内核与用户空间的 NETLINK 通信
+
 
 ## 控制器连接管理
 
@@ -5,13 +16,13 @@
 
 ###OpenFlow 连接(ofconn)
 
-每个控制器对应一个 ofconn, 可以是多个控制器
+每个控制器对应一个 ofconn, 可以是多个控制器, 详细的交换机和控制的处理消息都在 handle_openflow 函数中
 
-###稳定连接(rconn)
+###稳定连接(ofconn->rconn)
 
 每次待发送的消息保持一份到 该稳定链接的所有 monitor(rconn->monitors), 拷贝一份到一个传输队列(rconn->txq).
 
-###链路监控(ofmonitor)
+###链路监控(ofocnn->ofmonitor)
 
 monitor_seqno: 全局变量, 每次流表的添加和修改 monitor_seqno 加 1
 monitor_counter : 每次发送消息都会更新计数, 包括 bytes 和 packets, 当 bytes 到达 128 * 1024, 发送停止消息.
@@ -27,195 +38,105 @@ buffer-id = 0 | (1 << 24 ) - 1 是处于 fail_open 模式下特用的 buffer_id
 
 PACKET_IN 默认发送长度是 128 字节, 如果是显示的　ACTION 要求,由具体的 PACKET_IN 包大小决定
 
-如果对 PACKET_IN 进行速率限制, PACKET_IN 都保持在 ofconn->schedulers 中. ofconn->schedulers 包含两个元素, 0: 表示 PACKET_IN 是 NO_MATCH, 1 表示是其他原因(如果 ACTION 到控制器)
+如果对 PACKET_IN 进行速率限制, PACKET_IN 都保持在 ofconn->schedulers 中. ofconn->schedulers 包含两个元素, 
+0: 表示 PACKET_IN 是 NO_MATCH, 1 表示是其他原因(如果 ACTION 到控制器)
 
 如果没有对 PACKET_IN 进行速率限制, 都是直接发送
 
 ofconn->schedulers[i]->queues (i=0,1) 包含一系列以端口为索引的链表, 每个链表保存同一端口的 PACKET_IN 数据包
 
 
+##内核通信管理
+
+通过 NETLINK 与内核通信, 用户空间的 socket 对象对应内核的一个 pid, 交换机每增加一个端口 dpif->n_handlers 个 socket
+, 并将 socket 对应的 pid 传给内核, 内核当需要发送 PACKET_IN 消息时, 查询端口对应的 pid, 通过 NETLINK 将消息发送该
+PID, 用户态对应的 socket 就能收到该消息.
 
 
+/*
+ * 保存 genl_family 对象, 以 genl_family->id 为索引
+ * ovs_datapath_family : { .name=OVS_DATAPATH_FAMILY, .id=ovs_datapath_family }
+ * ovs_vport_family : { .name=OVS_VPORT_FAMILY, .id=ovs_vport_family }
+ * ovs_flow_family : { .name=OVS_FLOW_FAMILY, .id=ovs_flow_family }
+ * ovs_packet_family : { .name=OVS_PACKET_FAMILY, .id=ovs_packet_family }
+ */
+static struct hmap genl_families = HMAP_INITIALIZER(&genl_families);
 
 
+dpif_netlink_init :
+
+    genl_family:
+          id                 name
+    OVS_DATAPATH_FAMILY ovs_datapath_family
+    OVS_VPORT_FAMILY    ovs_vport_family
+    OVS_FLOW_FAMILY     ovs_flow_family
+    OVS_PACKET_FAMILY   ovs_packet_family
+
+                      CTRL_ATTR_MCAST_GRP_NAME CTRL_ATTR_MCAST_GRP_ID
+    OVS_VPORT_FAMILY     OVS_VPORT_FAMILY         ovs_vport_mcgroup
+
+###交互处理 dpif_netlink->handlers
+
+总共有 dpif->n_handlers 个, 每个 handler 对应一个线程. 每个 handler 又包含 port_num(端口数量) 个 channel
+每增加端口, 每个 handler 增加一个 channel
+
+dpif_netlink_open       : 向内核发送创建交换机的消息并在用户空间创建 dpif_netlink 对象
+dpif_netlink_close      : 删除用户态交换机
+dpif_netlink_destroy    : 向内核发送消息删除 dpif_ 对应的 datapath
+dpif_netlink_get_stats  : 向内核获取交换机的统计信息
+get_vport_type          : 获取端口类型, 目前支持 internal, system, stt, geneve, gre, gre64, vxlan, lisp.
+dpif_netlink_port_add   : 向内核发送消息在一台交换机上增加一个端口, 并且在用户空间增加对应的 channel,
+                          监听内核该端口的包发送到用户空间的消息.如 PACKET_IN 消息.
+dpif_netlink_port_del   : 向内核发送消息在一台交换机上删除一个端口, 并且在用户空间删除端口号对应的 channel
+dpif_netlink_port_query_by_number : 向内核发送消息查询指定端口号对应的端口
+dpif_netlink_port_query_by_name   : 向内核发送消息查询指定端口名的端口
+dpif_netlink_flow_flush           : 向内核发送消息删除交换机下的所有流表
+
+遍历内核中端口的三段式
+
+dpif_netlink_port_dump_start : 向内核发送获取所有端口的阻塞的请求, 并要求内核应答.
+dpif_netlink_port_dump_next  : 无限循环非阻塞地接受内核的应答, 直到遍历完或与遇到错误
+dpif_netlink_port_dump_done  : 当遍历完或不想继续接受后续消息
+
+
+dpif_netlink_port_poll       : 非阻塞地无限循环接受内核广播信息, 直到端口发送变化或发生错误
+dpif_netlink_port_poll_wait  : poll 等待内核的广播信息.
+
+dpif_netlink_flow_get        : 向内核发送消息获取交换机下某个 key 或 ufid 对应的流表
+
+遍历内核中流表项的五段式, 支持多线程
+
+dpif_netlink_flow_dump_create  : 向内核发送消息, 请求内核发送所有的流表项
+dpif_netlink_flow_dump_thread_create : 初始化遍历流表项的线程
+
+dpif_netlink_flow_dump_next : 无限循环当前线程非阻塞地接受内核发送的流表, 解析后保存, 直到遍历完, 达到期望遍历的流表数或发生错误退出。
+
+dpif_netlink_flow_dump_destroy : 当遍历完或不想继续接受后续消息
+dpif_netlink_flow_dump_thread_destroy : 销毁遍历流表项的线程
+
+
+dpif_netlink_operate  : 对内核的流表执行批量操作, get, put, del, execute
+dpif_netlink_recv_set : 是否接受内核数据包
+dpif_netlink_handlers_set : 设置内核 handle, 刷新所有端口
+dpif_netlink_queue_to_priority : TODO
+
+dpif_netlink_recv : 对其中一个 handler, 如果所有的事件都处理完, 重新等待内核空间发送的消息, 否则, 
+                    非阻塞遍历所有的可读事件, 接受数据并处理
+
+dpif_netlink_recv_wait : 将 POLLIN 加入 handler 的监听
+dpif_netlink_recv_purge :  将 dpif->handlers 中所有的 fd 监听的数据都丢弃
+dpif_netlink_get_datapath_version : 获取 datapath 版本
+
+
+##用户空间的 datapath
+
+dpif_netdev_enumerate : 从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 all_dps 中
+dpif_netdev_port_open_type : 返回 类型
+dpif_netdev_open : 创建 dpif_netdev 对象
+dpif_netdev_close : 对 dp_netdev 引用计数减一
+dpif_netdev_destroy : 如果 dp_netdev 还没有销毁, 引用技术减一
 
 ###数据结构
-
-/* Connection manager for an OpenFlow switch. */
-struct connmgr {
-    //交换机
-    struct ofproto *ofproto;
-    char *name;
-    char *local_port_name;
-
-    /* OpenFlow connections. */
-    struct hmap controllers;            /* All OFCONN_PRIMARY controllers. */
-    struct ovs_list all_conns;          /* All controllers. */
-    uint64_t master_election_id;        /* monotonically increasing sequence number
-                                            * for master election , default 0 */
-    bool master_election_id_defined;    /* default false */
-
-    /* OpenFlow listeners. */
-    struct hmap services;               /* Contains "struct ofservice"s. */
-    struct pvconn **snoops;
-    size_t n_snoops;                    /* the number of snoops */
-
-    /* Fail open. */
-    struct fail_open *fail_open;
-    enum ofproto_fail_mode fail_mode;   /* default OFPROTO_FAIL_SECURE */
-
-    /* In-band control. */
-    struct in_band *in_band;
-    struct sockaddr_in *extra_in_band_remotes;
-    size_t n_extra_remotes;             /* defautl 0 */
-    int in_band_queue;                  /* default -1 */
-};
-
-####all_conns
-
-struct ofconn {
-/* Configuration that persists from one connection to the next. */
-
-    //list 元素, connmgr->all_conns 的成员
-    struct ovs_list node;       /* In struct connmgr's "all_conns" list. */
-    struct hmap_node hmap_node; /* In struct connmgr's "controllers" map. */
-
-    struct connmgr *connmgr;    /* Connection's manager. */
-    struct rconn *rconn;        /* OpenFlow connection. */
-    enum ofconn_type type;      /* Type. */
-    enum ofproto_band band;     /* In-band or out-of-band? */
-    bool enable_async_msgs;     /* Initially enable async messages? */
-
-/* State that should be cleared from one connection to the next. */
-
-    /* OpenFlow state. */
-    enum ofp12_controller_role role;                /* Role.  default OFPCR12_ROLE_EQUAL*/
-    enum ofputil_protocol protocol;                 /* Current protocol variant. default OFPUTIL_P_NONE*/
-    enum nx_packet_in_format packet_in_format;      /* OFPT_PACKET_IN format. default NXPIF_OPENFLOW10*/
-
-    /* OFPT_PACKET_IN related data. */
-    struct rconn_packet_counter *packet_in_counter; /* # queued on 'rconn'. */
-#define N_SCHEDULERS 2
-    struct pinsched *schedulers[N_SCHEDULERS];
-    struct pktbuf *pktbuf;         /* OpenFlow packet buffers. */
-    /* 如果 table_miss 发送给 controller 的长度 ofconn->type == OFCONN_PRIMARY ? OFP_DEFAULT_MISS_SEND_LEN : 0*/
-    int miss_send_len;             /* Bytes to send of buffered packets. */
-    uint16_t controller_id;     /* Connection controller ID. */
-
-    /* Number of OpenFlow messages queued on 'rconn' as replies to OpenFlow
-     * requests, and the maximum number before we stop reading OpenFlow
-     * requests.  */
-#define OFCONN_REPLY_MAX 100
-    struct rconn_packet_counter *reply_counter;
-
-    /* Asynchronous message configuration in each possible roles.
-     *
-     * A 1-bit enables sending an asynchronous message for one possible reason
-     * that the message might be generated, a 0-bit disables it. */
-    uint32_t master_async_config[OAM_N_TYPES]; /* master, other */
-    uint32_t slave_async_config[OAM_N_TYPES];  /* slave */
-
-    /* Flow table operation logging. */
-    int n_add, n_delete, n_modify; /* Number of unreported ops of each kind. */
-    long long int first_op, last_op; /* Range of times for unreported ops. */
-    long long int next_op_report;    /* Time to report ops, default LLONG_MAX. */
-    long long int op_backoff;        /* Earliest time to report ops again. */
-
-/* Flow monitors (e.g. NXST_FLOW_MONITOR). */
-
-    /* Configuration.  Contains "struct ofmonitor"s. */
-    struct hmap monitors OVS_GUARDED_BY(ofproto_mutex);
-
-    /* Flow control.
-     *
-     * When too many flow monitor notifications back up in the transmit buffer,
-     * we pause the transmission of further notifications.  These members track
-     * the flow control state.
-     *
-     * When notifications are flowing, 'monitor_paused' is 0.  When
-     * notifications are paused, 'monitor_paused' is the value of
-     * 'monitor_seqno' at the point we paused.
-     *
-     * 'monitor_counter' counts the OpenFlow messages and bytes currently in
-     * flight.  This value growing too large triggers pausing. */
-    uint64_t monitor_paused OVS_GUARDED_BY(ofproto_mutex);
-    struct rconn_packet_counter *monitor_counter OVS_GUARDED_BY(ofproto_mutex);
-
-    /* State of monitors for a single ongoing flow_mod.
-     *
-     * 'updates' is a list of "struct ofpbuf"s that contain
-     * NXST_FLOW_MONITOR_REPLY messages representing the changes made by the
-     * current flow_mod.
-     *
-     * When 'updates' is nonempty, 'sent_abbrev_update' is true if 'updates'
-     * contains an update event of type NXFME_ABBREV and false otherwise.. */
-    struct ovs_list updates OVS_GUARDED_BY(ofproto_mutex);
-    bool sent_abbrev_update OVS_GUARDED_BY(ofproto_mutex);
-
-    /* Active bundles. Contains "struct ofp_bundle"s. */
-    struct hmap bundles;
-};
-
-/* A reliable connection to an OpenFlow switch or controller.
- *
- * See the large comment in rconn.h for more information. */
-struct rconn {
-    struct ovs_mutex mutex;
-
-    enum state state;
-    time_t state_entered;
-
-    struct vconn *vconn;
-    char *name;                 /* Human-readable descriptive name. */
-    char *target;               /* vconn name, passed to vconn_open(). */
-    bool reliable;
-
-    struct ovs_list txq;        /* Contains "struct ofpbuf"s. */
-
-    int backoff;
-    int max_backoff;
-    time_t backoff_deadline;
-    time_t last_connected;
-    time_t last_disconnected;
-    unsigned int seqno;
-    int last_error;
-
-    /* In S_ACTIVE and S_IDLE, probably_admitted reports whether we believe
-     * that the peer has made a (positive) admission control decision on our
-     * connection.  If we have not yet been (probably) admitted, then the
-     * connection does not reset the timer used for deciding whether the switch
-     * should go into fail-open mode.
-     *
-     * last_admitted reports the last time we believe such a positive admission
-     * control decision was made. */
-    bool probably_admitted;
-    time_t last_admitted;
-
-    /* These values are simply for statistics reporting, not used directly by
-     * anything internal to the rconn (or ofproto for that matter). */
-    unsigned int n_attempted_connections, n_successful_connections;
-    time_t creation_time;
-    unsigned long int total_time_connected;
-
-    /* Throughout this file, "probe" is shorthand for "inactivity probe".  When
-     * no activity has been observed from the peer for a while, we send out an
-     * echo request as an inactivity probe packet.  We should receive back a
-     * response.
-     *
-     * "Activity" is defined as either receiving an OpenFlow message from the
-     * peer or successfully sending a message that had been in 'txq'. */
-    int probe_interval;         /* Secs of inactivity before sending probe. */
-    time_t last_activity;       /* Last time we saw some activity. */
-
-    uint8_t dscp;
-
-    /* Messages sent or received are copied to the monitor connections. */
-#define MAXIMUM_MONITORS 8
-    struct vconn *monitors[MAXIMUM_MONITORS];
-    size_t n_monitors;
-
-    uint32_t allowed_versions;
-};
 
 /* ofproto supports two kinds of OpenFlow connections:
  *
@@ -266,112 +187,12 @@ enum ofp12_controller_role {
  * to test whether a particular protocol is within a given set of protocols and
  * to implement set union and intersection.
  */
-enum ofputil_protocol {
-    /* OpenFlow 1.0 protocols.
-     *
-     * The "STD" protocols use the standard OpenFlow 1.0 flow format.
-     * The "NXM" protocols use the Nicira Extensible Match (NXM) flow format.
-     *
-     * The protocols with "TID" mean that the nx_flow_mod_table_id Nicira
-     * extension has been enabled.  The other protocols have it disabled.
-     */
-#define OFPUTIL_P_NONE 0
-    OFPUTIL_P_OF10_STD     = 1 << 0,
-    OFPUTIL_P_OF10_STD_TID = 1 << 1,
-    OFPUTIL_P_OF10_NXM     = 1 << 2,
-    OFPUTIL_P_OF10_NXM_TID = 1 << 3,
-#define OFPUTIL_P_OF10_STD_ANY (OFPUTIL_P_OF10_STD | OFPUTIL_P_OF10_STD_TID)
-#define OFPUTIL_P_OF10_NXM_ANY (OFPUTIL_P_OF10_NXM | OFPUTIL_P_OF10_NXM_TID)
-#define OFPUTIL_P_OF10_ANY (OFPUTIL_P_OF10_STD_ANY | OFPUTIL_P_OF10_NXM_ANY)
-
-    /* OpenFlow 1.1 protocol.
-     *
-     * We only support the standard OpenFlow 1.1 flow format.
-     *
-     * OpenFlow 1.1 always operates with an equivalent of the
-     * nx_flow_mod_table_id Nicira extension enabled, so there is no "TID"
-     * variant. */
-    OFPUTIL_P_OF11_STD     = 1 << 4,
-
-    /* OpenFlow 1.2+ protocols (only one variant each).
-     *
-     * These use the standard OpenFlow Extensible Match (OXM) flow format.
-     *
-     * OpenFlow 1.2+ always operates with an equivalent of the
-     * nx_flow_mod_table_id Nicira extension enabled, so there is no "TID"
-     * variant. */
-    OFPUTIL_P_OF12_OXM      = 1 << 5,
-    OFPUTIL_P_OF13_OXM      = 1 << 6,
-    OFPUTIL_P_OF14_OXM      = 1 << 7,
-    OFPUTIL_P_OF15_OXM      = 1 << 8,
-#define OFPUTIL_P_ANY_OXM (OFPUTIL_P_OF12_OXM | \
-                           OFPUTIL_P_OF13_OXM | \
-                           OFPUTIL_P_OF14_OXM | \
-                           OFPUTIL_P_OF15_OXM)
-
-#define OFPUTIL_P_NXM_OF11_UP (OFPUTIL_P_OF10_NXM_ANY | OFPUTIL_P_OF11_STD | \
-                               OFPUTIL_P_ANY_OXM)
-
-#define OFPUTIL_P_NXM_OXM_ANY (OFPUTIL_P_OF10_NXM_ANY | OFPUTIL_P_ANY_OXM)
-
-#define OFPUTIL_P_OF11_UP (OFPUTIL_P_OF11_STD | OFPUTIL_P_ANY_OXM)
-
-#define OFPUTIL_P_OF12_UP (OFPUTIL_P_OF12_OXM | OFPUTIL_P_OF13_UP)
-#define OFPUTIL_P_OF13_UP (OFPUTIL_P_OF13_OXM | OFPUTIL_P_OF14_UP)
-#define OFPUTIL_P_OF14_UP (OFPUTIL_P_OF14_OXM | OFPUTIL_P_OF15_UP)
-#define OFPUTIL_P_OF15_UP OFPUTIL_P_OF15_OXM
-
-    /* All protocols. */
-#define OFPUTIL_P_ANY ((1 << 9) - 1)
-
-    /* Protocols in which a specific table may be specified in flow_mods. */
-#define OFPUTIL_P_TID (OFPUTIL_P_OF10_STD_TID | \
-                       OFPUTIL_P_OF10_NXM_TID | \
-                       OFPUTIL_P_OF11_STD |     \
-                       OFPUTIL_P_ANY_OXM)
-};
 
 enum nx_packet_in_format {
     NXPIF_OPENFLOW10 = 0,       /* Standard OpenFlow 1.0 compatible. */
     NXPIF_NXM = 1               /* Nicira Extended. */
 };
 
-
-/* Counts packets and bytes queued into an rconn by a given source. */
-struct rconn_packet_counter {
-    struct ovs_mutex mutex;
-    unsigned int n_packets OVS_GUARDED; /* Number of packets queued. */
-    unsigned int n_bytes OVS_GUARDED;   /* Number of bytes queued. */
-    int ref_cnt OVS_GUARDED;            /* Number of owners. */
-};
-
-struct pinsched {
-    struct token_bucket token_bucket;
-
-    /* One queue per physical port. */
-    struct hmap queues;         /* Contains "struct pinqueue"s. */
-    unsigned int n_queued;      /* Sum over queues[*].n. */
-    struct pinqueue *next_txq;  /* Next pinqueue check in round-robin. */
-
-    /* Statistics reporting. */
-    unsigned long long n_normal;        /* # txed w/o rate limit queuing. */
-    unsigned long long n_limited;       /* # queued for rate limiting. */
-    unsigned long long n_queue_dropped; /* # dropped due to queue overflow. */
-};
-
-
-struct pktbuf {
-    struct packet packets[PKTBUF_CNT];
-    unsigned int buffer_idx;
-    unsigned int null_idx;
-};
-
-struct packet {
-    struct dp_packet *buffer;
-    uint32_t cookie;
-    long long int timeout;
-    ofp_port_t in_port;
-};
 
 struct ofproto_controller {
     char *target;               /* e.g. "tcp:127.0.0.1" */
@@ -403,73 +224,6 @@ struct ofservice {
     uint8_t dscp;               /* DSCP Value for controller connection */
     uint32_t allowed_versions;  /* OpenFlow protocol versions that may
                                  * be negotiated for a session. */
-};
-
-static int ofservice_create(struct connmgr *mgr, const char *target, uint32_t allowed_versions, uint8_t dscp)
-
-    根据 target 监听客户端连接, 并初始化 ofservice
-    分配 ofservice 对象加入 mgr->services
-
-static void ofservice_destroy(struct connmgr *mgr, struct ofservice *ofservice)
-
-    从 mgr->services 中删除 ofservice
-    关闭 ofservice->pvconn
-
-static void ofservice_reconfigure(struct ofservice *ofservice, const struct ofproto_controller *c)
-
-    用 c 重新配置 ofservice
-
-static struct ofservice * ofservice_lookup(struct connmgr *mgr, const char *target)
-
-    遍历 mgr->services 找到 pvconn->name 为 target 的 ofservice
-
-####snoops
-
-/* This structure should be treated as opaque by vconn implementations. */
-struct pvconn {
-    const struct pvconn_class *pvclass;
-    char *name;
-    uint32_t allowed_versions;
-};
-
-struct pvconn_class {
-    /* Prefix for connection names, e.g. "ptcp", "pssl". */
-    const char *name;
-
-    /* Attempts to start listening for OpenFlow connections.  'name' is the
-     * full connection name provided by the user, e.g. "ptcp:1234".  This name
-     * is useful for error messages but must not be modified.
-     *
-     * 'allowed_versions' is the OpenFlow protocol versions that may * be negotiated for a session.
-     *
-     * 'suffix' is a copy of 'name' following the colon and may be modified.
-     * 'dscp' is the DSCP value that the new connection should use in the IP
-     * packets it sends.
-     *
-     * Returns 0 if successful, otherwise a positive errno value.  If
-     * successful, stores a pointer to the new connection in '*pvconnp'.
-     *
-     * The listen function must not block.  If the connection cannot be
-     * completed immediately, it should return EAGAIN (not EINPROGRESS, as
-     * returned by the connect system call) and continue the connection in the
-     * background. */
-    int (*listen)(const char *name, uint32_t allowed_versions,
-                  char *suffix, struct pvconn **pvconnp, uint8_t dscp);
-
-    /* Closes 'pvconn' and frees associated memory. */
-    void (*close)(struct pvconn *pvconn);
-
-    /* Tries to accept a new connection on 'pvconn'.  If successful, stores the
-     * new connection in '*new_vconnp' and returns 0.  Otherwise, returns a
-     * positive errno value.
-     *
-     * The accept function must not block waiting for a connection.  If no
-     * connection is ready to be accepted, it should return EAGAIN. */
-    int (*accept)(struct pvconn *pvconn, struct vconn **new_vconnp);
-
-    /* Arranges for the poll loop to wake up when a connection is ready to be
-     * accepted on 'pvconn'. */
-    void (*wait)(struct pvconn *pvconn);
 };
 
 ####fail_open 模式
@@ -507,91 +261,13 @@ struct pvconn_class {
  *       userspace.
  */
 
-struct fail_open {
-    struct ofproto *ofproto;
-    struct connmgr *connmgr;
-    int last_disconn_secs;
-    long long int next_bogus_packet_in;
-    struct rconn_packet_counter *bogus_packet_counter;
-    bool fail_open_active;
-};
-
-struct rconn_packet_counter {
-    struct ovs_mutex mutex;
-    unsigned int n_packets OVS_GUARDED; /* Number of packets queued. */
-    unsigned int n_bytes OVS_GUARDED;   /* Number of bytes queued. */
-    int ref_cnt OVS_GUARDED;            /* Number of owners. */
-};
-
-####ofproto_fail_mode
-
 /* How the switch should act if the controller cannot be contacted. */
 enum ofproto_fail_mode {
     OFPROTO_FAIL_SECURE,        /* Preserve flow table. */
     OFPROTO_FAIL_STANDALONE     /* Act as a standalone switch. */
 };
 
-####in_band
-
-struct in_band {
-    struct ofproto *ofproto;
-    int queue_id;               /* default -1 */
-
-    /* Remote information. */
-    time_t next_remote_refresh; /* Refresh timer. */
-    struct in_band_remote *remotes;
-    size_t n_remotes;
-
-    /* Local information. */
-    time_t next_local_refresh;       /* Refresh timer. */
-    uint8_t local_mac[ETH_ADDR_LEN]; /* Current MAC. */
-    struct netdev *local_netdev;     /* Local port's network device. */
-
-    /* Flow tracking. */
-    struct hmap rules;          /* Contains "struct in_band_rule"s. */
-};
-
-/* Track one remote IP and next hop information. */
-struct in_band_remote {
-    struct sockaddr_in remote_addr; /* IP address, in network byte order. */
-    uint8_t remote_mac[ETH_ADDR_LEN]; /* Next-hop MAC, all-zeros if unknown. */
-    uint8_t last_remote_mac[ETH_ADDR_LEN]; /* Previous nonzero next-hop MAC. */
-    struct netdev *remote_netdev; /* Device to send to next-hop MAC. */
-};
-
-/* A rule to add to or delete from ofproto's flow table.  */
-struct in_band_rule {
-    struct hmap_node hmap_node; /* In struct in_band's "rules" hmap. */
-    struct match match;
-    int priority;
-    enum in_band_op op;
-};
-
-####sockaddr_in
-
-struct sockaddr_in {
-    sa_family_t sin_family;
-    in_port_t sin_port;
-    struct in_addr sin_addr;
-};
-
 ###操作
-
-struct connmgr * connmgr_create(struct ofproto *ofproto, const char *name, const char *local_port_name)
-
-    初始化 connmgr 对象 mgr 并返回 mgr. 指针统一初始化为 NULL, 其他见 struct connmgr 定义
-
-
-void connmgr_destroy(struct connmgr *mgr)
-
-    如果是 list, hmap 释放每个成员, 如果是指针, 释放指针所指内存, 最后释放 mgr, 除了 mgr->ofproto (不应该被释放)
-
-    遍历 mgr->all_conns 所有成员 ofconn, 调用 ofconn_destroy(ofconn);
-    如果 mgr->controllers->buckets != mgr->controllers->one, free(mgr->controllers->buckets)
-    遍历 mgr->services 所有成员 ofservice,  ofservice_destroy(mgr, ofservice);
-    遍历 mgr->snoops 所有成员, 调用 pvconn_close(mgr->snoops[i])
-    调用 fail_open_destroy(mgr->fail_open)
-
 
 void connmgr_run(struct connmgr *mgr, void ( *handle_openflow)(struct ofconn *, const struct ofpbuf *ofp_msg))
 
@@ -633,58 +309,20 @@ void connmgr_get_controller_info(struct connmgr *mgr, struct shash *info)
 
     其中 info 是一个包含 key->value 存储的 hash 链表. info 主要保持的 是控制器所有连接的统计信息
 
-void connmgr_free_controller_info(struct shash *info)
-
-    释放 info 中的统计信息
-
 void connmgr_set_controllers(struct connmgr *mgr, const struct ofproto_controller *controllers, size_t n_controllers, uint32_t allowed_versions)
 
     遍历 controllers 中每个元素 controller, 加入 mgr 的 controllers 或 ofservice 中, 删除旧的 controller
     以及 ofservice.
 
-void connmgr_reconnect(const struct connmgr *mgr)
-
-    强制 mgr 中的所有 mgr->ofconn 进行重连
-
-int connmgr_set_snoops(struct connmgr *mgr, const struct sset *snoops)
-
-    删除 mgr->snoops  中的旧元素, 将 snoops 增加进去
-
-void connmgr_get_snoops(const struct connmgr *mgr, struct sset *snoops)
-
-    将 mgr->snoops 中的 name 加入 snoops 中
-
 static void add_controller(struct connmgr *mgr, const char *target, uint8_t dscp, uint32_t allowed_versions)
 
     增加一个新的 ofconn 到 mgr->controllers, 建立连接
-
-static struct ofconn * find_controller_by_target(struct connmgr *mgr, const char *target)
-
-    查找 mgr->controllers 中是否存在名字为 target 的 ofconn
-
-static void update_in_band_remotes(struct connmgr *mgr)
-
-    用 mgr->controllers 中 ofconn->type = OFPROTO_IN_BAND 和 mgr->extra_in_band_remotes　中解析出的 sockaddr_in 来初始化 mgr->in_band 对象
-
 
 static void update_fail_open(struct connmgr *mgr)
 
     如果 mgr 配置 controller 而且 fail_mode = OFPROTO_FAIL_STANDALONE ; 创建 mgr->fail_open.
     否则 删除 mgr->fail_open, mgr->fail_open = NULL
     注: 由上可知 mgr->fail_open 只有在 fail_mode = OFPROTO_FAIL_STANDALONE 才有用
-
-static int set_pvconns(struct pvconn ***pvconnsp, size_t *n_pvconnsp, const struct sset *sset)
-
-    删除 pvonnsp 中的 n_pvconnsp 个旧元素, 将 sset 增加进去
-
-static int snoop_preference(const struct ofconn *ofconn)
-
-    返回 ofconn->role 的最大值
-
-static void add_snooper(struct connmgr *, struct vconn *);
-
-    从 connmgr->all_conns 的 ofconn 中找到 ofconn->type = OFCONN_PRIMARY 并且
-    ofconn->role 最大(即权限越接近MASTER)的 ofconn. 将 vconn 加入 该 ofconn->monitors
 
 bool connmgr_wants_packet_in_on_miss(struct connmgr *mgr)
 
@@ -694,88 +332,11 @@ bool connmgr_wants_packet_in_on_miss(struct connmgr *mgr)
     1. ofconn->controller_id = 0
     2. 没有制定协议版本, 版本小于 1.3
 
-static void schedule_packet_in(struct ofconn *, struct ofproto_packet_in, enum ofp_packet_in_reason wire_reason);
-
-    将一个异步 PACKET_IN 消息加入 ofconn->rconn.
-
-void connmgr_send_port_status(struct connmgr *mgr, struct ofconn *source, const struct ofputil_phy_port *pp, uint8_t reason)
-
-    遍历 mgr->all_conns 所有元素 ofconn, 如果 ofconn->rconn->conn->version 版本大于 1.5 或 ofconn != source 发送端口状态消息
-
-void connmgr_send_flow_removed(struct connmgr *mgr, const struct ofputil_flow_removed *fr)
-
-    遍历 mgr->all_conns, 如果满足发送异步消息的条件, 发送流表删除消息
-
-static enum ofp_packet_in_reason wire_reason(struct ofconn *ofconn, const struct ofproto_packet_in *pin)
-
-    返回发送 PACKET_IN 时的 reason
-
-void connmgr_send_packet_in(struct connmgr *mgr, const struct ofproto_packet_in *pin)
-
-    遍历  mgr->all_conns 每个元素 ofconn, 如果 ofconn 满足发送PACKET_IN 条件,
-    并且 pin.controller_id = ofconn->controller_id, 发送 PACKET_IN 消息
-
-static void schedule_packet_in(struct ofconn *ofconn, struct ofproto_packet_in pin, enum ofp_packet_in_reason wire_reason)
-
-    1. 计算 buffer_id
-    2. 构造 PACKET_IN 消息, 发送
-
-void connmgr_set_fail_mode(struct connmgr *mgr, enum ofproto_fail_mode fail_mode)
-
-    设置 mgr->fail_mode 并更新 mgr->fail_open, 并检查 mgr 是否存在 controller
-
-int connmgr_get_max_probe_interval(const struct connmgr *mgr)
-
-    返回 mgr->controllers 所有 ofconn 中 probe_interval 最大值
-
-int connmgr_failure_duration(const struct connmgr *mgr)
-
-    如果找到控制器和交换机一直连接, 返回 0
-    如果 mgr 没有控制连接, 返回 0
-    如果控制器和交换机失去连接, mgr->controllers 的  ofconn 中找到上次失去连接到现在的最短时间
-
-
-static bool any_extras_changed(const struct connmgr *mgr, const struct sockaddr_in *extras, size_t n)
-
-    检查 mgr->extra_in_band_remotes 与即将被修改的 extras 是否相同.
-    如果 mgr->n_extra_remotes = n && mgr->extra_in_band_remotes = extras, 返回 false
-    否则返回 true
-
-void connmgr_set_extra_in_band_remotes(struct connmgr *mgr, const struct sockaddr_in *extras, size_t n)
-
-    如果mgr->extra_in_band_remotes 与 extras 没有改变, 直接返回
-    否则, 删除原来的, 用新的初始化
-
-
 void connmgr_flushed(struct connmgr *mgr)
 
     TODO
-
     如果配置了 fail_open, 就调用 fail_open_flushed(mgr->fail_open);　
     如果没有控制连接, 并且 fail_mode 是 OFPROTO_FAIL_STANDALONE
-
-int connmgr_count_hidden_rules(const struct connmgr *mgr)
-
-    返回 in_band 和 fail_open 中的流表项数量 mgr->in_band->rules + fo->fail_open_active != 0
-
-
-
-### in_band
-
-int in_band_create(struct ofproto *, const char *local_name,
-                   struct in_band **);
-void in_band_destroy(struct in_band *);
-
-void in_band_set_queue(struct in_band *, int queue_id);
-void in_band_set_remotes(struct in_band *,
-                         const struct sockaddr_in *, size_t n);
-
-bool in_band_run(struct in_band *);
-void in_band_wait(struct in_band *);
-
-bool in_band_must_output_to_local_port(const struct flow *);
-
-int in_band_count_rules(const struct in_band *);
 
 ### PACKET_IN 消息
 
@@ -848,1495 +409,6 @@ enum ofproto_packet_in_miss_type {
      * 1.2 table-miss behavior. */
     OFPROTO_PACKET_IN_MISS_WITHOUT_FLOW,
 };
-
-
-##连接
-
-与远程建立 OpenFlow 连接.
-
-###名词解释
-
-vconn: virtual connection
-
-pvconn: passive virtual connection
-
-###虚拟连接
-
-####来源
-
-    lib/vconn-provider.c
-    lib/vconn-stream.c
-
-####数据结构
-
-struct vconn {
-    const struct vconn_class *vclass;
-    int state;
-    int error;
-
-    /* OpenFlow versions. */
-    uint32_t allowed_versions;  /* Bitmap of versions we will accept. */
-    uint32_t peer_versions;     /* Peer's bitmap of versions it will accept. */
-    enum ofp_version version;   /* Negotiated version (or 0). */
-    bool recv_any_version;      /* True to receive a message of any version. */
-
-    char *name;
-};
-
-struct vconn_class {
-    /* Prefix for connection names, e.g. "nl", "tcp". */
-    const char *name;
-
-    /* Attempts to connect to an OpenFlow device.  'name' is the full
-     * connection name provided by the user, e.g. "tcp:1.2.3.4".  This name is
-     * useful for error messages but must not be modified.
-     *
-     * 'allowed_versions' is the OpenFlow versions that may be
-     * negotiated for a connection.
-     *
-     * 'suffix' is a copy of 'name' following the colon and may be modified.
-     * 'dscp' is the DSCP value that the new connection should use in the IP
-     * packets it sends.
-     *
-     * Returns 0 if successful, otherwise a positive errno value.  If
-     * successful, stores a pointer to the new connection in '*vconnp'.
-     *
-     * The open function must not block waiting for a connection to complete.
-     * If the connection cannot be completed immediately, it should return
-     * EAGAIN (not EINPROGRESS, as returned by the connect system call) and
-     * continue the connection in the background. */
-    int (*open)(const char *name, uint32_t allowed_versions,
-                char *suffix, struct vconn **vconnp, uint8_t dscp);
-
-    /* Closes 'vconn' and frees associated memory. */
-    void (*close)(struct vconn *vconn);
-
-    /* Tries to complete the connection on 'vconn'.  If 'vconn''s connection is
-     * complete, returns 0 if the connection was successful or a positive errno
-     * value if it failed.  If the connection is still in progress, returns
-     * EAGAIN.
-     *
-     * The connect function must not block waiting for the connection to
-     * complete; instead, it should return EAGAIN immediately. */
-    int (*connect)(struct vconn *vconn);
-
-    /* Tries to receive an OpenFlow message from 'vconn'.  If successful,
-     * stores the received message into '*msgp' and returns 0.  The caller is
-     * responsible for destroying the message with ofpbuf_delete().  On
-     * failure, returns a positive errno value and stores a null pointer into
-     * '*msgp'.
-     *
-     * If the connection has been closed in the normal fashion, returns EOF.
-     *
-     * The recv function must not block waiting for a packet to arrive.  If no
-     * packets have been received, it should return EAGAIN. */
-    int (*recv)(struct vconn *vconn, struct ofpbuf **msgp);
-
-    /* Tries to queue 'msg' for transmission on 'vconn'.  If successful,
-     * returns 0, in which case ownership of 'msg' is transferred to the vconn.
-     * Success does not guarantee that 'msg' has been or ever will be delivered
-     * to the peer, only that it has been queued for transmission.
-     *
-     * Returns a positive errno value on failure, in which case the caller
-     * retains ownership of 'msg'.
-     *
-     * The send function must not block.  If 'msg' cannot be immediately
-     * accepted for transmission, it should return EAGAIN. */
-    int (*send)(struct vconn *vconn, struct ofpbuf *msg);
-
-    /* Allows 'vconn' to perform maintenance activities, such as flushing
-     * output buffers.
-     *
-     * May be null if 'vconn' doesn't have anything to do here. */
-    void (*run)(struct vconn *vconn);
-
-    /* Arranges for the poll loop to wake up when 'vconn' needs to perform
-     * maintenance activities.
-     *
-     * May be null if 'vconn' doesn't have anything to do here. */
-    void (*run_wait)(struct vconn *vconn);
-
-    /* Arranges for the poll loop to wake up when 'vconn' is ready to take an
-     * action of the given 'type'. */
-    void (*wait)(struct vconn *vconn, enum vconn_wait_type type);
-};
-
-struct pvconn {
-    const struct pvconn_class *pvclass;
-    char *name;
-    uint32_t allowed_versions;
-};
-
-struct pvconn_class {
-    /* Prefix for connection names, e.g. "ptcp", "pssl". */
-    const char *name;
-
-    /* Attempts to start listening for OpenFlow connections.  'name' is the
-     * full connection name provided by the user, e.g. "ptcp:1234".  This name
-     * is useful for error messages but must not be modified.
-     *
-     * 'allowed_versions' is the OpenFlow protocol versions that may
-     * be negotiated for a session.
-     *
-     * 'suffix' is a copy of 'name' following the colon and may be modified.
-     * 'dscp' is the DSCP value that the new connection should use in the IP
-     * packets it sends.
-     *
-     * Returns 0 if successful, otherwise a positive errno value.  If
-     * successful, stores a pointer to the new connection in '*pvconnp'.
-     *
-     * The listen function must not block.  If the connection cannot be
-     * completed immediately, it should return EAGAIN (not EINPROGRESS, as
-     * returned by the connect system call) and continue the connection in the
-     * background. */
-    int (*listen)(const char *name, uint32_t allowed_versions,
-                  char *suffix, struct pvconn **pvconnp, uint8_t dscp);
-
-    /* Closes 'pvconn' and frees associated memory. */
-    void (*close)(struct pvconn *pvconn);
-
-    /* Tries to accept a new connection on 'pvconn'.  If successful, stores the
-     * new connection in '*new_vconnp' and returns 0.  Otherwise, returns a
-     * positive errno value.
-     *
-     * The accept function must not block waiting for a connection.  If no
-     * connection is ready to be accepted, it should return EAGAIN. */
-    int (*accept)(struct pvconn *pvconn, struct vconn **new_vconnp);
-
-    /* Arranges for the poll loop to wake up when a connection is ready to be
-     * accepted on 'pvconn'. */
-    void (*wait)(struct pvconn *pvconn);
-};
-
-
-struct vconn_stream
-{
-    struct vconn vconn;
-    struct stream *stream;
-    struct ofpbuf *rxbuf;
-    struct ofpbuf *txbuf;
-    int n_packets;
-};
-
-struct pvconn_pstream
-{
-    struct pvconn pvconn;
-    struct pstream *pstream;
-};
-
-/* Active stream connection.
- *
- * This structure should be treated as opaque by implementation. */
-struct stream {
-    const struct stream_class *class;
-    int state;
-    int error;
-    char *name;
-};
-
-struct stream_class {
-    /* Prefix for connection names, e.g. "tcp", "ssl", "unix". */
-    const char *name;
-
-    /* True if this stream needs periodic probes to verify connectivity.  For
-     * streams which need probes, it can take a long time to notice the
-     * connection was dropped. */
-    bool needs_probes;
-
-    /* Attempts to connect to a peer.  'name' is the full connection name
-     * provided by the user, e.g. "tcp:1.2.3.4".  This name is useful for error
-     * messages but must not be modified.
-     *
-     * 'suffix' is a copy of 'name' following the colon and may be modified.
-     * 'dscp' is the DSCP value that the new connection should use in the IP
-     * packets it sends.
-     *
-     * Returns 0 if successful, otherwise a positive errno value.  If
-     * successful, stores a pointer to the new connection in '*streamp'.
-     *
-     * The open function must not block waiting for a connection to complete.
-     * If the connection cannot be completed immediately, it should return
-     * EAGAIN (not EINPROGRESS, as returned by the connect system call) and
-     * continue the connection in the background. */
-    int (*open)(const char *name, char *suffix, struct stream **streamp,
-                uint8_t dscp);
-
-    /* Closes 'stream' and frees associated memory. */
-    void (*close)(struct stream *stream);
-
-    /* Tries to complete the connection on 'stream'.  If 'stream''s connection
-     * is complete, returns 0 if the connection was successful or a positive
-     * errno value if it failed.  If the connection is still in progress,
-     * returns EAGAIN.
-     *
-     * The connect function must not block waiting for the connection to
-     * complete; instead, it should return EAGAIN immediately. */
-    int (*connect)(struct stream *stream);
-
-    /* Tries to receive up to 'n' bytes from 'stream' into 'buffer', and
-     * returns:
-     *
-     *     - If successful, the number of bytes received (between 1 and 'n').
-     *
-     *     - On error, a negative errno value.
-     *
-     *     - 0, if the connection has been closed in the normal fashion.
-     *
-     * The recv function will not be passed a zero 'n'.
-     *
-     * The recv function must not block waiting for data to arrive.  If no data
-     * have been received, it should return -EAGAIN immediately. */
-    ssize_t (*recv)(struct stream *stream, void *buffer, size_t n);
-
-    /* Tries to send up to 'n' bytes of 'buffer' on 'stream', and returns:
-     *
-     *     - If successful, the number of bytes sent (between 1 and 'n').
-     *
-     *     - On error, a negative errno value.
-     *
-     *     - Never returns 0.
-     *
-     * The send function will not be passed a zero 'n'.
-     *
-     * The send function must not block.  If no bytes can be immediately
-     * accepted for transmission, it should return -EAGAIN immediately. */
-    ssize_t (*send)(struct stream *stream, const void *buffer, size_t n);
-
-    /* Allows 'stream' to perform maintenance activities, such as flushing
-     * output buffers.
-     *
-     * May be null if 'stream' doesn't have anything to do here. */
-    void (*run)(struct stream *stream);
-
-    /* Arranges for the poll loop to wake up when 'stream' needs to perform
-     * maintenance activities.
-     *
-     * May be null if 'stream' doesn't have anything to do here. */
-    void (*run_wait)(struct stream *stream);
-
-    /* Arranges for the poll loop to wake up when 'stream' is ready to take an
-     * action of the given 'type'. */
-    void (*wait)(struct stream *stream, enum stream_wait_type type);
-};
-
-/* Passive listener for incoming stream connections.
- *
- * This structure should be treated as opaque by stream implementations. */
-struct pstream {
-    const struct pstream_class *class;
-    char *name;
-    ovs_be16 bound_port;
-};
-
-struct pstream_class {
-    /* Prefix for connection names, e.g. "ptcp", "pssl", "punix". */
-    const char *name;
-
-    /* True if this pstream needs periodic probes to verify connectivity.  For
-     * pstreams which need probes, it can take a long time to notice the
-     * connection was dropped. */
-    bool needs_probes;
-
-    /* Attempts to start listening for stream connections.  'name' is the full
-     * connection name provided by the user, e.g. "ptcp:1234".  This name is
-     * useful for error messages but must not be modified.
-     *
-     * 'suffix' is a copy of 'name' following the colon and may be modified.
-     * 'dscp' is the DSCP value that the new connection should use in the IP
-     * packets it sends.
-     *
-     * Returns 0 if successful, otherwise a positive errno value.  If
-     * successful, stores a pointer to the new connection in '*pstreamp'.
-     *
-     * The listen function must not block.  If the connection cannot be
-     * completed immediately, it should return EAGAIN (not EINPROGRESS, as
-     * returned by the connect system call) and continue the connection in the
-     * background. */
-    int (*listen)(const char *name, char *suffix, struct pstream **pstreamp,
-                  uint8_t dscp);
-
-    /* Closes 'pstream' and frees associated memory. */
-    void (*close)(struct pstream *pstream);
-
-    /* Tries to accept a new connection on 'pstream'.  If successful, stores
-     * the new connection in '*new_streamp' and returns 0.  Otherwise, returns
-     * a positive errno value.
-     *
-     * The accept function must not block waiting for a connection.  If no
-     * connection is ready to be accepted, it should return EAGAIN. */
-    int (*accept)(struct pstream *pstream, struct stream **new_streamp);
-
-    /* Arranges for the poll loop to wake up when a connection is ready to be
-     * accepted on 'pstream'. */
-    void (*wait)(struct pstream *pstream);
-};
-
-
-struct stream_fd
-{
-    struct stream stream;
-    int fd;
-    int fd_type;
-};
-
-
-/* State of an active stream.*/
-enum stream_state {
-    SCS_CONNECTING,             /* Underlying stream is not connected. */
-    SCS_CONNECTED,              /* Connection established. */
-    SCS_DISCONNECTED            /* Connection failed or connection closed. */
-};
-
-enum stream_content_type {
-    STREAM_UNKNOWN,
-    STREAM_OPENFLOW,
-    STREAM_SSL,
-    STREAM_JSONRPC
-};
-
-enum stream_wait_type {
-    STREAM_CONNECT,
-    STREAM_RECV,
-    STREAM_SEND
-};
-
-
-struct fd_pstream {
-    struct pstream pstream;
-    int fd;
-    int (*accept_cb)(int fd, const struct sockaddr_storage *, size_t ss_len,
-                     struct stream **);
-    char *unlink_path;
-};
-
-
-####源码实现
-
-static const struct vconn_class *vconn_classes[] = {
-    &tcp_vconn_class,
-    &unix_vconn_class,
-#ifdef HAVE_OPENSSL
-    &ssl_vconn_class,
-#endif
-};
-
-static const struct pvconn_class *pvconn_classes[] = {
-    &ptcp_pvconn_class,
-    &punix_pvconn_class,
-#ifdef HAVE_OPENSSL
-    &pssl_pvconn_class,
-#endif
-};
-
-#define STREAM_INIT(NAME)                           \
-    {                                               \
-            NAME,                                   \
-            vconn_stream_open,                      \
-            vconn_stream_close,                     \
-            vconn_stream_connect,                   \
-            vconn_stream_recv,                      \
-            vconn_stream_send,                      \
-            vconn_stream_run,                       \
-            vconn_stream_run_wait,                  \
-            vconn_stream_wait,                      \
-    }
-
-#define PSTREAM_INIT(NAME)                          \
-    {                                               \
-            NAME,                                   \
-            pvconn_pstream_listen,                  \
-            pvconn_pstream_close,                   \
-            pvconn_pstream_accept,                  \
-            pvconn_pstream_wait                     \
-    }
-
-static const struct vconn_class stream_vconn_class = STREAM_INIT("stream");
-static const struct pvconn_class pstream_pvconn_class = PSTREAM_INIT("pstream");
-
-const struct vconn_class tcp_vconn_class = STREAM_INIT("tcp");
-const struct pvconn_class ptcp_pvconn_class = PSTREAM_INIT("ptcp");
-
-const struct vconn_class unix_vconn_class = STREAM_INIT("unix");
-const struct pvconn_class punix_pvconn_class = PSTREAM_INIT("punix");
-
-const struct vconn_class ssl_vconn_class = STREAM_INIT("ssl");
-const struct pvconn_class pssl_pvconn_class = PSTREAM_INIT("pssl");
-
-vconn_init(vconn, class, connect_status, name, allowed_versions) : 用后面参数初始化 vconn
-vconn_verify_name(name): 根据 name 找到指定的 class 类型, 确认 name 的参数合法
-vconn_open(name, allowed_versions, dscp,vconnp) : 打开与对端 Openflow 连接
-vconn_connect(vconn): 从当前状态开始建立连接, 如果连接建立成功, 返回 0, 否则发送错误消息给对端
-vconn_run(vconn): vconn_connect(vconn) + (vconn->vclass->run)(vconn)
-vconn_run_wait(vconn): vconn_connect_wait(vconn) + (vconn->vclass->run_wait)(vconn)
-vconn_open_block() : vconn_open() + vconn_connect_block()
-vconn_close(vconn) : vconn->class->class(vconn)
-vconn_connect(vconn) : 完成状态的切换
-vconn_recv(vconn, msgp) : 从 vconn 非阻塞接受消息
-vconn_send(vconn, msg) : 将 msg 加入 vconn 的发送队列
-vconn_connect_block(vconn) : 完成从 CONNECTING 到 CONNECT 的切换, 成功或失败
-vconn_recv_block(vconn, msgp): 接受直到收到所有的消息
-vconn_recv_xid(vconn, xid, replyp) : 接受指定 id 的消息
-vconn_transact(vconn, request, replyp) : 发送 request, 直到收到 request 的应答信息
-vconn_transact_noreply(vconn, request, replyp): 发送 request, 发送 barrier 消息, 直到收到 barrier 的应答
-vconn_transact_multiple_noreply(vconn, requests,replyp) : requests 每条消息都调用 vconn_transact_noreply
-vconn_bundle_transact(vconn, requests, flags...): 基于事务将 requests 的多条消息一起发送
-vconn_wait(vconn, wait) : 根据 vconn->state 设置 wait, 调用 (vconn->class->wait)(vconn, wati)
-vconn_connect_wait(vconn) : vconn_wait(vconn, WAIT_CONNECT);
-vconn_recv_wait(vconn): vconn_wait(vconn, WAIT_SEND);
-
-pvconn_init(pvconn, class, name, allowed_versions) : 根据后面的参数初始化 pvconn
-pvconn_verify_name(name): 根据 name 找到指定的 class 类型, 确认 name 的参数合法
-pvconn_open(name, allowed_versions, dscp, pvconnp) : 根据 name 找到 合适的 class, 调用 class->listen(name, allowed_versions, suffix_copy, &pvconn, dscp)
-pvconn_close(pvconn) : (pvconn->pvclass->close)(pvconn)
-pvconn_accept(pvconn, new_vconn) : (pvconn->pvclass->accept)(pvconn, new_vconn)
-pvconn_wait(pvconn) :  (pvconn->pvclass->wait)(pvconn)
-
-
-由上可知, vconn_* 客户端都基于 vconn_stream 来实现, 服务端都基于 pvconn_pstream_* 实现,
-而 vconn_stream_* 和 pvconn_stream_* 又依赖 stream_* 和 pstream_*;
-
-
-static const struct stream_class *stream_classes[] = {
-    &tcp_stream_class,
-#ifndef _WIN32
-    &unix_stream_class,
-#else
-    &windows_stream_class,
-#endif
-#ifdef HAVE_OPENSSL
-    &ssl_stream_class,
-#endif
-};
-
-const struct stream_class tcp_stream_class = {
-    "tcp",                      /* name */
-    true,                       /* needs_probes */
-    tcp_open,                   /* open */
-    NULL,                       /* close */
-    NULL,                       /* connect */
-    NULL,                       /* recv */
-    NULL,                       /* send */
-    NULL,                       /* run */
-    NULL,                       /* run_wait */
-    NULL,                       /* wait */
-};
-
-static const struct pstream_class *pstream_classes[] = {
-    &ptcp_pstream_class,
-#ifndef _WIN32
-    &punix_pstream_class,
-#else
-    &pwindows_pstream_class,
-#endif
-#ifdef HAVE_OPENSSL
-    &pssl_pstream_class,
-#endif
-};
-
-const struct pstream_class ptcp_pstream_class = {
-    "ptcp",
-    true,
-    ptcp_open,
-    NULL,
-    NULL,
-    NULL,
-};
-
-stream_init(stream, class, connect_status, name): 用后面参数初始化 vconn
-stream_verify_name(name): 根据 name 找到指定的 class 类型, 确认 name 的参数合法
-stream_open(name, streamp, dscp) : class->open() 打开连接
-stream_open_block(error, streamp) :
-stream_close(struct stream *stream): (stream->class->close)(stream)
-stream_connect(stream) : 完成连接
-stream_recv(stream, buffer, n): stream_connect(stream) + (stream->class->recv)(stream, buffer, n)
-stream_send(stream, buffer, n): stream_connect(stream) + (stream->class->send)(stream, buffer, n)
-stream_run(stream) : (stream->class->run)(stream)
-stream_run_wait(stream) :  (stream->class->run_wait)(stream)
-stream_wait(stream, wait): 根据 stream->state 设置 wait, 调用 (vconn->class->wait)(vconn, wati)
-stream_connect_wait(stream) : stream_wait(stream, STREAM_CONNECT);
-stream_recv_wait(stream) : stream_wait(stream, STREAM_RECV);
-stream_send_wait(stream) : stream_wait(stream, STREAM_SEND);
-stream_open_with_default_port(name_, default_port, streamp, dscp): 连接到 default_port
-
-pstream_init(pstream, class, name) : 根据后面的参数初始化 pvconn
-pstream_verify_name(name) : 根据 name 找到指定的 class 类型, 确认 name 的参数合法
-pstream_open(name, pstreamp, dscp) : 根据 name 找到 合适的 class, 调用 class->listen(name, suffix_copy, &pstream, dscp);
-pstream_close(pstream) : (pstream->class->close)(pstream)
-pstream_accept(pstream, new_stream) : 非阻塞 (pstream->class->accept)(pstream, new_stream)
-pstream_accept_block(pstream, new_stream) : 阻塞直到收到请求, pstream_accept(pstream, new_stream)
-pstream_wait(struct pstream *pstream) :  (pstream->class->wait)(pstream)
-pstream_open_with_default_port(name_, default_port, pstreamp, dscp) : listen 监听 default_port
-
-
-由上可知,  stream_* 和 pstream_* 依赖具体的协议如果 tcp_stream_class 和 ptcp_pstream_class 类实现
-
-
-new_tcp_stream(name, fd, connect_status, streamp)
-
-    new_fd_stream(name, fd, connect_status, AF_INET, streamp), 如果 connect_status = 0, 设置 TCP_NODELAY
-
-tcp_open(name, suffix, streamp, dscp)
-
-    inet_open_active(SOCK_STREAM, suffix, 0, NULL, &fd, dscp)
-    new_tcp_stream(name, fd, error, streamp)
-
-new_pstream(suffix, name, pstreamp, dscp, unlink_path, kernel_print_port)
-
-    inet_open_passive(SOCK_STREAM, suffix, -1, &ss, dscp, kernel_print_port);
-    new_fd_pstream(conn_name, fd, ptcp_accept, unlink_path, pstreamp);
-    pstream_set_bound_port(pstreamp, htons(port));
-
-ptcp_open(name suffix, pstreamp, dscp)
-
-    return new_pstream(suffix, NULL, pstreamp, dscp, NULL, true);
-
-ptcp_accept(fd, ss, ss_len streamp)
-
-    return new_tcp_stream(name, fd, 0, streamp);
-
-new_fd_stream(name, fd, connect_status, fd_type, streamp): 初始化 fd_stream 对象
-stream_fd_cast(stream) : 从 stream 获取其所在的 stream_fd
-fd_close(stream) : 从 stream 定位其所在的 fd_stream 对象 s. 调用 closesocket(s->fd);
-fd_connect(struct stream *stream) : 将 stream 所在的 fd_stream 中的 fd 加入 poll
-fd_recv(stream, buffer, n) : 从 stream 所在的 fd_stream 中的 fd, 调用 recv(s->fd, buffer, n, 0)
-fd_send(stream, buffer, n) : 从 stream 所在的 fd_stream 中的 fd, 调用 send(s->fd, buffer, n, 0)
-fd_wait(stream, wait) :  如果 wait = STREAM_CONNECT | STREAM_SEND 调用 poll_fd_wait(s->fd, POLLOUT); 如果 wait = STREAM_RECV 调用 poll_fd_wait(s->fd, POLLIN);
-fd_pstream_cast(pstream) : 从 pstream 定位到其所在 fd_pstream 的 fd.
-new_fd_pstream(name, fd, (accept_cb), unlink_path, pstreamp) : 初始化 fd_pstream 对象
-pfd_close(pstream) :  closesocket(ps->fd)
-pfd_accept(pstream, new_streamp) :  accept(ps->fd, (struct sockaddr *) &ss, &ss_len);  set_nonblocking(new_fd); ps->accept_cb(new_fd, &ss, ss_len, new_streamp)
-pfd_wait(pstream) : poll_fd_wait(ps->fd, POLLIN);
-
-
-static const struct stream_class stream_fd_class = {
-    "fd",                       /* name */
-    false,                      /* needs_probes */
-    NULL,                       /* open */
-    fd_close,                   /* close */
-    fd_connect,                 /* connect */
-    fd_recv,                    /* recv */
-    fd_send,                    /* send */
-    NULL,                       /* run */
-    NULL,                       /* run_wait */
-    fd_wait,                    /* wait */
-};
-
-static const struct pstream_class fd_pstream_class = {
-    "pstream",
-    false,
-    NULL,
-    pfd_close,
-    pfd_accept,
-    pfd_wait,
-};
-
-由上可知, tcp_open() 和 ptcp_open() 依赖 fd_stream 来打开连接, 而 fd_stream 中指定 stream_fd_class 为 class
-
-
-综上所述, 连接的管理(open, conn, recv, send, close, accept)具体实现是在 fd_stream 中完成的.
-
-
-###封装后的 vconn
-
-该部分将 tcp, unix, ssl 进行封装, 统一了三者的接口.
-
-####来源
-
-    lib/vconn.c
-
-
-####核心数据结构
-
-/* State of an active vconn.*/
-enum vconn_state {
-    /* This is the ordinary progression of states. */
-    VCS_CONNECTING,             /* Underlying vconn is not connected. */
-    VCS_SEND_HELLO,             /* Waiting to send OFPT_HELLO message. */
-    VCS_RECV_HELLO,             /* Waiting to receive OFPT_HELLO message. */
-    VCS_CONNECTED,              /* Connection established. */
-
-    /* These states are entered only when something goes wrong. */
-    VCS_SEND_ERROR,             /* Sending OFPT_ERROR message. */
-    VCS_DISCONNECTED            /* Connection failed or connection closed. */
-};
-
-enum vconn_wait_type {
-    WAIT_CONNECT,
-    WAIT_RECV,
-    WAIT_SEND
-};
-
-####使用流程
-
-* 建立连接
-
-vconn_open_block() 或 vconn_open() + vconn_connect_block()
-
-* 发送数据
-
-vconn_send(vconn, msg)
-vconn_send_block(vconn, msg)
-
-pvconn_open() + pvconn_accept()
-
-* 接受数据
-
-vconn_recv(vconn, msg)
-vconn_recv_block(vconn, msgp)
-vconn_recv_xid(vconn, xid, replyp)
-               struct ofpbuf **replyp)
-vconn_transact(vconn, request, replyp)
-vconn_transact_noreply(vconn, request, replyp)
-vconn_transact_multiple_noreply(vconn, requests,replyp)
-vconn_bundle_transact(vconn, requests, flags...)
-
-* 关闭连接
-
-vconn_close(vconn) : 关闭连接
-pvconn_close() : 关闭监听
-
-####源码分析
-
-注: 这部分代码非常直观明了, 因此包含了精简后的源码.有时候比文字更好说明问题
-
-static int vconn_lookup_class(const char *name, const struct vconn_class **classp)
-
-    从 vconn_classes 中解析出 name = vconn_classes[i]->name , 初始化 classp.
-    其中 name 格式为 "TYPE:ARGS" 如 "tcp:192.168.1.1:6633"
-
-int vconn_verify_name(const char *name)
-
-    等于 vconn_lookup_class
-
-int vconn_open(const char *name, uint32_t allowed_versions, uint8_t dscp, struct vconn **vconnp)
-
-    vconn_lookup_class(name, &class);
-    class->open(name, allowed_versions, suffix_copy, &vconn, dscp);
-
-    注: vconn->state 必须是 VCS_CONNECTING 并且 vconn->vclass->connect 不能为 NULL
-
-
-void vconn_run(struct vconn *vconn)
-
-    正常情况下保证 vconn 已经建立连接或发生错误
-
-    if (vconn->state == VCS_CONNECTING || vconn->state == VCS_SEND_HELLO || vconn->state == VCS_RECV_HELLO)
-        vconn_connect(vconn);
-
-    //这里判断为 false, 因此与 vconn_connect 相同
-    if (vconn->vclass->run)
-        (vconn->vclass->run)(vconn);
-
-void vconn_run_wait(struct vconn *vconn)
-
-    if (vconn->state == VCS_CONNECTING ||
-        vconn->state == VCS_SEND_HELLO ||
-        vconn->state == VCS_RECV_HELLO) {
-        vconn_connect_wait(vconn);
-    }
-
-    if (vconn->vclass->run_wait) {
-        (vconn->vclass->run_wait)(vconn);
-    }
-
-int vconn_get_status(const struct vconn *vconn)
-
-    连接处于正常, 返回 0;
-    如果错误, 返回正数;
-    如果正常关闭,返回 EOF
-
-
-int vconn_open_block(const char *name, uint32_t allowed_versions, uint8_t dscp, struct vconn **vconnp)
-
-    error = vconn_open(name, allowed_versions, dscp, &vconn);
-    if (!error) error = vconn_connect_block(vconn);
-    return error;
-
-void vconn_close(struct vconn *vconn)
-
-    (vconn->vclass->close)(vconn);
-
-void vconn_set_recv_any_version(struct vconn *vconn)
-
-    vconn->recv_any_version = true;
-
-    By default, a vconn accepts only OpenFlow messages whose version matches the
-    one negotiated for the connection.  A message received with a different
-    version is an error that causes the vconn to drop the connection.
-
-    This functions allows 'vconn' to accept messages with any OpenFlow version.
-    This is useful in the special case where 'vconn' is used as an rconn
-    "monitor" connection (see rconn_add_monitor()), that is, where 'vconn' is
-    used as a target for mirroring OpenFlow messages for debugging and
-    troubleshooting.
-
-    This function should be called after a successful vconn_open() or
-    pvconn_accept() but before the connection completes, that is, before
-    vconn_connect() returns success.  Otherwise, messages that arrive on 'vconn'
-    beforehand with an unexpected version will the vconn to drop the
-    connection.
-
-static void vcs_connecting(struct vconn *vconn)
-
-    int retval = (vconn->vclass->connect)(vconn);
-    if (!retval) {
-        vconn->state = VCS_SEND_HELLO;
-    } else if (retval != EAGAIN) {
-        vconn->state = VCS_DISCONNECTED;
-        vconn->error = retval;
-    }
-
-
-static void vcs_send_hello(struct vconn *vconn)
-
-    b = ofputil_encode_hello(vconn->allowed_versions);
-    retval = do_send(vconn, b);
-    成功:
-        vconn->state = VCS_RECV_HELLO;
-    失败
-        if (retval != EAGAIN)
-            vconn->state = VCS_DISCONNECTED;
-            vconn->error = retval;
-
-static char *version_bitmap_to_string(uint32_t bitmap)
-
-    从 bitmap  解析 OF 的版本信息, 返回版本信息
-
-static void vcs_recv_hello(struct vconn *vconn)
-
-    接受 OFPT_HELLO 消息, 并确认两端的版本兼容, 最后设置 vconn->version; vconn->state = VCS_CONNECTED
-
-    retval = do_recv(vconn, &b);
-    成功:
-        error = ofptype_decode(&type, b->data);
-        成功:
-            ofputil_decode_hello(b->data, &vconn->peer_versions))
-            common_versions = vconn->peer_versions & vconn->allowed_versions;
-            失败:
-                vconn->version = leftmost_1bit_idx(vconn->peer_versions);
-                输出错误消息
-                vconn->state = VCS_SEND_ERROR;
-            成功:
-                vconn->version = leftmost_1bit_idx(common_versions);
-                vconn->state = VCS_CONNECTED;
-
-        失败:
-            输出错误消息
-            设置 retval = EPROTO
-
-    失败
-        vconn->state = VCS_DISCONNECTED;
-        vconn->error = retval == EOF ? ECONNRESET : retval;
-
-
-static void vcs_send_error(struct vconn *vconn)
-
-
-    发送版本协商的错误信息
-
-    local_s = version_bitmap_to_string(vconn->allowed_versions);
-    peer_s = version_bitmap_to_string(vconn->peer_versions);
-    snprintf(s, sizeof s, "We support %s, you support %s, no common versions.",
-             local_s, peer_s);
-    b = ofperr_encode_hello(OFPERR_OFPHFC_INCOMPATIBLE, vconn->version, s);
-    retval = do_send(vconn, b);
-    成功:
-        ofpbuf_delete(b);
-    失败
-        if (retval != EAGAIN)
-            vconn->state = VCS_DISCONNECTED;
-            vconn->error = retval ? retval : EPROTO;
-
-
-int vconn_connect(struct vconn *vconn)
-
-    从 vconn->state 当前状态开始建立连接直到完成或出错. 至此已经发送 HELLO 请求和收到 HELLO 应答
-
-    do {
-        last_state = vconn->state;
-        switch (vconn->state) {
-        case VCS_CONNECTING:
-            vcs_connecting(vconn);
-            break;
-
-        case VCS_SEND_HELLO:
-            vcs_send_hello(vconn);
-            break;
-
-        case VCS_RECV_HELLO:
-            vcs_recv_hello(vconn);
-            break;
-
-        case VCS_CONNECTED:
-            return 0;
-
-        case VCS_SEND_ERROR:
-            vcs_send_error(vconn);
-            break;
-
-        case VCS_DISCONNECTED:
-            return vconn->error;
-
-        default:
-            OVS_NOT_REACHED();
-        }
-    } while (vconn->state != last_state);
-
-    return EAGAIN;
-
-int vconn_recv(struct vconn *vconn, struct ofpbuf **msgp)
-
-    建立连接并接受对端的消息, 将消息保存在 msgp 中
-
-    retval = vconn_connect(vconn);
-    成功:
-        retval = do_recv(vconn, &msg);
-        if (!retval && !vconn->recv_any_version)
-        成功:
-            const struct ofp_header *oh = msg->data;
-            if (oh->version != vconn->version)
-            成功:
-                if (ofptype_decode(&type, msg->data)
-                    || (type != OFPTYPE_HELLO &&
-                        type != OFPTYPE_ERROR &&
-                        type != OFPTYPE_ECHO_REQUEST &&
-                        type != OFPTYPE_ECHO_REPLY))
-                失败:
-                    发送错误版本信息给对端
-    失败:
-        *msgp = retval ? NULL : msg;
-
-
-
-static int do_recv(struct vconn *vconn, struct ofpbuf **msgp)
-
-    return (vconn->vclass->recv)(vconn, msgp);
-
-int vconn_send(struct vconn *vconn, struct ofpbuf *msg)
-
-    vconn_connect(vconn);
-    成功:
-        retval do_send(vconn, msg);
-        return retval;
-    失败
-        return retval;
-
-static int do_send(struct vconn *vconn, struct ofpbuf *msg)
-
-    确保 msg->size >= sizeof(struct ofp_header)
-    ofpmsg_update_length(msg);
-    return (vconn->vclass->send)(vconn, msg);
-
-int vconn_connect_block(struct vconn *vconn)
-
-    while ((error = vconn_connect(vconn)) == EAGAIN) {
-        vconn_run(vconn);
-        vconn_run_wait(vconn);
-        vconn_connect_wait(vconn);
-        poll_block();
-    }
-    ovs_assert(error != EINPROGRESS);
-    return error;
-
-int vconn_send_block(struct vconn *vconn, struct ofpbuf *msg)
-
-    while ((retval = vconn_send(vconn, msg)) == EAGAIN) {
-        vconn_run(vconn);
-        vconn_run_wait(vconn);
-        vconn_send_wait(vconn);
-        poll_block();
-    }
-    return retval;
-
-int vconn_recv_block(struct vconn *vconn, struct ofpbuf **msgp)
-
-    while ((retval = vconn_recv(vconn, msgp)) == EAGAIN) {
-        vconn_run(vconn);
-        vconn_run_wait(vconn);
-        vconn_recv_wait(vconn);
-        poll_block();
-    }
-    return retval;
-
-static int vconn_recv_xid__(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp, void (*error_reporter)(const struct ofp_header *))
-
-    一直循环直到收到消息 data->xid = xid, 返回.
-
-    for(;;)
-        vconn_recv_block(vconn, &reply);
-        成功:
-            oh = reply->data;
-            recv_xid = oh->xid;
-            if (xid == recv_xid)
-            成功:
-                *replyp = reply;
-                return 0;
-            error = ofptype_decode(&type, oh);
-        失败:
-            *replyp = NULL;
-            return error;
-
-
-int vconn_recv_xid(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp)
-
-    return vconn_recv_xid__(vconn, xid, replyp, NULL);
-
-    Waits until a message with a transaction ID matching 'xid' is received on
-    'vconn'.  Returns 0 if successful, in which case the reply is stored in
-    '*replyp' for the caller to examine and free.  Otherwise returns a positive
-    errno value, or EOF, and sets '*replyp' to null.
-
-    'request' is always destroyed, regardless of the return value. */
-
-
-static int vconn_transact__(struct vconn *vconn, struct ofpbuf *request, struct ofpbuf **replyp,
-        void (*error_reporter)(const struct ofp_header *))
-
-    发送一条消息, 阻塞直到收到应答.
-
-    error = vconn_send_block(vconn, request);
-    ovs_be32 send_xid = ((struct ofp_header *) request->data)->xid;
-    成功:
-        return vconn_recv_xid__(vconn, send_xid, replyp, error_reporter);
-    失败:
-        return error
-
-int vconn_transact(struct vconn *vconn, struct ofpbuf *request,
-               struct ofpbuf **replyp)
-
-    发送一条消息, 阻塞直到收到应答.(同 vconn_transact__)
-
-
-int vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request, struct ofpbuf **replyp)
-
-    发送一条消息, 并且发送 barrier 消息, 直到收到的消息的 msg_xid 等于发送 barrier_xid
-
-    request_xid = ((struct ofp_header *) request->data)->xid;
-    error = vconn_send_block(vconn, request);
-    失败: 返回 error
-
-    barrier = ofputil_encode_barrier_request(vconn_get_version(vconn));
-    barrier_xid = ((struct ofp_header *) barrier->data)->xid;
-    error = vconn_send_block(vconn, barrier);
-    失败: 返回 error
-
-    for (;;)
-        error = vconn_recv_block(vconn, &msg);
-        失败: 退出循环
-        直到 msg_xid == barrier_xid
-
-    问题: msg_xid == request_xid 没有出现会有问题么?
-
-int vconn_transact_multiple_noreply(struct vconn *vconn, struct ovs_list *requests, struct ofpbuf **replyp)
-
-    遍历 requests 的每个元素 request, 调用 vconn_transact_noreply(vconn, request, replyp)
-
-static enum ofperr vconn_bundle_reply_validate(struct ofpbuf *reply,
-                            struct ofputil_bundle_ctrl_msg *request,
-                            void (*error_reporter)(const struct ofp_header *))
-
-
-    对 bundle 控制消息进行验证
-
-    oh = reply->data;
-    error = ofptype_decode(&type, oh);
-    if (type == OFPTYPE_ERROR)
-        return ofperr_decode_msg(oh, NULL);
-    if (type != OFPTYPE_BUNDLE_CONTROL)
-        return OFPERR_OFPBRC_BAD_TYPE;
-
-    ofputil_decode_bundle_ctrl(oh, &rbc);
-    if (rbc.bundle_id != request->bundle_id)
-        return OFPERR_OFPBFC_BAD_ID;
-    if (rbc.type != request->type + 1)
-        return OFPERR_OFPBFC_BAD_TYPE;
-    return 0;
-
-
-static int vconn_bundle_control_transact(struct vconn *vconn,
-                              struct ofputil_bundle_ctrl_msg *bc,
-                              uint16_t type,
-                              void (*error_reporter)(const struct ofp_header *))
-
-    对 bc 进行编码, 之后发送, 等收到应答后, 对应答 bundle 控制消息进行校验
-
-    bc->type = type;
-    request = ofputil_encode_bundle_ctrl_request(vconn->version, bc);
-    vconn_transact__(vconn, request, &reply, error_reporter);
-    vconn_bundle_reply_validate(reply, bc, error_reporter);
-
-
-static void vconn_recv_error(struct vconn *vconn, void (*error_reporter)(const struct ofp_header *))
-
-    专门接受消息类型为 OFPTYPE_ERROR 的消息, 直到收消息出错
-
-static int vconn_bundle_add_msg(struct vconn *vconn, struct ofputil_bundle_ctrl_msg *bc, struct ofpbuf *msg,
-                     void (*error_reporter)(const struct ofp_header *))
-
-
-    发送一个 bundle_add 消息, 接受错误类型的消息直到接受错误消息出错.
-
-    bam.bundle_id = bc->bundle_id;
-    bam.flags = bc->flags;
-    bam.msg = msg->data;
-    request = ofputil_encode_bundle_add(vconn->version, &bam);
-    error = vconn_send_block(vconn, request);
-    成功:
-        vconn_recv_error(vconn, error_reporter);
-    return error
-
-int vconn_bundle_transact(struct vconn *vconn, struct ovs_list *requests, uint16_t flags,
-                      void (*error_reporter)(const struct ofp_header *))
-
-    以事务遍历 requests 每一个元素, 发送 bundle_add 消息
-
-    memset(&bc, 0, sizeof bc);
-    bc.flags = flags;
-    vconn_bundle_control_transact(vconn, &bc, OFPBCT_OPEN_REQUEST, error_reporter);
-
-    LIST_FOR_EACH (request, list_node, requests)
-        error = vconn_bundle_add_msg(vconn, &bc, request, error_reporter);
-        失败:
-            break;
-
-    成功:
-        vconn_bundle_control_transact(vconn, &bc, OFPBCT_COMMIT_REQUEST,  error_reporter);
-    失败
-        vconn_bundle_control_transact(vconn, &bc, OFPBCT_DISCARD_REQUEST, error_reporter);
-
-void vconn_wait(struct vconn *vconn, enum vconn_wait_type wait)
-
-    switch (vconn->state)
-    case VCS_CONNECTING:
-        wait = WAIT_CONNECT;
-        break;
-
-    case VCS_SEND_HELLO:
-    case VCS_SEND_ERROR:
-        wait = WAIT_SEND;
-        break;
-
-    case VCS_RECV_HELLO:
-        wait = WAIT_RECV;
-        break;
-
-    case VCS_CONNECTED:
-        break;
-
-    case VCS_DISCONNECTED:
-        poll_immediate_wake();
-        return;
-
-    (vconn->vclass->wait)(vconn, wait);
-
-void vconn_connect_wait(struct vconn *vconn)
-
-    等于 vconn_wait(vconn, WAIT_CONNECT);
-
-void vconn_recv_wait(struct vconn *vconn)
-
-    等于 vconn_wait(vconn, WAIT_RECV);
-
-void vconn_send_wait(struct vconn *vconn)
-
-    等于 vconn_wait(vconn, WAIT_SEND);
-
-static int pvconn_lookup_class(const char *name, const struct pvconn_class **classp)
-
-    根据 name 从 pvconn_classes 中找到合适的 pvconn_class , 其中 name 为 "TYPE:ARGS"
-
-int pvconn_verify_name(const char *name)
-
-    调用 pvconn_lookup_class(name)
-
-int pvconn_open(const char *name, uint32_t allowed_versions, uint8_t dscp, struct pvconn **pvconnp)
-
-    从 name 找到合适的 class, 调用该 class->listen() 方法
-
-    error = pvconn_lookup_class(name, &class);
-    error = class->listen(name, allowed_versions, suffix_copy, &pvconn, dscp);
-
-void pvconn_close(struct pvconn *pvconn)
-
-    if pvconn != NULL
-        (pvconn->pvclass->close)(pvconn);
-
-int pvconn_accept(struct pvconn *pvconn, struct vconn **new_vconn)
-
-    非阻塞调用 (pvconn->pvclass->accept)(pvconn, new_vconn)
-    成功:
-        将连接保持在 new_vconn
-    失败:
-        如果没有新的连接返回 EAGAIN
-
-void pvconn_wait(struct pvconn *pvconn)
-
-    (pvconn->pvclass->wait)(pvconn);
-
-void vconn_init(struct vconn *vconn, const struct vconn_class *class,
-           int connect_status, const char *name, uint32_t allowed_versions)
-
-    用后面的参数初始化 vconn
-
-    memset(vconn, 0, sizeof *vconn);
-    vconn->vclass = class;
-    vconn->state = (connect_status == EAGAIN ? VCS_CONNECTING
-                    : !connect_status ? VCS_SEND_HELLO
-                    : VCS_DISCONNECTED);
-    vconn->error = connect_status;
-    vconn->allowed_versions = allowed_versions;
-    vconn->name = xstrdup(name);
-
-void pvconn_init(struct pvconn *pvconn, const struct pvconn_class *class, const char *name, uint32_t allowed_versions)
-
-    用后面的参数初始化 pvconn
-
-    pvconn->pvclass = class;
-    pvconn->name = xstrdup(name);
-    pvconn->allowed_versions = allowed_versions;
-
-
-
-##可靠的连接
-
-对 vconn 进行状态维护, 使得具有稳定的连接, 也体现了分层的思想, vconn 专注连接, 而 rconn 进行连接的状态管理和统计
-
-####来源: lib/rconn.c lib/rconn.h
-
-
-####STATE 的转变条件
-
-S_VOID: 没有开始连接
-S_CONNECTING : 正在建立连接, 但还没有完成
-S_ACTIVE : 已经建立连接, 距离上次数据交互, 但还没有超过 probe_interval
-S_IDLE : 已经建立连接, 距离上次数据交互超过 probe_interval, 而且 ECHO Request 已经发出, 等待回应
-S_BACKOFF: 对与非正常断开连接, 如果设置了 reliable, 那么就进入该状态, 该状态进行重连,每次递增 2*backoff, 直到重连成功或达到 max_backoff.
-S_DISCONNECTED : 已经端口理解
-
-####使用流程
-
-rconn_create(rc) : 创建并初始化一个可靠连接对象 rc
-rconn_connect() : 进行可靠连接, 即如果遇到错误会进入 BACKOFF 状态重连
-rconn_add_monitor() : 给 rc->monitors 增加一个元素
-
-####核心函数简介
-
-rconn_create(rc) : 创建并初始化一个可靠连接对象 rc
-rconn_destroy(rc) : 销毁可靠连接对象 rc
-rconn_connect() : 进行可靠连接, 即如果遇到错误会进入 BACKOFF 状态重连
-rconn_connect_unreliably() : 进行不可靠连接, 即如果遇到错误直接断开
-rconn_reconnect() : 如果从 ACTIVE 或 IDLE 状态进入 BACKOFF 状态
-rconn_disconnect() : 如果从非 S_VOID 进入 S_VOID
-rconn_run()  : 对应 rc->vconn, rc->monitors 运行 vconn_run, 之后根据 rc->state 调用其之后的状态
-rconn_send() : 将一个数据包加入 rc->txq 队列中
-run_ACTIVE() : 从 rc->txq 中取出一条消息发送出去
-rconn_recv() : 从 rc->vconn 收消息
-rconn_add_monitor() : 给 rc->monitors 增加一个元素
-rconn_is_alive() : rc->state 不是 VOID 和 DISCONNECTED
-rconn_is_connected(): rc->state 是 IDLE 或 ACTIVE
-rconn_is_admitted() : rc->state 首先是 is_connected, 并且 rc->last_admitted > rc->last_connected
-rconn_failure_duration() : 如果控制器一直监管交换机　返回 0; 如果当前控制器已经不再接管交换机, 返回上次管理时间到现在的时间
-rconn_get_version() : rc->vconn 的版本
-elapsed_in_this_state() : 处于当前状态的时间多久了
-rconn_reconnect() : 如果是rc->reliable = true, rc->state 进入 BACKOFF 状态
-timeout_$STATE : 获取各个状态的超时时间
-
-
-run_$STATE : 各个状态需要的动作
-
-    rc->state = S_VOID : run_VOID()
-    rc->state = S_BACKOFF : run_BACKOFF()
-    rc->state = S_CONNECTING: run_CONNECTING()
-    rc->state = S_ACTIVE : run_ACTIVE()
-    rc->state = S_IDLE : run_IDLE()
-    rc->state = S_DISCONNECTED: run_DISCONNECTED()
-
-注:
-
-可靠连接和不可靠连接的主要区别: 可靠连接状态切换 S_VOID -> S_CONNECTING 或 S_VOID -> S_BACKOFF,
-而不可靠连接状态切换 S_VOID -> S_ACTIVE. 因此, 可靠连接会在进行连接时进行验证, 而不可靠连接直接认为连接是可用的.
-
-一次成功的连接需要 vconn_open --> vconn_connect
-
-/* A wrapper around vconn that provides queuing and optionally reliability.
- *
- * An rconn maintains a message transmission queue of bounded length specified
- * by the caller.  The rconn does not guarantee reliable delivery of
- * queued messages: all queued messages are dropped when reconnection becomes
- * necessary.
- *
- * An rconn optionally provides reliable communication, in this sense: the
- * rconn will re-connect, with exponential backoff, when the underlying vconn
- * disconnects.
- */
-
-/* The connection states have the following meanings:
- *
- *    - S_VOID: No connection information is configured.
- *
- *    - S_BACKOFF: Waiting for a period of time before reconnecting.
- *
- *    - S_CONNECTING: A connection attempt is in progress and has not yet
- *      succeeded or failed.
- *
- *    - S_ACTIVE: A connection has been established and appears to be healthy.
- *
- *    - S_IDLE: A connection has been established but has been idle for some
- *      time.  An echo request has been sent, but no reply has yet been
- *      received.
- *
- *    - S_DISCONNECTED: An unreliable connection has disconnected and cannot be
- *      automatically retried.
- */
-
-enum state {
-    S_VOID = 1 << 0
-    S_BACKOFF = 1 << 1
-    S_CONNECTING = 1 << 2
-    S_ACTIVE = 1 << 3
-    S_IDLE = 1 << 4
-    S_DISCONNECTED = 1 << 5
-}
-
-rconn 是 reliable connect 的缩写
-
-struct rconn * rconn_create(int probe_interval, int max_backoff, uint8_t dscp, uint32_t allowed_versions)
-
-    probe_interval: 如果 probe_interval 没有收到对端的消息发送 echo request, 如果再过 probe_interval 没有收到对端消息, 重连. 最少 5 s
-    max_backoff : 从 1 s 没有收到对端请求, 之后 2 s 发送请求, 之后 4 s 发送请求... 直到 max_backoff
-    allowed_versions : 允许的版本. 传 0 表示默认版本(1.1,1.2,1.3)
-
-    初始化 rconn 的各个数据成员;
-
-    没有显示初始化:
-        struct vconn *monitors[MAXIMUM_MONITORS]; 为 NULL?
-        int last_error;
-
-void rconn_set_max_backoff(struct rconn *rc, int max_backoff)
-
-    rc->max_backoff = MAX(1, max_backoff);
-    如果 max_backoff 小于 rc->backoff, 那么, 就设置 rc->backoff = max_backoff;
-    if (rc->state == S_BACKOFF && rc->backoff > max_backoff) {
-        rc->backoff = max_backoff;
-        if (rc->backoff_deadline > time_now() + max_backoff) {
-            rc->backoff_deadline = time_now() + max_backoff;
-        }
-    }
-
-void rconn_connect(struct rconn *rc, const char *target, const char *name)
-
-    首先 rc->state 恢复到 S_VOID, 初始化 rc->reliable = true, 然后调用 vconn_open() 进行连接,
-    如果成功状态进入 CONNECTING, 失败进入 BACKOFF
-
-    rconn_disconnect__(rc);
-    rconn_set_target__(rc, target, name);
-    rc->reliable = true;
-    reconnect(rc);
-
-void rconn_connect_unreliably(struct rconn *rc, struct vconn *vconn, const char *name)
-
-    首先 rc->state 恢复到 S_VOID, 然后进行初始化 rc->reliable = false, 状态直接转变为 S_ACTIVE
-
-    rconn_disconnect__(rc);
-    rconn_set_target__(rc, vconn_get_name(vconn), name);
-    rc->reliable = false;
-    rc->vconn = vconn;
-    rc->last_connected = time_now();
-    state_transition(rc, S_ACTIVE);
-
-void rconn_reconnect(struct rconn *rc)
-
-    如果从 ACTIVE 或 IDLE 状态进入 BACKOFF 状态
-
-static void rconn_disconnect__(struct rconn *rc)
-
-    从非 S_VOID 状态恢复为 S_VOID
-
-    rc->vconn = NULL;
-    rc->target = "void"
-    rc->name = "void"
-    rc->reliable = false;
-    rc->backoff = 0;
-    rc->backoff_deadline = TIME_MIN;
-    rc->state = S_VOID
-    rc->state_entered = time_now()
-
-void rconn_disconnect(struct rconn *rc)
-
-    加锁版 rconn_disconnect__(rc)
-
-void rconn_destroy(struct rconn *rc)
-
-    销毁 rc
-
-static void reconnect(struct rconn *rc)
-
-    调用 vconn_open(rc->target, rc->allowed_versions, rc->dscp, &rc->vconn) 进行连接
-    如果成功, rc->state 进入 CONNECTING
-    如果失败, rc->state 进入 BACKOFF
-
-    注: 并没有断开连接后重连, 如果是正常的返回时间很慢是否会得到期望的结果
-
-static void run_BACKOFF(struct rconn *rc)
-
-    处于任何 rc->state 的状态下超时, 都进行重连
-
-    if (timed_out(rc)) reconnect(rc);
-
-static void run_CONNECTING(struct rconn *rc)
-
-    调用 vconn_connect(rc->vconn) 进行连接
-    如果成功, rc->state 进入 ACTIVE.
-    如果失败, rc->state 进入 BACKOFF 状态
-
-static void do_tx_work(struct rconn *rc)
-
-    从 rc->txq 链表中依次取出数据包, 调用 try_send() 发送数据包之. 每次发送都更新 rc->last_activity
-    如果 rc->txq 中的数据发送完了, 立即调用 poll_immediate_wake() 唤醒 poll接受数据包
-
-static int try_send(struct rconn *rc)
-
-    从 rc->txq 中取出一个消息 msg, 调用 vconn_send(rc->vconn, msg) 发送,
-    如果发送成功, 从 rc->txq 中删除该消息, 更新 rconn_packet_counter;
-    如果失败, 将该消息重新放入 rc->txq 中
-
-static void run_ACTIVE(struct rconn *rc)
-
-    如果 rc->state 超时, 转换到 IDLE, 发送 echo request 请求
-    否则, 调用 do_tx_work 从 rc->txq 中取出一个数据包发送
-
-static void run_IDLE(struct rconn *rc)
-
-    如果 rc->state 超时, 对于可靠的连接进入 BACKOFF 状态, 对应不可靠连接, 直接断开
-    否则, 调用 do_tx_work 从 rc->txq 中取出一个数据包发送
-
-void rconn_run(struct rconn *rc)
-
-    rc->vconn 与 rc->monitors 都完成与对端的连接建立, 从 rc->txq 依次取出所有数据包发送出去
-
-    如果 rc-vconn 不为 NULL, rc-vconn 与对端建立连接或断开连接;
-    遍历每个 rc->monitors　元素 rc->monitors[i], rc->monitors[i] 与对端建立连接或断开连接,
-    如果建立连接, 非阻塞收对端消息.
-        如果失败, 删除该 monitor;
-        否则 删除 msg
-
-    之后运行 rc->state 之后的函数
-    rc->state = S_VOID : run_VOID()
-    rc->state = S_BACKOFF : run_BACKOFF()
-    rc->state = S_CONNECTING: run_CONNECTING()
-    rc->state = S_ACTIVE : run_ACTIVE()
-    rc->state = S_IDLE : run_IDLE()
-    rc->state = S_DISCONNECTED: run_DISCONNECTED()
-
-    注: 正常是在 rconn_connect 之后调用该函数, 之后会自动调用 run_CONNECTING
-    完成连接, run_ACTIVE() 发送数据包
-
-    注:正常情况 vconn_run()　保证 rc-vconn 已经建立连接, 并且发送 HELLO 请求和接受到 HELLO 应答
-
-void rconn_run_wait(struct rconn *rc)
-
-    保证连接已经完成, 其他什么也不做
-
-    如果 rc-vconn 不为 NULL, 调用 vconn_run_wait(rc->vconn), 如果发送成功, 调用 vconn_wait(rc->vconn, WAIT_SEND);
-    遍历每个 rc->monitors　元素 rc->monitors[i], 调用 vconn_run_wait(rc->monitors[i]);vconn_recv_wait(rc->monitors[i]);
-
-    如果 rc->state 没有超时, 睡眠等待到超时时间.
-
-struct ofpbuf * rconn_recv(struct rconn *rc)
-
-    如果 rc->state 是 S_ACTIVE 或 S_IDLE,  调用 vconn_recv(rc->vconn, &buffer)
-    成功: 拷贝 buffer 到所有的 rc->monitors, rc->state 变为 ACTIVE
-    否则: 更加是否是可靠地连接, 断开或重连
-
-void rconn_recv_wait(struct rconn *rc)
-
-     如果 rc->vconn 不为 NULL,  vconn_wait(rc->vconn, WAIT_RECV);
-
-static void copy_to_monitor(struct rconn *rc, const struct ofpbuf *b)
-
-    克隆数据包 b 为 clone, 遍历 rc->monitors 每个元素, 调用 vconn_send(rc->monitor[i], clone)
-
-static void close_monitor(struct rconn *rc, size_t idx, int retval)
-
-static int rconn_send__(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter)
-
-    如果 rc 处于IDLE, ACTIVE 状态, rc->monitors 的每一个成员调用 vconn_send(rc->monitors[i], b),
-        b->list_node 加入 rc->txq 链表尾, 如果　rc->txq 中只有 b, 直接发送
-    否则 直接释放 b 的内存
-
-
-int rconn_send(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter)
-
-    加锁版的 rconn_send__()
-
-int rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b, struct rconn_packet_counter *counter, int queue_limit)
-
-    如果 counter->packets < queue_limit, 将 b 加入 rc->txq 等待发送
-    否则删除 b
-
-void rconn_add_monitor(struct rconn *rc, struct vconn *vconn)
-
-    如果 rc->n_monitors < ARRAY_SIZE(rc->monitors), 将 vconn 加入 rc->monitors,
-
-static bool timed_out(const struct rconn *rc)
-
-    rc 处于 rc->state 的时间是否超时;
-
-    比如在 S_IDLE 状态, 如果 time_now() >= rc->state_entred + rc->probe_interval, 我们就认为处于 IDLE 的超时了
-    再 S_ACTIVE, 如果 time_now() > rc->last_activity - rc->state_entered + rc->probe_interval 我们就认为处于 ACTIVE 超时了.
-
-    return time_now() >= sat_add(rc->state_entered, timeout(rc));
-
-static unsigned int timeout(const struct rconn *rc)
-
-    rc->state = S_VOID : UINT_MAX
-    rc->state = S_BACKOFF : rc->backoff
-    rc->state = S_CONNECTING: max(1,rc->backoff)
-    rc->state = S_ACTIVE : rc->probe_interval ? MAX(rc->last_activity, rc->state_entered) + rc->probe_interval - rc->state_entered : UINT_MAX;
-    rc->state = S_IDLE : rc->probe_interval
-    rc->state = S_DISCONNECTED: UINT_MAX
-
-static void state_transition(struct rconn *rc, enum state state)
-
-    rc->state = state
-    rc->state_entered = time_now()
-    根据具体条件修改如下值
-    rc->total_time_connected
-    rc->probably_admitted
-    rc->seqno
-
-static void rconn_set_target__(struct rconn *rc, const char *target, const char *name)
-
-    重置 rc->target, rc->name, 如果 name = NULL, rc->name = rc->target
-
-int rconn_failure_duration(const struct rconn *rconn)
-
-    如果控制器一直监管交换机　返回 0;
-    如果当前控制器已经不再接管交换机, 返回上次管理时间到现在的时间
-
-    duration = (rconn_is_admitted__(rconn)
-                ? 0
-                : time_now() - rconn->last_admitted);
-
-static void disconnect(struct rconn *rc, int error)
-
-    释放 rc->vconn
-    如果是稳定链路(rc->reliable=true), 转换 rc->state 到 S_BACKOFF
-    否则转换 rc->state 状态到 S_DISCONNECTED
-
-    if (rc->reliable) {
-        rc->backoff_deadline = now + rc->backoff;
-        state_transition(rc, S_BACKOFF);
-    } else {
-        rc->last_disconnected = time_now();
-        state_transition(rc, S_DISCONNECTED);
-    }
-
-static void flush_queue(struct rconn *rc)
-
-    丢掉 rc->txq 中的所有数据包, 调用  poll_immediate_wake();
-
-
 
 ###Openflow 连接
 
@@ -2892,3 +964,659 @@ void pinsched_set_limits(struct pinsched *ps, int rate_limit, int burst_limit)
 void pinsched_get_stats(const struct pinsched *ps, struct pinsched_stats *stats)
 
     获取 pinsched 的统计信息
+
+
+##Datapath Interface
+
+/* Protects against changes to 'dp_netdevs'. */
+static struct ovs_mutex dp_netdev_mutex = OVS_MUTEX_INITIALIZER;
+
+dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池. 每个端口属于一个 netdev. 
+每个端口所属的 netdev 有一个接受队列, 每个线程有一个流表缓存池
+/* Contains all 'struct dp_netdev's. */
+static struct shash dp_netdevs
+
+//ofproto_dpif_upcall.c
+static struct ovs_list all_udpifs  //保存 udpif 对象
+
+/*
+ * 保持 dpif_class->type : registered_dpif_class 类型 hash map
+ * 目前保持有
+ * system : { .dpif_class = dpif_netlink_class, .refcount=0 }
+ * netdev : { .dpif_class = dpif_netdev_class, .refcount=0 }
+ */
+static struct shash dpif_classes = SHASH_INITIALIZER(&dpif_classes);
+
+//黑名单, 在 ovs-vswitchd 中可以将 system 加入该黑名单
+static struct sset dpif_blacklist = SSET_INITIALIZER(&dpif_blacklist); 
+
+const struct dpif_class dpif_netlink_class = {
+    "system",
+    NULL,                       /* init */
+    dpif_netlink_enumerate,
+    NULL,
+    dpif_netlink_open,
+    dpif_netlink_close,
+    dpif_netlink_destroy,
+    dpif_netlink_run,
+    NULL,                       /* wait */
+    dpif_netlink_get_stats,
+    dpif_netlink_port_add,
+    dpif_netlink_port_del,
+    dpif_netlink_port_query_by_number,
+    dpif_netlink_port_query_by_name,
+    dpif_netlink_port_get_pid,
+    dpif_netlink_port_dump_start,
+    dpif_netlink_port_dump_next,
+    dpif_netlink_port_dump_done,
+    dpif_netlink_port_poll,
+    dpif_netlink_port_poll_wait,
+    dpif_netlink_flow_flush,
+    dpif_netlink_flow_dump_create,
+    dpif_netlink_flow_dump_destroy,
+    dpif_netlink_flow_dump_thread_create,
+    dpif_netlink_flow_dump_thread_destroy,
+    dpif_netlink_flow_dump_next,
+    dpif_netlink_operate,
+    dpif_netlink_recv_set,
+    dpif_netlink_handlers_set,
+    NULL,                       /* poll_thread_set */
+    dpif_netlink_queue_to_priority,
+    dpif_netlink_recv,
+    dpif_netlink_recv_wait,
+    dpif_netlink_recv_purge,
+    NULL,                       /* register_upcall_cb */
+    NULL,                       /* enable_upcall */
+    NULL,                       /* disable_upcall */
+    dpif_netlink_get_datapath_version, /* get_datapath_version */
+};
+
+const struct dpif_class dpif_netdev_class = {
+    "netdev",
+    dpif_netdev_init,
+    dpif_netdev_enumerate,
+    dpif_netdev_port_open_type,
+    dpif_netdev_open,
+    dpif_netdev_close,
+    dpif_netdev_destroy,
+    dpif_netdev_run,
+    dpif_netdev_wait,
+    dpif_netdev_get_stats,
+    dpif_netdev_port_add,
+    dpif_netdev_port_del,
+    dpif_netdev_port_query_by_number,
+    dpif_netdev_port_query_by_name,
+    NULL,                       /* port_get_pid */
+    dpif_netdev_port_dump_start,
+    dpif_netdev_port_dump_next,
+    dpif_netdev_port_dump_done,
+    dpif_netdev_port_poll,
+    dpif_netdev_port_poll_wait,
+    dpif_netdev_flow_flush,
+    dpif_netdev_flow_dump_create,
+    dpif_netdev_flow_dump_destroy,
+    dpif_netdev_flow_dump_thread_create,
+    dpif_netdev_flow_dump_thread_destroy,
+    dpif_netdev_flow_dump_next,
+    dpif_netdev_operate,
+    NULL,                       /* recv_set */
+    NULL,                       /* handlers_set */
+    dpif_netdev_pmd_set,
+    dpif_netdev_queue_to_priority,
+    NULL,                       /* recv */
+    NULL,                       /* recv_wait */
+    NULL,                       /* recv_purge */
+    dpif_netdev_register_upcall_cb,
+    dpif_netdev_enable_upcall,
+    dpif_netdev_disable_upcall,
+    dpif_netdev_get_datapath_version,
+};
+
+
+##dpif-netlink
+
+###消息格式的转换
+
+在将 request 发送给内核的时候必须先转换为 struct ofpbuf 类型
+在接受到应答后, 必须将 bufp 转换为 reply
+此外, 在给内核发送数据的时候又将 struct ofpbuf 转换为 struct msghdr.
+此外, 收到内核应答数据的时候又将 struct msghdr 转换为 struct ofpbuf.
+
+而为了能够更好地映射发送和应答关系, 通过 struct transaction 数据结构 保持, 待发送的 request 和待接受的 reply
+而 struct msghdr 又包含 struct iovecs. 可以包多个 struct transaction 消息放入 iovecs 中, 一次发送多个请求.
+
+
+##附录
+
+struct nl_sock {
+    int fd;
+    uint32_t next_seq;          /* default 1 */
+    uint32_t pid;
+    int protocol;
+    unsigned int rcvbuf;        /* Receive buffer size (SO_RCVBUF). default 1024 * 1024; */
+};
+
+/* Compile-time limit on iovecs, so that we can allocate a maximum-size array
+ * of iovecs on the stack. */
+#define MAX_IOVS 128
+
+/* Maximum number of iovecs that may be passed to sendmsg, capped at a
+ * minimum of _XOPEN_IOV_MAX (16) and a maximum of MAX_IOVS.
+ *
+ * Initialized by nl_sock_create(). */
+static int max_iovs;
+
+int nl_sock_create(int protocol, struct nl_sock **sockp)
+
+    struct nl_sock *sock;
+    struct sockaddr_nl local, remote;
+    socklen_t local_size;
+    int rcvbuf;
+    int retval = 0;
+
+    if (ovsthread_once_start(&once)) {
+        int save_errno = errno;
+        errno = 0;
+
+        max_iovs = sysconf(_SC_UIO_MAXIOV);
+        if (max_iovs < _XOPEN_IOV_MAX) {
+            if (max_iovs == -1 && errno) {
+                VLOG_WARN("sysconf(_SC_UIO_MAXIOV): %s", ovs_strerror(errno));
+            }
+            max_iovs = _XOPEN_IOV_MAX;
+        } else if (max_iovs > MAX_IOVS) {
+            max_iovs = MAX_IOVS;
+        }
+
+        errno = save_errno;
+        ovsthread_once_done(&once);
+    }
+
+    *sockp = NULL;
+    sock = xmalloc(sizeof *sock);
+
+    sock->fd = socket(AF_NETLINK, SOCK_RAW, protocol);
+    if (sock->fd < 0) {
+        printf("fcntl: %s", errno);
+        goto error;
+    }
+
+    sock->protocol = protocol;
+    sock->next_seq = 1;
+
+    rcvbuf = 1024 * 1024;
+
+    if (setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUFFORCE,
+                   &rcvbuf, sizeof rcvbuf)) {
+        /* Only root can use SO_RCVBUFFORCE.  Everyone else gets EPERM.
+         * Warn only if the failure is therefore unexpected. */
+        if (errno != EPERM) {
+            printf("setting %d-byte socket receive buffer failed "
+                         "(%s)", rcvbuf, strer(errno));
+        }
+    }
+
+    socklen_t len;
+    int error;
+    len = sizeof value;
+    if (getsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, &value, &len)) {
+        error = sock_errno();
+        printf("getsockopt(%s): %s", optname, sock_strerror(error));
+    } else if (len != sizeof value) {
+        error = EINVAL;
+        printf("getsockopt(%s): value is %u bytes (expected %"PRIuSIZE")",
+                    optname, (unsigned int) len, sizeof value);
+    } else {
+        error = 0;
+    }
+
+    int retval = error;
+    if (retval < 0) {
+        retval = -retval;
+        goto error;
+    }
+
+    rcvbuf = value;
+    sock->rcvbuf = rcvbuf;
+
+    /* Connect to kernel (pid 0) as remote address. */
+    memset(&remote, 0, sizeof remote);
+    remote.nl_family = AF_NETLINK;
+    remote.nl_pid = 0;
+    if (connect(sock->fd, (struct sockaddr *) &remote, sizeof remote) < 0) {
+        printf("connect(0): %s", ovs_strerror(errno));
+        goto error;
+    }
+
+    /* Obtain pid assigned by kernel. */
+    local_size = sizeof local;
+    if (getsockname(sock->fd, (struct sockaddr *) &local, &local_size) < 0) {
+        printf("getsockname: %s", ovs_strerror(errno));
+        goto error;
+    }
+    if (local_size < sizeof local || local.nl_family != AF_NETLINK) {
+        printf("getsockname returned bad Netlink name");
+        retval = EINVAL;
+        goto error;
+    }
+    sock->pid = local.nl_pid;
+
+    *sockp = sock;
+    return 0;
+
+error:
+    if (retval == 0) {
+        retval = errno;
+        if (retval == 0) {
+            retval = EINVAL;
+        }
+    }
+    if (sock->fd >= 0) {
+        close(sock->fd);
+    }
+    free(sock);
+    return retval;
+}
+
+
+//加入多播组
+
+if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                &multicast_group, sizeof multicast_group) < 0) {
+    printf("could not join multicast group %u (%s)",
+                multicast_group, strerror(errno));
+    return errno;
+}
+
+//从多播组中去除
+if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_DROP_MEMBERSHIP,
+                &multicast_group, sizeof multicast_group) < 0) {
+    printf("could not leave multicast group %u (%s)",
+                multicast_group, ovs_strerror(errno));
+    return errno;
+}
+
+
+//多播组
+
+unsigned int multicast_group
+error = nl_sock_create(NETLINK_GENERIC, &sock);
+if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+               &multicast_group, sizeof multicast_group) < 0) {
+    printf("could not join multicast group %u (%s)",
+              multicast_group, ovs_strerror(errno));
+    return errno;
+}
+
+
+
+##附录
+
+/*
+ * dpif, the DataPath InterFace.
+ *
+ * In Open vSwitch terminology, a "datapath" is a flow-based software switch.
+ * A datapath has no intelligence of its own.  Rather, it relies entirely on
+ * its client to set up flows.  The datapath layer is core to the Open vSwitch
+ * software switch: one could say, without much exaggeration, that everything
+ * in ovs-vswitchd above dpif exists only to make the correct decisions
+ * interacting with dpif.
+ *
+ * Typically, the client of a datapath is the software switch module in
+ * "ovs-vswitchd", but other clients can be written.  The "ovs-dpctl" utility
+ * is also a (simple) client.
+ *
+ *
+ * Overview
+ * ========
+ *
+ * The terms written in quotes below are defined in later sections.
+ *
+ * When a datapath "port" receives a packet, it extracts the headers (the
+ * "flow").  If the datapath's "flow table" contains a "flow entry" matching
+ * the packet, then it executes the "actions" in the flow entry and increments
+ * the flow's statistics.  If there is no matching flow entry, the datapath
+ * instead appends the packet to an "upcall" queue.
+ *
+ *
+ * Ports
+ * =====
+ *
+ * A datapath has a set of ports that are analogous to the ports on an Ethernet
+ * switch.  At the datapath level, each port has the following information
+ * associated with it:
+ *
+ *    - A name, a short string that must be unique within the host.  This is
+ *      typically a name that would be familiar to the system administrator,
+ *      e.g. "eth0" or "vif1.1", but it is otherwise arbitrary.
+ *
+ *    - A 32-bit port number that must be unique within the datapath but is
+ *      otherwise arbitrary.  The port number is the most important identifier
+ *      for a port in the datapath interface.
+ *
+ *    - A type, a short string that identifies the kind of port.  On a Linux
+ *      host, typical types are "system" (for a network device such as eth0),
+ *      "internal" (for a simulated port used to connect to the TCP/IP stack),
+ *      and "gre" (for a GRE tunnel).
+ *
+ *    - A Netlink PID for each upcall reading thread (see "Upcall Queuing and
+ *      Ordering" below).
+ *
+ * The dpif interface has functions for adding and deleting ports.  When a
+ * datapath implements these (e.g. as the Linux and netdev datapaths do), then
+ * Open vSwitch's ovs-vswitchd daemon can directly control what ports are used
+ * for switching.  Some datapaths might not implement them, or implement them
+ * with restrictions on the types of ports that can be added or removed
+ * (e.g. on ESX), on systems where port membership can only be changed by some
+ * external entity.
+ *
+ * Each datapath must have a port, sometimes called the "local port", whose
+ * name is the same as the datapath itself, with port number 0.  The local port
+ * cannot be deleted.
+ *
+ * Ports are available as "struct netdev"s.  To obtain a "struct netdev *" for
+ * a port named 'name' with type 'port_type', in a datapath of type
+ * 'datapath_type', call netdev_open(name, dpif_port_open_type(datapath_type,
+ * port_type).  The netdev can be used to get and set important data related to
+ * the port, such as:
+ *
+ *    - MTU (netdev_get_mtu(), netdev_set_mtu()).
+ *
+ *    - Ethernet address (netdev_get_etheraddr(), netdev_set_etheraddr()).
+ *
+ *    - Statistics such as the number of packets and bytes transmitted and
+ *      received (netdev_get_stats()).
+ *
+ *    - Carrier status (netdev_get_carrier()).
+ *
+ *    - Speed (netdev_get_features()).
+ *
+ *    - QoS queue configuration (netdev_get_queue(), netdev_set_queue() and
+ *      related functions.)
+ *
+ *    - Arbitrary port-specific configuration parameters (netdev_get_config(),
+ *      netdev_set_config()).  An example of such a parameter is the IP
+ *      endpoint for a GRE tunnel.
+ *
+ *
+ * Flow Table
+ * ==========
+ *
+ * The flow table is a collection of "flow entries".  Each flow entry contains:
+ *
+ *    - A "flow", that is, a summary of the headers in an Ethernet packet.  The
+ *      flow must be unique within the flow table.  Flows are fine-grained
+ *      entities that include L2, L3, and L4 headers.  A single TCP connection
+ *      consists of two flows, one in each direction.
+ *
+ *      In Open vSwitch userspace, "struct flow" is the typical way to describe
+ *      a flow, but the datapath interface uses a different data format to
+ *      allow ABI forward- and backward-compatibility.  datapath/README.md
+ *      describes the rationale and design.  Refer to OVS_KEY_ATTR_* and
+ *      "struct ovs_key_*" in include/odp-netlink.h for details.
+ *      lib/odp-util.h defines several functions for working with these flows.
+ *
+ *    - A "mask" that, for each bit in the flow, specifies whether the datapath
+ *      should consider the corresponding flow bit when deciding whether a
+ *      given packet matches the flow entry.  The original datapath design did
+ *      not support matching: every flow entry was exact match.  With the
+ *      addition of a mask, the interface supports datapaths with a spectrum of
+ *      wildcard matching capabilities, from those that only support exact
+ *      matches to those that support bitwise wildcarding on the entire flow
+ *      key, as well as datapaths with capabilities somewhere in between.
+ *
+ *      Datapaths do not provide a way to query their wildcarding capabilities,
+ *      nor is it expected that the client should attempt to probe for the
+ *      details of their support.  Instead, a client installs flows with masks
+ *      that wildcard as many bits as acceptable.  The datapath then actually
+ *      wildcards as many of those bits as it can and changes the wildcard bits
+ *      that it does not support into exact match bits.  A datapath that can
+ *      wildcard any bit, for example, would install the supplied mask, an
+ *      exact-match only datapath would install an exact-match mask regardless
+ *      of what mask the client supplied, and a datapath in the middle of the
+ *      spectrum would selectively change some wildcard bits into exact match
+ *      bits.
+ *
+ *      Regardless of the requested or installed mask, the datapath retains the
+ *      original flow supplied by the client.  (It does not, for example, "zero
+ *      out" the wildcarded bits.)  This allows the client to unambiguously
+ *      identify the flow entry in later flow table operations.
+ *
+ *      The flow table does not have priorities; that is, all flow entries have
+ *      equal priority.  Detecting overlapping flow entries is expensive in
+ *      general, so the datapath is not required to do it.  It is primarily the
+ *      client's responsibility not to install flow entries whose flow and mask
+ *      combinations overlap.
+ *
+ *    - A list of "actions" that tell the datapath what to do with packets
+ *      within a flow.  Some examples of actions are OVS_ACTION_ATTR_OUTPUT,
+ *      which transmits the packet out a port, and OVS_ACTION_ATTR_SET, which
+ *      modifies packet headers.  Refer to OVS_ACTION_ATTR_* and "struct
+ *      ovs_action_*" in include/odp-netlink.h for details.  lib/odp-util.h
+ *      defines several functions for working with datapath actions.
+ *
+ *      The actions list may be empty.  This indicates that nothing should be
+ *      done to matching packets, that is, they should be dropped.
+ *
+ *      (In case you are familiar with OpenFlow, datapath actions are analogous
+ *      to OpenFlow actions.)
+ *
+ *    - Statistics: the number of packets and bytes that the flow has
+ *      processed, the last time that the flow processed a packet, and the
+ *      union of all the TCP flags in packets processed by the flow.  (The
+ *      latter is 0 if the flow is not a TCP flow.)
+ *
+ * The datapath's client manages the flow table, primarily in reaction to
+ * "upcalls" (see below).
+ *
+ *
+ * Upcalls
+ * =======
+ *
+ * A datapath sometimes needs to notify its client that a packet was received.
+ * The datapath mechanism to do this is called an "upcall".
+ *
+ * Upcalls are used in two situations:
+ *
+ *    - When a packet is received, but there is no matching flow entry in its
+ *      flow table (a flow table "miss"), this causes an upcall of type
+ *      DPIF_UC_MISS.  These are called "miss" upcalls.
+ *
+ *    - A datapath action of type OVS_ACTION_ATTR_USERSPACE causes an upcall of
+ *      type DPIF_UC_ACTION.  These are called "action" upcalls.
+ *
+ * __ An upcall contains an entire packet __.  There is no attempt to, e.g., copy
+ * only as much of the packet as normally needed to make a forwarding decision.
+ * Such an optimization is doable, but experimental prototypes showed it to be
+ * of little benefit because an upcall typically contains the first packet of a
+ * flow, which is usually short (e.g. a TCP SYN).  Also, the entire packet can
+ * sometimes really be needed.
+ *
+ * After a client reads a given upcall, the datapath is finished with it, that
+ * is, the datapath doesn't maintain any lingering state past that point.
+ *
+ * The latency from the time that a packet arrives at a port to the time that
+ * it is received from dpif_recv() is critical in some benchmarks.  For
+ * example, if this latency is 1 ms, then a netperf TCP_CRR test, which opens
+ * and closes TCP connections one at a time as quickly as it can, cannot
+ * possibly achieve more than 500 transactions per second, since every
+ * connection consists of two flows with 1-ms latency to set up each one.
+ *
+ * To receive upcalls, a client has to enable them with dpif_recv_set().  A
+ * datapath should generally support being opened multiple times (e.g. so that
+ * one may run "ovs-dpctl show" or "ovs-dpctl dump-flows" while "ovs-vswitchd"
+ * is also running) but need not support more than one of these clients
+ * enabling upcalls at once.
+ *
+ *
+ * Upcall Queuing and Ordering
+ * ---------------------------
+ *
+ * The datapath's client reads upcalls one at a time by calling dpif_recv().
+ * When more than one upcall is pending, the order in which the datapath
+ * presents upcalls to its client is important.  The datapath's client does not
+ * directly control this order, so the datapath implementer must take care
+ * during design.
+ *
+ * The minimal behavior, suitable for initial testing of a datapath
+ * implementation, is that all upcalls are appended to a single queue, which is
+ * delivered to the client in order.
+ *
+ * The datapath should ensure that a high rate of upcalls from one particular
+ * port cannot cause upcalls from other sources to be dropped or unreasonably
+ * delayed.  Otherwise, one port conducting a port scan or otherwise initiating
+ * high-rate traffic spanning many flows could suppress other traffic.
+ * Ideally, the datapath should present upcalls from each port in a "round
+ * robin" manner, to ensure fairness.
+ *
+ * The client has no control over "miss" upcalls and no insight into the
+ * datapath's implementation, so the datapath is entirely responsible for
+ * queuing and delivering them.  On the other hand, the datapath has
+ * considerable freedom of implementation.  One good approach is to maintain a
+ * separate queue for each port, to prevent any given port's upcalls from
+ * interfering with other ports' upcalls.  If this is impractical, then another
+ * reasonable choice is to maintain some fixed number of queues and assign each
+ * port to one of them.  Ports assigned to the same queue can then interfere
+ * with each other, but not with ports assigned to different queues.  Other
+ * approaches are also possible.
+ *
+ * The client has some control over "action" upcalls: it can specify a 32-bit
+ * "Netlink PID" as part of the action.  This terminology comes from the Linux
+ * datapath implementation, which uses a protocol called Netlink in which a PID
+ * designates a particular socket and the upcall data is delivered to the
+ * socket's receive queue.  Generically, though, a Netlink PID identifies a
+ * queue for upcalls.  The basic requirements on the datapath are:
+ *
+ *    - The datapath must provide a Netlink PID associated with each port.  The
+ *      client can retrieve the PID with dpif_port_get_pid().
+ *
+ *    - The datapath must provide a "special" Netlink PID not associated with
+ *      any port.  dpif_port_get_pid() also provides this PID.  (ovs-vswitchd
+ *      uses this PID to queue special packets that must not be lost even if a
+ *      port is otherwise busy, such as packets used for tunnel monitoring.)
+ *
+ * The minimal behavior of dpif_port_get_pid() and the treatment of the Netlink
+ * PID in "action" upcalls is that dpif_port_get_pid() returns a constant value
+ * and all upcalls are appended to a single queue.
+ *
+ * The preferred behavior is:
+ *
+ *    - Each port has a PID that identifies the queue used for "miss" upcalls
+ *      on that port.  (Thus, if each port has its own queue for "miss"
+ *      upcalls, then each port has a different Netlink PID.)
+ *
+ *    - "miss" upcalls for a given port and "action" upcalls that specify that
+ *      port's Netlink PID add their upcalls to the same queue.  The upcalls
+ *      are delivered to the datapath's client in the order that the packets
+ *      were received, regardless of whether the upcalls are "miss" or "action"
+ *      upcalls.
+ *
+ *    - Upcalls that specify the "special" Netlink PID are queued separately.
+ *
+ * Multiple threads may want to read upcalls simultaneously from a single
+ * datapath.  To support multiple threads well, one extends the above preferred
+ * behavior:
+ *
+ *    - Each port has multiple PIDs.  The datapath distributes "miss" upcalls
+ *      across the PIDs, ensuring that a given flow is mapped in a stable way
+ *      to a single PID.
+ *
+ *    - For "action" upcalls, the thread can specify its own Netlink PID or
+ *      other threads' Netlink PID of the same port for offloading purpose
+ *      (e.g. in a "round robin" manner).
+ *
+ *
+ * Packet Format
+ * =============
+ *
+ * The datapath interface works with packets in a particular form.  This is the
+ * form taken by packets received via upcalls (i.e. by dpif_recv()).  Packets
+ * supplied to the datapath for processing (i.e. to dpif_execute()) also take
+ * this form.
+ *
+ * A VLAN tag is represented by an 802.1Q header.  If the layer below the
+ * datapath interface uses another representation, then the datapath interface
+ * must perform conversion.
+ *
+ * __ The datapath interface requires all packets to fit within the MTU.  Some
+ * operating systems internally process packets larger than MTU, with features
+ * such as TSO and UFO. __ When such a packet passes through the datapath
+ * interface, it must be broken into multiple MTU or smaller sized packets for
+ * presentation as upcalls.  (This does not happen often, because an upcall
+ * typically contains the first packet of a flow, which is usually short.)
+ *
+ * Some operating system TCP/IP stacks maintain packets in an unchecksummed or
+ * partially checksummed state until transmission.  The datapath interface
+ * requires all host-generated packets to be fully checksummed (e.g. IP and TCP
+ * checksums must be correct).  On such an OS, the datapath interface must fill
+ * in these checksums.
+ *
+ * Packets passed through the datapath interface must be at least 14 bytes
+ * long, that is, they must have a complete Ethernet header.  They are not
+ * required to be padded to the minimum Ethernet length.
+ *
+ *
+ * Typical Usage
+ * =============
+ *
+ * Typically, the client of a datapath begins by configuring the datapath with
+ * a set of ports.  Afterward, the client runs in a loop polling for upcalls to
+ * arrive.
+ *
+ * For each upcall received, the client examines the enclosed packet and
+ * figures out what should be done with it.  For example, if the client
+ * implements a MAC-learning switch, then it searches the forwarding database
+ * for the packet's destination MAC and VLAN and determines the set of ports to
+ * which it should be sent.  In any case, the client composes a set of datapath
+ * actions to properly dispatch the packet and then directs the datapath to
+ * execute those actions on the packet (e.g. with dpif_execute()).
+ *
+ * Most of the time, the actions that the client executed on the packet apply
+ * to every packet with the same flow.  For example, the flow includes both
+ * destination MAC and VLAN ID (and much more), so this is true for the
+ * MAC-learning switch example above.  In such a case, the client can also
+ * direct the datapath to treat any further packets in the flow in the same
+ * way, using dpif_flow_put() to add a new flow entry.
+ *
+ * Other tasks the client might need to perform, in addition to reacting to
+ * upcalls, include:
+ *
+ *    - Periodically polling flow statistics, perhaps to supply to its own
+ *      clients.
+ *
+ *    - Deleting flow entries from the datapath that haven't been used
+ *      recently, to save memory.
+ *
+ *    - Updating flow entries whose actions should change.  For example, if a
+ *      MAC learning switch learns that a MAC has moved, then it must update
+ *      the actions of flow entries that sent packets to the MAC at its old
+ *      location.
+ *
+ *    - Adding and removing ports to achieve a new configuration.
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * Most of the dpif functions are fully thread-safe: they may be called from
+ * any number of threads on the same or different dpif objects.  The exceptions
+ * are:
+ *
+ *    - dpif_port_poll() and dpif_port_poll_wait() are conditionally
+ *      thread-safe: they may be called from different threads only on
+ *      different dpif objects.
+ *
+ *    - dpif_flow_dump_next() is conditionally thread-safe: It may be called
+ *      from different threads with the same 'struct dpif_flow_dump', but all
+ *      other parameters must be different for each thread.
+ *
+ *    - dpif_flow_dump_done() is conditionally thread-safe: All threads that
+ *      share the same 'struct dpif_flow_dump' must have finished using it.
+ *      This function must then be called exactly once for a particular
+ *      dpif_flow_dump to finish the corresponding flow dump operation.
+ *
+ *    - Functions that operate on 'struct dpif_port_dump' are conditionally
+ *      thread-safe with respect to those objects.  That is, one may dump ports
+ *      from any number of threads at once, but each thread must use its own
+ *      struct dpif_port_dump.
+ */

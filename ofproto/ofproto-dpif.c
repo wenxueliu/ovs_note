@@ -2145,6 +2145,7 @@ port_modified(struct ofport *port_)
     ofport_update_peer(port);
 }
 
+//决定是否要进行端口重配置, 真正的重新配置是在 process_dpif_port_changes 中实现
 static void
 port_reconfigured(struct ofport *port_, enum ofputil_port_config old_config)
 {
@@ -4637,6 +4638,17 @@ set_frag_handling(struct ofproto *ofproto_,
     }
 }
 
+/*
+ * @ofproto_
+ * @packet : 控制器下发的 PACKET_OUT 数据包如果还有 buffer_id 就从 ofconn->pktbuf 中查找, 如果没有buffer_id 就是控制下发 PACKET_OUT 数据包
+ * @flow   : 提取 packet 信息组成 flow
+ * @ofpacts: 解析控制器下发的 PACKET_OUT 数据包解析
+ * @ofpacts_len : ofpacts 长度
+ *
+ * 执行控制器下发的 PACKET_OUT 消息:
+ * 1. 用参数初始化 dpif_execute 对象 execute
+ * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ */
 static enum ofperr
 packet_out(struct ofproto *ofproto_, struct dp_packet *packet,
            const struct flow *flow,

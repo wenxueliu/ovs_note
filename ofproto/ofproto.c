@@ -3670,6 +3670,15 @@ ofproto_check_ofpacts(struct ofproto *ofproto,
     return 0;
 }
 
+/*
+ * SLAVE 角色无法下发 PACKET_OUT, 即使下发, 交换机也不会处理
+ *
+ * 如果 PACKET_OUT 携带 buffer_id, 从 ofconn->pktbuf 中寻找 buffer_id 对应的数据包
+ * 如果 PACKET_OUT 没有携带 buffer_id, 就对控制器下发的包执行制定的动作
+ *
+ * 之后将数据包转换为 flow, actions, 构造 NETLINK 消息, 发送给内核,要求内核执行 PACKET_OUT 中指定的的 action
+ *
+ */
 static enum ofperr
 handle_packet_out(struct ofconn *ofconn, const struct ofp_header *oh)
 {
@@ -3716,6 +3725,10 @@ handle_packet_out(struct ofconn *ofconn, const struct ofp_header *oh)
     flow.in_port.ofp_port = po.in_port;
     error = ofproto_check_ofpacts(p, po.ofpacts, po.ofpacts_len);
     if (!error) {
+        /*
+         * 1. 用参数初始化 dpif_execute 对象 execute
+         * 2. 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+         */
         error = p->ofproto_class->packet_out(p, payload, &flow,
                                              po.ofpacts, po.ofpacts_len);
     }
@@ -3727,13 +3740,25 @@ exit:
     return error;
 }
 
+/*
+ * @ofconn : 与控制器的连接
+ * @port   : 原来的端口信息
+ * @config : 新端口配置
+ * @mask   : 新端口配置掩码
+ *
+ * 如果端口配置发送变化, 进行端口重配置
+ *
+ * TODO 如何与具体的端口修改 process_dpif_port_changes 关联?
+ */
 static void
 update_port_config(struct ofconn *ofconn, struct ofport *port,
                    enum ofputil_port_config config,
                    enum ofputil_port_config mask)
 {
+    //获取端口配置需要改变的部分
     enum ofputil_port_config toggle = (config ^ port->pp.config) & mask;
 
+    //如果 OFPUTIL_PC_PORT_DOWN 发生变化
     if (toggle & OFPUTIL_PC_PORT_DOWN
         && (config & OFPUTIL_PC_PORT_DOWN
             ? netdev_turn_flags_off(port->netdev, NETDEV_UP, NULL)
@@ -3746,12 +3771,23 @@ update_port_config(struct ofconn *ofconn, struct ofport *port,
     if (toggle) {
         enum ofputil_port_config old_config = port->pp.config;
         port->pp.config ^= toggle;
+        //进行端口的重配置
         port->ofproto->ofproto_class->port_reconfigured(port, old_config);
+        //给控制发送端口状态改变信息
         connmgr_send_port_status(port->ofproto->connmgr, ofconn, &port->pp,
                                  OFPPR_MODIFY);
     }
 }
 
+/*
+ * @ofconn : 与控制器的连接
+ * @pm     : 新的端口信息
+ * @port   : 原来的端口信息
+ *
+ * PORT_MOD 信息校验
+ *
+ * 检查 PORT_MOD 消息的端口号与交换机对应端口号的硬件地址是否一致.
+ */
 static enum ofperr
 port_mod_start(struct ofconn *ofconn, struct ofputil_port_mod *pm,
                struct ofport **port)
@@ -3768,6 +3804,13 @@ port_mod_start(struct ofconn *ofconn, struct ofputil_port_mod *pm,
     return 0;
 }
 
+/*
+ * @ofconn : 与控制器的连接
+ * @pm     : 新的端口信息
+ * @port   : 原来的端口信息
+ *
+ *
+ */
 static void
 port_mod_finish(struct ofconn *ofconn, struct ofputil_port_mod *pm,
                 struct ofport *port)
@@ -3778,6 +3821,11 @@ port_mod_finish(struct ofconn *ofconn, struct ofputil_port_mod *pm,
     }
 }
 
+/*
+ * SLAVE 角色不能修改端口
+ *
+ *
+ */
 static enum ofperr
 handle_port_mod(struct ofconn *ofconn, const struct ofp_header *oh)
 {
@@ -4113,6 +4161,9 @@ next_matching_table(const struct ofproto *ofproto,
  *
  * For "loose" matching, the 'priority' parameter is unimportant and may be
  * supplied as 0. */
+/*
+ * 用其他参数初始化 criteria
+ */
 static void
 rule_criteria_init(struct rule_criteria *criteria, uint8_t table_id,
                    const struct match *match, int priority,
@@ -4277,6 +4328,8 @@ rule_collection_remove_postponed(struct rule_collection *rules)
  *
  * Increments '*n_readonly' if 'rule' wasn't added because it's read-only (and
  * 'c' only includes modifiable rules). */
+
+//根据一定条件 将 rule 增加到 rules
 static void
 collect_rule(struct rule *rule, const struct rule_criteria *c,
              struct rule_collection *rules, size_t *n_readonly)
@@ -4305,6 +4358,9 @@ collect_rule(struct rule *rule, const struct rule_criteria *c,
  * 'rules'.
  *
  * Returns 0 on success, otherwise an OpenFlow error code. */
+/*
+ * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+ */
 static enum ofperr
 collect_rules_loose(struct ofproto *ofproto,
                     const struct rule_criteria *criteria,
@@ -4325,6 +4381,11 @@ collect_rules_loose(struct ofproto *ofproto,
     if (criteria->cookie_mask == OVS_BE64_MAX) {
         struct rule *rule;
 
+        /*
+         * 1. 以 hash_cookie(criteria->cookie) 为索引, 在 ofproto->cookies->buckets[hash_cookie(criteria->cookie) & ofproto->cookies->mask]
+         * 遍历每一个节点 node, 找到 node->hash = hash_cookie(criteria->cookie) 的节点 node,  由 node 定位到所属的 rule.
+         * 2. 一直调用 ruel = rule->cookie_node.s, 即遍历具有同一 hash 的 flow
+         */
         HINDEX_FOR_EACH_WITH_HASH (rule, cookie_node,
                                    hash_cookie(criteria->cookie),
                                    &ofproto->cookies) {
@@ -4336,6 +4397,7 @@ collect_rules_loose(struct ofproto *ofproto,
         FOR_EACH_MATCHING_TABLE (table, criteria->table_id, ofproto) {
             struct rule *rule;
 
+            //在 table->cls 中找到符合 criteria->cr, criteria->version 的 rule
             CLS_FOR_EACH_TARGET (rule, cr, &table->cls, &criteria->cr,
                                  criteria->version) {
                 collect_rule(rule, criteria, rules, &n_readonly);
@@ -4446,6 +4508,9 @@ handle_flow_stats_request(struct ofconn *ofconn,
                        fsr.out_group);
 
     ovs_mutex_lock(&ofproto_mutex);
+    /*
+     * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+     */
     error = collect_rules_loose(ofproto, &criteria, &rules);
     rule_criteria_destroy(&criteria);
     if (!error) {
@@ -4610,6 +4675,9 @@ handle_aggregate_stats_request(struct ofconn *ofconn,
                        request.out_port, request.out_group);
 
     ovs_mutex_lock(&ofproto_mutex);
+    /*
+     * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+     */
     error = collect_rules_loose(ofproto, &criteria, &rules);
     rule_criteria_destroy(&criteria);
     if (!error) {
@@ -5004,6 +5072,9 @@ add_flow_finish(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
 /* Create a new rule based on attributes in 'fm', match in 'cr', 'table_id',
  * and 'old_rule'.  Note that the rule is NOT inserted into a any data
  * structures yet.  Takes ownership of 'cr'. */
+/*
+ * 根据其他参数初始化 new_rule
+ */
 static enum ofperr
 replace_rule_create(struct ofproto *ofproto, struct ofputil_flow_mod *fm,
                     struct cls_rule *cr, uint8_t table_id,
@@ -5079,6 +5150,8 @@ replace_rule_create(struct ofproto *ofproto, struct ofputil_flow_mod *fm,
     return 0;
 }
 
+//将 old_rule 不可见, 将 new_rule 加入 ofproto->table
+//TODO
 static void
 replace_rule_start(struct ofproto *ofproto, cls_version_t version,
                    struct rule *old_rule, struct rule *new_rule,
@@ -5222,6 +5295,7 @@ modify_flows_start__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
         }
         ovs_assert(new_rules->n == old_rules->n);
 
+        //TODO
         get_conjunctions(fm, &conjs, &n_conjs);
         for (i = 0; i < old_rules->n; i++) {
             replace_rule_start(ofproto, ofm->version, old_rules->rules[i],
@@ -5249,6 +5323,11 @@ modify_flows_start__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
  *
  * 'ofconn' is used to retrieve the packet buffer specified in fm->buffer_id,
  * if any. */
+/*
+ *
+ *
+ * NOTE: fm->flags & OFPUTIL_FF_NO_READONLY) != 0 : 表面该流表可以修改只读流表
+ */
 static enum ofperr
 modify_flows_start_loose(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
     OVS_REQUIRES(ofproto_mutex)
@@ -5262,10 +5341,15 @@ modify_flows_start_loose(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
                        fm->cookie, fm->cookie_mask, OFPP_ANY, OFPG11_ANY);
     rule_criteria_require_rw(&criteria,
                              (fm->flags & OFPUTIL_FF_NO_READONLY) != 0);
+
+    /*
+     * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+     */
     error = collect_rules_loose(ofproto, &criteria, old_rules);
     rule_criteria_destroy(&criteria);
 
     if (!error) {
+        //ofm->old_rules 保持需要修改的流表
         error = modify_flows_start__(ofproto, ofm);
     }
 
@@ -5344,6 +5428,7 @@ modify_flow_start_strict(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
 
     if (!error) {
         /* collect_rules_strict() can return max 1 rule. */
+        //ofm->old_rules 保持需要修改的流表
         error = modify_flows_start__(ofproto, ofm);
     }
 
@@ -5492,6 +5577,9 @@ delete_flows_start_loose(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
                        fm->out_group);
     rule_criteria_require_rw(&criteria,
                              (fm->flags & OFPUTIL_FF_NO_READONLY) != 0);
+    /*
+     * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+     */
     error = collect_rules_loose(ofproto, &criteria, rules);
     rule_criteria_destroy(&criteria);
 
@@ -5641,6 +5729,12 @@ ofproto_rule_reduce_timeouts(struct rule *rule,
     ovs_mutex_unlock(&rule->mutex);
 }
 
+/*
+ * SLAVE 不能发送 FLOW_MOD 消息
+ *
+ *
+ *
+ */
 static enum ofperr
 handle_flow_mod(struct ofconn *ofconn, const struct ofp_header *oh)
     OVS_EXCLUDED(ofproto_mutex)
@@ -5684,6 +5778,9 @@ exit:
     return error;
 }
 
+/*
+ * TODO
+ */
 static enum ofperr
 handle_flow_mod__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
                   const struct flow_mod_requester *req)
@@ -5707,9 +5804,9 @@ handle_flow_mod__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
     ovs_mutex_unlock(&ofproto_mutex);
 
     /*
-    * 遍历 ofproto->rule_executes 中的所有 execute:
-    * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
-    */
+     * 遍历 ofproto->rule_executes 中的所有 execute:
+     * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+     */
     run_rule_executes(ofproto);
     return error;
 }
@@ -5981,12 +6078,23 @@ ofproto_collect_ofmonitor_refresh_rules(const struct ofmonitor *m,
     cls_rule_destroy(&target);
 }
 
+/*
+ * 如果 m->flags & NXFMF_INITIAL:
+ * 1. 将 m->match 克隆到 target->match
+ * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
+ *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+ */
 static void
 ofproto_collect_ofmonitor_initial_rules(struct ofmonitor *m,
                                         struct rule_collection *rules)
     OVS_REQUIRES(ofproto_mutex)
 {
     if (m->flags & NXFMF_INITIAL) {
+        /*
+         * 1. 将 m->match 克隆到 target->match
+         * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
+         *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+         */
         ofproto_collect_ofmonitor_refresh_rules(m, 0, rules);
     }
 }
@@ -5996,6 +6104,11 @@ ofmonitor_collect_resume_rules(struct ofmonitor *m,
                                uint64_t seqno, struct rule_collection *rules)
     OVS_REQUIRES(ofproto_mutex)
 {
+    /*
+     * 1. 将 m->match 克隆到 target->match
+     * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
+     *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+     */
     ofproto_collect_ofmonitor_refresh_rules(m, seqno, rules);
 }
 
@@ -6034,6 +6147,7 @@ handle_flow_monitor_request(struct ofconn *ofconn, const struct ofp_header *oh)
     monitors = NULL;
     n_monitors = allocated_monitors = 0;
 
+    //创建 ofmonitor 对象并加入 ofconn->monitors 和 monitors
     ovs_mutex_lock(&ofproto_mutex);
     for (;;) {
         struct ofputil_flow_monitor_request request;
@@ -6068,6 +6182,12 @@ handle_flow_monitor_request(struct ofconn *ofconn, const struct ofp_header *oh)
 
     rule_collection_init(&rules);
     for (i = 0; i < n_monitors; i++) {
+        /*
+         * 如果 m->flags & NXFMF_INITIAL:
+         * 1. 将 m->match 克隆到 target->match
+         * 2. 在 m->ofconn->connmgr->ofproto 中找到 ofproto->tables[table_id] (m->table_id !=0xff)
+         *    遍历 table->cls 表的每一条流表项, rule 为对应的流表项在 m->flags 的监控范围, 加入 rules
+         */
         ofproto_collect_ofmonitor_initial_rules(monitors[i], &rules);
     }
 
@@ -6509,6 +6629,9 @@ group_get_ref_count(struct ofgroup *group)
     rule_criteria_init(&criteria, 0xff, &match, 0, CLS_MAX_VERSION, htonll(0),
                        htonll(0), OFPP_ANY, group->group_id);
     ovs_mutex_lock(&ofproto_mutex);
+    /*
+     * 在 ofproto->cookies 或 ofproto->tables 中根据 criteria 的条件找到匹配的 rule, 加入 rules
+     */
     error = collect_rules_loose(ofproto, &criteria, &rules);
     ovs_mutex_unlock(&ofproto_mutex);
     rule_criteria_destroy(&criteria);
@@ -7476,6 +7599,11 @@ handle_geneve_table_request(struct ofconn *ofconn, const struct ofp_header *oh)
     return 0;
 }
 
+/*
+ * TODO
+ *
+ *
+ */
 static enum ofperr
 handle_openflow__(struct ofconn *ofconn, const struct ofpbuf *msg)
     OVS_EXCLUDED(ofproto_mutex)

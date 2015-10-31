@@ -597,7 +597,7 @@ vport_del_socksp(struct dpif_netlink *dpif, struct nl_sock **socksp)
  * the array of corresponding pids. If the 'socksp' is NULL, returns
  * a single-element array of value 0. */
 /*
- * 获取 socksp 对应的 pid 数组
+ * 获取用户态 socket->fd 与 内核态交互的 pid, 即 socksp 对应的 pid 数组
  *
  * 如果 socksp = NULL, 初始化一个 pids, 返回 pids
  * 否则 pids 指向 socksp 中 n_socks 个 sock->pid 数组头指针. 返回 pids
@@ -629,6 +629,7 @@ vport_socksp_to_pids(struct nl_sock **socksp, uint32_t n_socks)
  * @port_idx : 端口号
  * @upcall_pids : 指向 dpif->handlers 中 port_idx 所对应的 channel 的 sock->pid 的数组的头指针
  *
+ * 获取端口 port_idx 的每个 socket->fd 对应的 pid 列表, 保存在 upcall_pids
  *
  * 如果 dpif->handlers[0]->channels[port_idx].sock = NULL, 返回 false;
  * 否则 upcall_pids 指向 dpif->handlers 中 port_idx 所对应的 channel 的 sock->pid 的数组的头指针
@@ -661,7 +662,7 @@ vport_get_pids(struct dpif_netlink *dpif, uint32_t port_idx,
 }
 
 /*
- * 用 socksp 的每个元素初始化 dpif->handlers 中每个 handler 对应的 channel 的 sock
+ * 将 port_no 对应的 socketp 加入 dpif->handlers
  *
  * 1. 如果 port_no 大于 dpif->uc_array_size 扩展 dpif->handlers[i]->epoll_event 和  dpif->handlers[i]->channels 的空间
  * 2. 初始化(其中 i = [0, dpif->n_handlers) )
@@ -688,6 +689,7 @@ vport_add_channels(struct dpif_netlink *dpif, odp_port_t port_no,
     /* We assume that the datapath densely chooses port numbers, which can
      * therefore be used as an index into 'channels' and 'epoll_events' of
      * 'dpif->handler'. */
+    //1. 如果 port_no 大于 dpif->uc_array_size 扩展 dpif->handlers[i]->epoll_event 和  dpif->handlers[i]->channels 的空间
     if (port_idx >= dpif->uc_array_size) {
         uint32_t new_size = port_idx + 1;
 
@@ -747,7 +749,12 @@ error:
     return error;
 }
 
-//将 dpif->handlers 每个 handler->channels[port_no] 置为 NULL
+/*
+ * 将 dpif->handlers 中 port_no 对应的 handler->channels[port_no] 置为 NULL. 并且
+ * 并从 handler->epoll_fd 中删除对 port_no 管理的 socket->fd 的监听
+ *
+ * NOTE: 这里只是将 channel 置为 NULL, 删除 channel. 后续 refresh 会做删除
+ */
 static void
 vport_del_channels(struct dpif_netlink *dpif, odp_port_t port_no)
 {
@@ -857,6 +864,14 @@ dpif_netlink_destroy(struct dpif *dpif_)
     return dpif_netlink_dp_transact(&dp, NULL, NULL);
 }
 
+/*
+ * 如果需要刷新 dpif 的 channel 就刷新. 返回 false
+ *
+ * NOTE:
+ * 当存在的端口被删除的时候 refresh_channels = true
+ *
+ * TODO 为什么只返回 false
+ */
 static bool
 dpif_netlink_run(struct dpif *dpif_)
 {
@@ -1193,7 +1208,7 @@ exit:
  * @nedev : 端口所属网络设备
  * @port_nop : 内核返回的创建的端口号
  *
- * 向内核发送在 dpif 中创建端口的消息, 并且关联 dpif->nl_handlers 个 nl_sock 与创建端口, 绑定与端口关联 fd POLLIN 消息
+ * 向内核发送在 dpif 中创建端口的消息, 并且关联 dpif->nl_handlers 个 nl_sock 与创建端口, 绑定与端口关联 fd POLLIN 消息, 即内核该端口的包需要与用户空间交互的时候, 发往对应的 fd.
  *
  * 1. 根据 netdev 获取待增加 port 的 name, type
  * 2  创建 dpif->n_handlers 个 struct nl_sock 并与内核建立连接, 返回 nl_sock 的首指针
@@ -1511,7 +1526,7 @@ dpif_netlink_port_dump_start__(const struct dpif_netlink *dpif,
     */
     dpif_netlink_vport_to_ofpbuf(&request, buf);
     /*
-    * 修改由 buf 构造的 struct nlmsghdr nlmsg 之后发送给 NETLINK_GENERIC 协议对应的 sock 的消息并初始化 dump.
+    * 修改由 buf 构造的 struct nlmsghdr nlmsg 之后发送给 NETLINK_GENERIC 协议对应的 sock 并初始化 dump.
     *
     * 其中 buf 构造的 nlmsg:
     * nlmsg->nlmsg_flags |= NLM_F_DUMP | NLM_F_ACK
@@ -1636,8 +1651,10 @@ dpif_netlink_port_dump_next__(const struct dpif_netlink *dpif,
 }
 
 /*
-* 如果 state_->buf->size == 0, 非阻塞接受 state_->dump->sock->fd 的 struct nlmsghdr 结构的消息格式化为 dpif_netlink_vport 保存在 vport 中, 之后用 vport 初始化 dpif_port
+* 如果 state->buf->size == 0, 非阻塞接受 state_->dump->sock->fd 的 struct nlmsghdr 结构的消息 state->buf 格式化为 dpif_netlink_vport 保存在 vport 中, 之后用 vport 初始化 dpif_port
+*
 * 如果 state_->buf->size != 0, 将 state_->buffer 中的 struct nlmsghdr 格式化为 dpif_netlink_vport 保存在 vport 中. 之后用 vport 初始化 dpif_port
+*
 * 成功返回 0, 读完返回 EOF, 失败返回错误码
 */
 static int
@@ -1650,7 +1667,7 @@ dpif_netlink_port_dump_next(const struct dpif *dpif_, void *state_,
     int error;
 
     /*
-    * 如果 state_->buf->size == 0, 非阻塞接受 state_->dump->sock->fd 的 struct nlmsghdr 结构的消息格式化为 dpif_netlink_vport 保存在 vport 中
+    * 如果 state_->buf->size == 0, 非阻塞接受 state_->dump->sock->fd 的 struct nlmsghdr 结构的消息 state->buf 格式化为 dpif_netlink_vport 保存在 vport 中
     * 如果 state_->buf->size != 0, 将 state_->buffer 中的 struct nlmsghdr 格式化为 dpif_netlink_vport 保存在 vport 中.
     * 成功返回 0, 读完返回 EOF, 失败错误码
     */
@@ -1666,7 +1683,6 @@ dpif_netlink_port_dump_next(const struct dpif *dpif_, void *state_,
 }
 
 /*
- *
  * 如果 dump->state = 0, 继续接受数据直到数据接受完或发送错误. 之后将 dump->sock 保存在 pools 中
  * 如果数据接受完, 返回0, 否则返回具体错误代码
  * 注:如果数据没有收完就调用, 会导致后续数据丢失。
@@ -1676,8 +1692,8 @@ dpif_netlink_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
 {
     struct dpif_netlink_port_state *state = state_;
     /*
-    * 如果 dump->state = 0, 继续接受数据直到数据接受完或发送错误. 之后将 dump->sock 保存在 pools 中
-    * 如果数据接受完, 返回0, 否则返回具体错误代码
+    * 如果 dump->state = 0, 继续接受数据直到数据接受完或发生错误. 之后将 dump->sock 保存在 pools 中
+    * 如果数据接受完, 返回 0, 否则返回具体错误代码
     * 注:如果数据没有收完就调用, 会导致后续数据丢失。
     */
     int error = nl_dump_done(&state->dump);
@@ -1693,8 +1709,8 @@ dpif_netlink_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
  * @return  : ENOBUFS, dpif->port_notifier = NULL; 接受 dpif->port_notifier 出现错误, EAGAIN 中断信息; 0 接受消息成功, 端口发生变化
  *
  * 从 dpif_ 定位到 dpif_netlink
- * 如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
- * 否则非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0
+ * 如果 dpif->port_notifier = NULL, 将 port_notifier->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
+ * 否则非阻塞地无限循环接受 port_notifier->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0
  *
  * NOTE:
  * 当端口被删除的时候, refresh_channels = true
@@ -1739,7 +1755,7 @@ dpif_netlink_port_poll(const struct dpif *dpif_, char **devnamep)
         ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
 
         /*
-        * 非阻塞地接受 sock->fd 消息保存在 buf
+        * 非阻塞地接受 port_notifier->fd 消息保存在 buf
         *
         * 消息格式是 struct msghdr msg -> struct iovec iov[2] -> struct nlmsghdr nlmsghdr
         *
@@ -1816,9 +1832,9 @@ dpif_netlink_port_poll_wait(const struct dpif *dpif_)
 
     if (dpif->port_notifier) {
         /*
-        *  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+        *  对于 dpif->port_notifier->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件的监听.
+        *  否则加入 poll_loop()->poll_nodes, 监听 POLLIN
         *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
-        *
         */
         nl_sock_wait(dpif->port_notifier, POLLIN);
     } else {
@@ -1881,18 +1897,6 @@ dpif_netlink_init_flow_get__(const struct dpif_netlink *dpif,
  * request->ufid_present = request->ufid ? true : false
  * request->ufid_terse = terse
  */
-
-/*
- * 由 dpif, get 初始化 request
- *
- * request->cmd = OVS_FLOW_CMD_GET
- * request->dp_ifindex = dpif->dp_ifindex;
- * request->key = get->key;
- * request->key_len = get->key_len;
- * request->ufid = get->ufid ? get->ufid : NULL
- * request->ufid_present = get->ufid ? true : false
- * request->ufid_terse = terse
- */
 static void
 dpif_netlink_init_flow_get(const struct dpif_netlink *dpif,
                            const struct dpif_flow_get *get,
@@ -1950,7 +1954,7 @@ dpif_netlink_flow_get__(const struct dpif_netlink *dpif,
 }
 
 /*
- * 由 dpif, flow 构造获取 flow 的消息发给内核, 将收到的应答保持在 bufp, 应答解析后保持在 reply
+ * 向内核发消息获取 dpif, flow 所对应流表, 将收到的应答保持在 bufp, 应答解析后保持在 reply
  *
  * request->cmd = OVS_FLOW_CMD_GET
  * request->dp_ifindex = dpif->dp_ifindex;
@@ -1971,6 +1975,10 @@ dpif_netlink_flow_get(const struct dpif_netlink *dpif,
 }
 
 /*
+ * @dpif
+ * @put : 待创建或修改的流表
+ * @request : 向内核发送的创建或修改流表的消息
+ *
  * 由 dpif, put 初始化 request
  *
  * request->cmd = OVS_FLOW_CMD_NEW 或 OVS_FLOW_CMD_SET
@@ -2048,6 +2056,9 @@ dpif_netlink_init_flow_del__(struct dpif_netlink *dpif,
 }
 
 /*
+ * @dpif
+ * @del : 待删除流表
+ * @request : 向内核发送的删除流表的消息
  * 由 dpif, del 初始化 request
  *
  * request->cmd = OVS_FLOW_CMD_DEL
@@ -2092,7 +2103,6 @@ dpif_netlink_flow_dump_cast(struct dpif_flow_dump *dump)
 }
 
 /*
- *
  * 构造 genl Netlink 消息, 向内核发送 NETLINK_GENERIC 协议消息, 并初始化 dump 后返回 dump
  *
  *  nlmsghdr->nlmsg_len = 0;
@@ -3028,7 +3038,7 @@ dpif_netlink_handler_uninit(struct dpif_handler *handler)
  * backing kernel vports. */
 
 /*
- * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+ * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
  *
  * 1. 如果 dpif->n_handlers != n_handlers, 销毁已经存在的 channels, 重新初始化 dpif 的 n_handlers 个 handler
  * 2. 置 dpif 每个 handler 的 event_offset n_events 为 0
@@ -3098,31 +3108,32 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
      */
 
     /*
-    *  向内核发送获取端口信息的命令, 并初始化 dump
-    *
-    *  buf->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr, ovs_header
-    *
-    *  nlmsghdr->nlmsg_len = buf->size; //1024 ?
-    *  nlmsghdr->nlmsg_type = ovs_vport_family;
-    *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO | NLM_F_DUMP | NLM_F_ACK;
-    *  nlmsghdr->nlmsg_seq = dump->sock->next_seq + 1;
-    *  nlmsghdr->nlmsg_pid = dump->sock->pid;
-    *  genlmsghdr->cmd = OVS_VPORT_CMD_GET;
-    *  genlmsghdr->version = OVS_VPORT_VERSION;
-    *  genlmsghdr->reserved = 0;
-    *  ovs_header->dp_ifindex = dpif->dp_ifindex
-    *
-    * 初始化后的 dump :
-    * 1. dump->sock 为 NETLINK_GENERIC 对应的 sock
-    * 2. dump->nl_seq 为 dump->sock->next_seq + 1;
-    * 3. dump->status 为将 OVS_VPORT_CMD_GET 发送给 NETLINK_GENERIC 对应的 sock 的状态
-    */
+     *  向内核发送获取端口信息的命令, 并初始化 dump
+     *
+     *  buf->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr, ovs_header
+     *
+     *  nlmsghdr->nlmsg_len = buf->size; //1024 ?
+     *  nlmsghdr->nlmsg_type = ovs_vport_family;
+     *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO | NLM_F_DUMP | NLM_F_ACK;
+     *  nlmsghdr->nlmsg_seq = dump->sock->next_seq + 1;
+     *  nlmsghdr->nlmsg_pid = dump->sock->pid;
+     *  genlmsghdr->cmd = OVS_VPORT_CMD_GET;
+     *  genlmsghdr->version = OVS_VPORT_VERSION;
+     *  genlmsghdr->reserved = 0;
+     *  ovs_header->dp_ifindex = dpif->dp_ifindex
+     *
+     * 初始化后的 dump :
+     * 1. dump->sock 为 NETLINK_GENERIC 对应的 sock
+     * 2. dump->nl_seq 为 dump->sock->next_seq + 1;
+     * 3. dump->status 为将 OVS_VPORT_CMD_GET 发送给 NETLINK_GENERIC 对应的 sock 的状态
+     */
     dpif_netlink_port_dump_start__(dpif, &dump);
     /*
-    * 如果 buf->size == 0, 非阻塞接受 dump->sock->fd 的 struct nlmsghdr 结构的消息格式化为 dpif_netlink_vport 保存在 vport 中
-    * 如果 buf->size != 0, 将 buf 中的 struct nlmsghdr 格式化为 dpif_netlink_vport 保存在 vport 中.
-    * 成功返回 0, 读完返回, 失败返回错误码
-    */
+     * 修改 vport 的 upcall_pids
+     * 如果 buf->size == 0, 非阻塞接受 dump->sock->fd 的 struct nlmsghdr 结构的消息格式化为 dpif_netlink_vport 保存在 vport 中
+     * 如果 buf->size != 0, 将 buf 中的 struct nlmsghdr 格式化为 dpif_netlink_vport 保存在 vport 中.
+     * 成功返回 0, 读完返回, 失败返回错误码
+     */
     while (!dpif_netlink_port_dump_next__(dpif, &dump, &vport, &buf)) {
         uint32_t port_no = odp_to_u32(vport.port_no);
         uint32_t *upcall_pids = NULL;
@@ -3160,11 +3171,10 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
                 goto error;
             }
             /*
-            * 获取 socksp 对应的 pid 数组
-            *
-            * 如果 socksp = NULL, 初始化一个 pids, 返回 pids
-            * 否则 pids 指向 socksp 中 n_socks 个 sock->pid 数组头指针. 返回 pids
-            */
+             * 获取 socksp 对应的 pid 数组
+             * 如果 socksp = NULL, 初始化一个 pids, 返回 pids
+             * 否则 pids 指向 socksp 中 n_socks 个 sock->pid 数组头指针. 返回 pids
+             */
             upcall_pids = vport_socksp_to_pids(socksp, dpif->n_handlers);
             free(socksp);
         }
@@ -3264,7 +3274,7 @@ dpif_netlink_recv_set__(struct dpif_netlink *dpif, bool enable)
  * @enable : 是否接受数据包
  *
  * 如果 enable = true; dpif->handlers != NULL, 返回 0
- * 如果 enable = true; dpif->handlers = NULL,  TODO
+ * 如果 enable = true; dpif->handlers = NULL,  刷新所有的 channels
  * 如果 enable = false; dpif->handlers = NULL, 返回 0
  * 如果 enable = false; dpif->handlers != NULL, 删除所有 channels
  *
@@ -3283,7 +3293,7 @@ dpif_netlink_recv_set(struct dpif *dpif_, bool enable)
 }
 
 /*
- * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+ * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不再用的端口对应的 channel
  *
  * 1. 如果 dpif->n_handlers != n_handlers, 销毁已经存在的 channels, 重新初始化 dpif 的 n_handlers 个 handler
  * 2. 置 dpif 每个 handler 的 event_offset n_events 为 0
@@ -3477,7 +3487,7 @@ dpif_netlink_recv_windows(struct dpif_netlink *dpif, uint32_t handler_id,
 
 /*
  * handler = dpif->handlers[handler_id]
- *  handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
+ * handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
  *
  * 注: 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
  *
@@ -3518,15 +3528,17 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "epoll_wait failed (%s)", ovs_strerror(errno));
         } else if (retval > 0) {
-            //可读的文件描述符
+            //可读的文件描述符的数量
             handler->n_events = retval;
         }
     }
 
-    //轮询接受所有的 handler->epoll_events(即端口), 阻塞地接受 ch->sock 准备好的数据:
-    //如果成功接收, 初始化 upcall 后返回.
-    //如果缓存不够, 重试 50 次后放弃.
-    //如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
+    /*
+     * 轮询接受所有的 handler->epoll_events(即端口), 非阻塞地接受 ch->sock 准备好的数据:
+     * 如果成功接收, 初始化 upcall 后返回.
+     * 如果缓存不够, 重试 50 次后放弃.
+     * 如果数据 ch->sock 为非阻塞, event_offset++ 遍历下一个 epoll_events
+     */
     while (handler->event_offset < handler->n_events) {
         //idx 即端口号
         int idx = handler->epoll_events[handler->event_offset].data.u32;
@@ -3554,7 +3566,6 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
             }
 
             ch->last_poll = time_msec();
-            //WHY? 是否会导致没有接受到数据
             if (error) {
                 if (error == EAGAIN) {
                     break;
@@ -3600,7 +3611,7 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
 *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
 *     如果成功接收, 初始化 upcall 后返回.
 *     如果缓存不够, 重试 50 次后放弃.
-*     如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
+*     如果数据 ch->sock 为非阻塞, event_offset++ 遍历下一个 epoll_events
 *
 * 注: 应该轮询的调用该函数直到返回 EAGAIN
 */
@@ -3637,6 +3648,7 @@ dpif_netlink_recv(struct dpif *dpif_, uint32_t handler_id,
 }
 
 /*
+ * dpif->hanelers[handler_id]->epoll_fd 中加入对 POLLIN 的监听
  *
  * 对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
  * 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
@@ -3675,6 +3687,8 @@ dpif_netlink_recv_wait__(struct dpif_netlink *dpif, uint32_t handler_id)
 }
 
 /*
+ * dpif->hanelers[handler_id]->epoll_fd 中加入对 POLLIN 的监听
+ *
  * 对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
  * 如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
  * 否则加入 poll_loop()->poll_nodes
@@ -3695,7 +3709,7 @@ dpif_netlink_recv_wait(struct dpif *dpif_, uint32_t handler_id)
 }
 
 /*
- * 找到第一个端口对应的 sock 不为 NULL　的端口号, 丢弃该端口所有 socket * 收到的数据包
+ * 将 dpif->handlers 中所有的 fd 监听的数据都丢弃
  */
 static void
 dpif_netlink_recv_purge__(struct dpif_netlink *dpif)
@@ -3717,7 +3731,7 @@ dpif_netlink_recv_purge__(struct dpif_netlink *dpif)
 }
 
 /*
- * 找到第一个端口对应的 sock 不为 NULL　的端口号, 丢弃该端口所有 socket * 收到的数据包
+ * 将 dpif->handlers 中所有的 fd 监听的数据都丢弃
  */
 static void
 dpif_netlink_recv_purge(struct dpif *dpif_)
@@ -3726,8 +3740,8 @@ dpif_netlink_recv_purge(struct dpif *dpif_)
 
     fat_rwlock_wrlock(&dpif->upcall_lock);
     /*
-    * 找到第一个端口对应的 sock 不为 NULL　的端口号, 丢弃该端口所有 socket * 收到的数据包
-    */
+     * 找到第一个端口对应的 sock 不为 NULL 的端口号, 丢弃该端口所有 socket * 收到的数据包
+     */
     dpif_netlink_recv_purge__(dpif);
     fat_rwlock_unlock(&dpif->upcall_lock);
 }
@@ -3804,8 +3818,19 @@ const struct dpif_class dpif_netlink_class = {
 };
 
 /*
- * 1. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
- * 2. 确保 OVS_VPORT_FAMILY 对应的组属性中存在 OVS_VPORT_MCGROUP
+ * 1. 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+ * 2. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+ * 3. 确保 OVS_VPORT_FAMILY 中存在 OVS_VPORT_MCGROUP 对应 ID 的 ovs_vport_mcgroup
+ *
+ * genl_family:
+ *       id                 name
+ * OVS_DATAPATH_FAMILY ovs_datapath_family
+ * OVS_VPORT_FAMILY    ovs_vport_family
+ * OVS_FLOW_FAMILY     ovs_flow_family
+ * OVS_PACKET_FAMILY   ovs_packet_family
+ *
+ *                   CTRL_ATTR_MCAST_GRP_NAME CTRL_ATTR_MCAST_GRP_ID
+ * OVS_VPORT_FAMILY     OVS_VPORT_FAMILY         ovs_vport_mcgroup
  */
 static int
 dpif_netlink_init(void)
@@ -3815,11 +3840,11 @@ dpif_netlink_init(void)
 
     if (ovsthread_once_start(&once)) {
         /*
-        * 发送 sock 请求获取 OVS_DATAPATH_FAMILY(genl_family->name) 对应的 ovs_datapath_family(genl_family->id)
-        * 在 genl_families 中查找 ovs_datapath_family 对应的 genl_family,
-        * 如果找到, genl_family->name != OVS_DATAPATH_FAMILY, 用 OVS_DATAPATH_FAMILY 替代 genl_family->name
-        * 如果没有, 创建新的 genl_family 加入 genl_families
-        */
+         * 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+         * 在 genl_families 中查找 ovs_datapath_family 对应的 genl_family,
+         * 如果找到, genl_family->name != OVS_DATAPATH_FAMILY, 用 OVS_DATAPATH_FAMILY 替代 genl_family->name
+         * 如果没有, 创建新的 genl_family 加入 genl_families
+         */
         error = nl_lookup_genl_family(OVS_DATAPATH_FAMILY,
                                       &ovs_datapath_family);
         if (error) {
@@ -3857,7 +3882,7 @@ dpif_netlink_init(void)
         }
         if (!error) {
             /*
-             * 确保 family_name 对应的属性列表中存在 group_name 的属性
+             * 确保 family_name 对应的属性列表中存在 group_name 的 id 保存在 ovs_vport_mcgroup
              *
              * 通过 NETLINK_GENERIC 协议 sock 获取 family_name 存在对应的属性列表, 如果 CTRL_ATTR_MCAST_GROUPS 属性中存在与 group_name
              * 相同的属性, 返回 0.
@@ -3872,6 +3897,9 @@ dpif_netlink_init(void)
     return error;
 }
 
+/*
+ * 判断内核中 name 对应的 vport 的 type 是否是 OVS_VPORT_TYPE_INTERNAL
+ */
 bool
 dpif_netlink_is_internal_device(const char *name)
 {
@@ -3897,8 +3925,8 @@ dpif_netlink_is_internal_device(const char *name)
  * 'vport' will contain pointers into 'buf', so the caller should not free
  * 'buf' while 'vport' is still in use. */
 /*
- *  @buf    :
- *  @vport  :
+ *  @buf    : 待解析的内核应答消息
+ *  @vport  : 将 buf 解析为 dpif_netlink_vport 类型的对象
  *  @return : 成功返回 0, 失败返回错误码
  *
  *  解析 buf 将其转换为 vport.
@@ -3976,27 +4004,30 @@ dpif_netlink_vport_from_ofpbuf(struct dpif_netlink_vport *vport,
  * followed by Netlink attributes corresponding to 'vport'. */
 
 /*
-*  将 vport 构造成内核可以识别的 genl Netlink 消息保持在 buf
-*
-*  buf->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr, ovs_header
-*
-*  nlmsghdr->nlmsg_len = 0;
-*  nlmsghdr->nlmsg_type = ovs_vport_family;
-*  nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO;
-*  nlmsghdr->nlmsg_seq = 0;
-*  nlmsghdr->nlmsg_pid = 0;
-*  genlmsghdr->cmd = vport->cmd;
-*  genlmsghdr->version = OVS_VPORT_VERSION;
-*  genlmsghdr->reserved = 0;
-*  ovs_header->dp_ifindex = vport->dp_ifindex
-*
-*  OVS_VPORT_ATTR_PORT_NO: vport->port_no //可选
-*  OVS_VPORT_ATTR_TYPE : vport->type //可选
-*  OVS_VPORT_ATTR_NAME : vport->name //可选
-*  OVS_VPORT_ATTR_UPCALL_PID: vport->upcall_pids //可选
-*  OVS_VPORT_ATTR_STATS : vport->stats //可选
-*  OVS_VPORT_ATTR_OPTIONS : vport->options //可选
-*/
+ * @vport : 被构造的 vport
+ * @buf : 待构造的 buf
+ *
+ * 将 vport 构造成内核可以识别的 genl Netlink 消息保持在 buf
+ *
+ * buf->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr, ovs_header
+ *
+ * nlmsghdr->nlmsg_len = 0;
+ * nlmsghdr->nlmsg_type = ovs_vport_family;
+ * nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO;
+ * nlmsghdr->nlmsg_seq = 0;
+ * nlmsghdr->nlmsg_pid = 0;
+ * genlmsghdr->cmd = vport->cmd;
+ * genlmsghdr->version = OVS_VPORT_VERSION;
+ * genlmsghdr->reserved = 0;
+ * ovs_header->dp_ifindex = vport->dp_ifindex
+ *
+ * OVS_VPORT_ATTR_PORT_NO: vport->port_no //可选
+ * OVS_VPORT_ATTR_TYPE : vport->type //可选
+ * OVS_VPORT_ATTR_NAME : vport->name //可选
+ * OVS_VPORT_ATTR_UPCALL_PID: vport->upcall_pids //可选
+ * OVS_VPORT_ATTR_STATS : vport->stats //可选
+ * OVS_VPORT_ATTR_OPTIONS : vport->options //可选
+ */
 static void
 dpif_netlink_vport_to_ofpbuf(const struct dpif_netlink_vport *vport,
                              struct ofpbuf *buf)
@@ -4176,6 +4207,9 @@ dpif_netlink_vport_transact(const struct dpif_netlink_vport *request,
 /* Obtains information about the kernel vport named 'name' and stores it into
  * '*reply' and '*bufp'.  The caller must free '*bufp' when the reply is no
  * longer needed ('reply' will contain pointers into '*bufp').  */
+/*
+ * 向内核查询 name 对应 vport 信息, 保存在 bufp, 解析后保存在 reply
+ */
 int
 dpif_netlink_vport_get(const char *name, struct dpif_netlink_vport *reply,
                        struct ofpbuf **bufp)

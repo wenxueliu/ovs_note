@@ -109,6 +109,19 @@ static void nl_pool_release(struct nl_sock *);
  * new socket if successful, otherwise returns a positive errno value. */
 /*
  * 设置 iovecs 大小, 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+ *
+ * sock->fd = socket(AF_NETLINK, SOCK_RAW, protocol)
+ * sock->protocol = protocol
+ * sock->next_seq = 1;
+ * sock->rcvbuf = 1024 * 1024
+ *
+ * remote.nl_family = AF_NETLINK
+ * remote.nl_pid = 0;
+ * connect(sock->fd, (struct sockaddr *) &remote, sizeof remote)
+ * getsockname(sock->fd, (struct sockaddr *) &local, &local_size
+ *
+ * local.nl_family = AF_NETLINK
+ * sock->pid = local.nl_pid
  */
 int
 nl_sock_create(int protocol, struct nl_sock **sockp)
@@ -122,6 +135,7 @@ nl_sock_create(int protocol, struct nl_sock **sockp)
     int rcvbuf;
     int retval = 0;
 
+    //设置 max_iovs
     if (ovsthread_once_start(&once)) {
         int save_errno = errno;
         errno = 0;
@@ -1344,10 +1358,10 @@ nl_dump_done(struct nl_dump *dump)
 
         ofpbuf_use_stub(&buf, tmp_reply_stub, sizeof tmp_reply_stub);
         /*
-        * 如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中
-        * 如果 buffer->size != 0, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中. 成功返回 0
-        * 如果数据接收完或发送错误返回false, 成功返回 true. 错误代码记录在 dump->status
-        */
+         * 如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的消息保存在 buffer, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中
+         * 如果 buffer->size != 0, 将 buffer 中的 nlmsghdr 的 payload 保持在 reply->data 中. 成功返回 0
+         * 如果数据接收完或发送错误返回false, 成功返回 true. 错误代码记录在 dump->status
+         */
         while (nl_dump_next(dump, &reply, &buf)) {
             /* Nothing to do. */
         }
@@ -1360,9 +1374,9 @@ nl_dump_done(struct nl_dump *dump)
     }
 
     /*
-    * 将 sock 保存在 pool = pools[sock->protocol]; pool->socks[pool->n++]
-    * 释放 sock 的内存
-    */
+     * 将 sock 保存在 pool = pools[sock->protocol]; pool->socks[pool->n++]
+     * 释放 sock 的内存
+     */
     nl_pool_release(dump->sock);
     ovs_mutex_destroy(&dump->mutex);
 
@@ -1429,9 +1443,9 @@ done:
  * On Windows, 'sock' is not treated as const, and may be modified. */
 
 /*
-*  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+*  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.
+*  否则加入 poll_loop()->poll_nodes, 增加 events 事件的监听
 *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
-*
 */
 void
 nl_sock_wait(const struct nl_sock *sock, short int events)
@@ -1444,9 +1458,9 @@ nl_sock_wait(const struct nl_sock *sock, short int events)
     poll_immediate_wake(); /* XXX: temporary. */
 #else
     /*
-    *  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
+    *  对于 sock->fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件的监听.
+    *  否则加入 poll_loop()->poll_nodes, 监听 events 事件
     *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
-    *
     */
     poll_fd_wait(sock->fd, events);
 #endif
@@ -1485,6 +1499,7 @@ struct genl_family {
     char *name;
 };
 
+//保存 genl_family 对象, 以 genl_family->id 为索引
 static struct hmap genl_families = HMAP_INITIALIZER(&genl_families);
 
 static const struct nl_policy family_policy[CTRL_ATTR_MAX + 1] = {
@@ -1542,6 +1557,8 @@ genl_family_to_name(uint16_t id)
 
 #ifndef _WIN32
 /*
+ * 与内核建立 NETLINK_GENERIC 协议的连接, 并发送 CTRL_CMD_GETFAMILY 的请求, 将应答保存
+ *
  * 1. 创建 NETLINK_GENERIC 协议 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
  * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
  * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
@@ -1571,8 +1588,21 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
 
     *replyp = NULL;
     /*
-    * 设置 iovecs 大小, 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
-    */
+     * 设置 iovecs 大小, 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+     *
+     * sock->fd = socket(AF_NETLINK, SOCK_RAW, protocol)
+     * sock->protocol = protocol
+     * sock->next_seq = 1;
+     * sock->rcvbuf = 1024 * 1024
+     *
+     * remote.nl_family = AF_NETLINK
+     * remote.nl_pid = 0;
+     * connect(sock->fd, (struct sockaddr *) &remote, sizeof remote)
+     * getsockname(sock->fd, (struct sockaddr *) &local, &local_size
+     *
+     * local.nl_family = AF_NETLINK
+     * sock->pid = local.nl_pid
+     */
     error = nl_sock_create(NETLINK_GENERIC, &sock);
     if (error) {
         return error;
@@ -1732,12 +1762,12 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
 /*
  * @family_name : 待查询的 family_name
  * @group_name  : 期望返回的组属性名
- * @multicast_group : 与 group_name 对应的属性
+ * @multicast_group : 与 group_name 对应的 id
  *
- * 确保 family_name 对应的属性列表中存在 group_name 的属性
+ * 确保 family_name 对应的属性列表中存在 group_name 的 id 保存在 ovs_vport_mcgroup
  *
  * 通过 NETLINK_GENERIC 协议 sock 获取 family_name 存在对应的属性列表, 如果 CTRL_ATTR_MCAST_GROUPS 属性中存在与 group_name
- * 相同的属性, 返回 0.
+ * 相同的 id, 返回 0.
  */
 int
 nl_lookup_genl_mcgroup(const char *family_name, const char *group_name,
@@ -1751,25 +1781,27 @@ nl_lookup_genl_mcgroup(const char *family_name, const char *group_name,
 
     *multicast_group = 0;
     /*
-    * 1. 创建 NETLINK_GENERIC 协议 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
-    * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
-    * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
-    * 4. 解析应答消息,保持在 attrs 中
-    *
-    * 其中 2:
-    *
-    *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
-    *
-    *  nlmsghdr->nlmsg_len = 0;
-    *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
-    *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
-    *  nlmsghdr->nlmsg_seq = 0;
-    *  nlmsghdr->nlmsg_pid = 0;
-    *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
-    *  genlmsghdr->version = 1;
-    *  genlmsghdr->reserved = 0;
-    *
-    */
+     * 与内核建立 NETLINK_GENERIC 协议的连接, 并发送 CTRL_CMD_GETFAMILY 的请求, 将应答保存
+     *
+     * 1. 创建 NETLINK_GENERIC 协议 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+     * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
+     * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+     * 4. 解析应答消息,保持在 attrs 中
+     *
+     * 其中 2:
+     *
+     *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+     *
+     *  nlmsghdr->nlmsg_len = 0;
+     *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+     *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+     *  nlmsghdr->nlmsg_seq = 0;
+     *  nlmsghdr->nlmsg_pid = 0;
+     *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+     *  genlmsghdr->version = 1;
+     *  genlmsghdr->reserved = 0;
+     *
+     */
     error = do_lookup_genl_family(family_name, family_attrs, &reply);
     if (error) {
         return error;
@@ -1815,7 +1847,9 @@ exit:
  * errno value and '*number' caches the errno value. */
 
 /*
- * 发送 sock 请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+ * @name : genl_family->name
+ * @numbers : genl_family->id
+ * 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
  * 在 genl_families 中查找 number 对应的 genl_family,
  * 如果找到, genl_family->name != name, 用 name 替代 genl_family->name
  * 如果没有, 创建新的 genl_family 加入 genl_families
@@ -1829,25 +1863,26 @@ nl_lookup_genl_family(const char *name, int *number)
         int error;
 
         /*
-        * 1. 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
-        * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
-        * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
-        * 4. 解析应答消息,保持在 attrs 中
-        *
-        * 其中 2:
-        *
-        *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
-        *
-        *  nlmsghdr->nlmsg_len = 0;
-        *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
-        *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
-        *  nlmsghdr->nlmsg_seq = 0;
-        *  nlmsghdr->nlmsg_pid = 0;
-        *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
-        *  genlmsghdr->version = 1;
-        *  genlmsghdr->reserved = 0;
-        *
-        */
+         * 与内核建立 NETLINK_GENERIC 协议的连接, 并发送 CTRL_CMD_GETFAMILY 的请求, 将应答保存
+         * 1. 创建 socket 设置 rcvbuf 并 connect 到内核, 最后 getsockname() 验证是否绑定
+         * 2. 构造 Netlink 请求消息. 消息体为 name, 消息类型为 CTRL_CMD_GETFAMILY
+         * 3. 发送请求, 如果 replyp 不为 NULL, 将应答消息保持在 replyp 中
+         * 4. 解析应答消息,保持在 attrs 中
+         *
+         * 其中 2:
+         *
+         *  request->tail 之后依次增加 NLMSG_HDRLEN + GENL_HDRLEN, 依次存放 nlmsghdr, genlmsghdr
+         *
+         *  nlmsghdr->nlmsg_len = 0;
+         *  nlmsghdr->nlmsg_type = GENL_ID_CTRL;
+         *  nlmsghdr->nlmsg_flags = NLM_F_REQUEST;
+         *  nlmsghdr->nlmsg_seq = 0;
+         *  nlmsghdr->nlmsg_pid = 0;
+         *  genlmsghdr->cmd = CTRL_CMD_GETFAMILY;
+         *  genlmsghdr->version = 1;
+         *  genlmsghdr->reserved = 0;
+         *
+         */
         error = do_lookup_genl_family(name, attrs, &reply);
         if (!error) {
             *number = nl_attr_get_u16(attrs[CTRL_ATTR_FAMILY_ID]);
@@ -1873,6 +1908,8 @@ struct nl_pool {
 };
 
 static struct ovs_mutex pool_mutex = OVS_MUTEX_INITIALIZER;
+//保持所有 protocol 对应的 socks, 每次在 dump 中会 dump protocol 对应的 sock
+//保存在 pools 中
 static struct nl_pool pools[MAX_LINKS] OVS_GUARDED_BY(pool_mutex);
 
 /*

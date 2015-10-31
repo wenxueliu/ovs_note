@@ -229,6 +229,7 @@ static void ofmonitor_wait(struct connmgr *);
  * a name for the ofproto suitable for using in log messages.
  * 'local_port_name' is the name of the local port (OFPP_LOCAL) within
  * 'ofproto'. */
+//初始化 connmgr 对象 mgr 并返回 mgr. 指针统一初始化为 NULL, 其他见 struct connmgr 定义
 struct connmgr *
 connmgr_create(struct ofproto *ofproto,
                const char *name, const char *local_port_name)
@@ -262,6 +263,15 @@ connmgr_create(struct ofproto *ofproto,
 }
 
 /* Frees 'mgr' and all of its resources. */
+/*
+ *  如果是 list, hmap 释放每个成员, 如果是指针, 释放指针所指内存, 最后释放 mgr, 除了 mgr->ofproto (不应该被释放)
+ *
+ *  遍历 mgr->all_conns 所有成员 ofconn, 调用 ofconn_destroy(ofconn);
+ *  如果 mgr->controllers->buckets != mgr->controllers->one, free(mgr->controllers->buckets)
+ *  遍历 mgr->services 所有成员 ofservice,  ofservice_destroy(mgr, ofservice);
+ *  遍历 mgr->snoops 所有成员, 调用 pvconn_close(mgr->snoops[i])
+ *  调用 fail_open_destroy(mgr->fail_open)
+ */
 void
 connmgr_destroy(struct connmgr *mgr)
 {
@@ -546,6 +556,7 @@ connmgr_get_controller_info(struct connmgr *mgr, struct shash *info)
     }
 }
 
+//释放 info 中的统计信息
 void
 connmgr_free_controller_info(struct shash *info)
 {
@@ -686,6 +697,7 @@ connmgr_set_controllers(struct connmgr *mgr,
 
 /* Drops the connections between 'mgr' and all of its primary and secondary
  * controllers, forcing them to reconnect. */
+//强制 mgr 中的所有 mgr->ofconn 进行重连
 void
 connmgr_reconnect(const struct connmgr *mgr)
 {
@@ -709,6 +721,7 @@ connmgr_set_snoops(struct connmgr *mgr, const struct sset *snoops)
 }
 
 /* Adds each of the snoops currently configured on 'mgr' to 'snoops'. */
+//将 mgr->snoops 中的 name 加入 snoops 中
 void
 connmgr_get_snoops(const struct connmgr *mgr, struct sset *snoops)
 {
@@ -876,6 +889,7 @@ set_pvconns(struct pvconn ***pvconnsp, size_t *n_pvconnsp,
 /* Returns a "preference level" for snooping 'ofconn'.  A higher return value
  * means that 'ofconn' is more interesting for monitoring than a lower return
  * value. */
+//返回 ofconn->role 的最大值
 static int
 snoop_preference(const struct ofconn *ofconn)
 {
@@ -895,6 +909,10 @@ snoop_preference(const struct ofconn *ofconn)
 
 /* One of 'mgr''s "snoop" pvconns has accepted a new connection on 'vconn'.
  * Connects this vconn to a controller. */
+/*
+ *  从 connmgr->all_conns 的 ofconn 中找到 ofconn->type = OFCONN_PRIMARY 并且
+ *  ofconn->role 最大(即权限越接近MASTER)的 ofconn. 将 vconn 加入 该 ofconn->monitors
+ */
 static void
 add_snooper(struct connmgr *mgr, struct vconn *vconn)
 {
@@ -1205,7 +1223,8 @@ ofconn_send_error(const struct ofconn *ofconn,
 
 /* Same as pktbuf_retrieve(), using the pktbuf owned by 'ofconn'. */
 
-/* 如果 id 中的 cookie 与 ofconn->pkgbuf 中的 cookie 对应, 那么
+/*
+ * 如果 id >> PKTBUF_MASK 与 ofconn->pkgbuf 中的 cookie 对应, 那么
  *
  *      bufferp = ofconn->pktbuf->packet[id & PKTBUF_MASK]->buff,
  *      in_port = ofconn->pktbuf->packet[id & PKTBUF_MASK]->in_port
@@ -1800,6 +1819,7 @@ static void schedule_packet_in(struct ofconn *, struct ofproto_packet_in,
  * controllers managed by 'mgr'.  For messages caused by a controller
  * OFPT_PORT_MOD, specify 'source' as the controller connection that sent the
  * request; otherwise, specify 'source' as NULL. */
+//遍历 mgr->all_conns 所有元素 ofconn, 如果 ofconn->rconn->conn->version 版本大于 1.5 或 ofconn != source 发送端口状态消息
 void
 connmgr_send_port_status(struct connmgr *mgr, struct ofconn *source,
                          const struct ofputil_phy_port *pp, uint8_t reason)
@@ -2056,9 +2076,9 @@ connmgr_get_fail_mode(const struct connmgr *mgr)
     return mgr->fail_mode;
 }
 
-//设置 mgr->fail_mode 并更新 mgr->fail_open, 并检查 mgr 是否存在 controller
 /* Sets the failure handling mode for 'mgr' to 'fail_mode' (either
  * OFPROTO_FAIL_SECURE or OFPROTO_FAIL_STANDALONE). */
+//设置 mgr->fail_mode 并更新 mgr->fail_open, 并检查 mgr 是否存在 controller
 void
 connmgr_set_fail_mode(struct connmgr *mgr, enum ofproto_fail_mode fail_mode)
 {
@@ -2259,6 +2279,7 @@ connmgr_flushed(struct connmgr *mgr)
  * implementations in table 0.  (Subtracting this count from the number of
  * rules in the table 0 classifier, as maintained in struct oftable, yields
  * the number of flows that OVS should report via OpenFlow for table 0.) */
+//返回 in_band 和 fail_open 中的流表项数量 mgr->in_band->rules + fo->fail_open_active != 0
 int
 connmgr_count_hidden_rules(const struct connmgr *mgr)
 {
@@ -2301,6 +2322,10 @@ ofservice_create(struct connmgr *mgr, const char *target,
     return 0;
 }
 
+/*
+ * 从 mgr->services 中删除 ofservice
+ * 关闭 ofservice->pvconn
+ */
 static void
 ofservice_destroy(struct connmgr *mgr, struct ofservice *ofservice)
 {
@@ -2309,6 +2334,7 @@ ofservice_destroy(struct connmgr *mgr, struct ofservice *ofservice)
     free(ofservice);
 }
 
+//用 c 重新配置 ofservice
 static void
 ofservice_reconfigure(struct ofservice *ofservice,
                       const struct ofproto_controller *c)
@@ -2322,6 +2348,7 @@ ofservice_reconfigure(struct ofservice *ofservice,
 
 /* Finds and returns the ofservice within 'mgr' that has the given
  * 'target', or a null pointer if none exists. */
+//遍历 mgr->services 找到 pvconn->name 为 target 的 ofservice
 static struct ofservice *
 ofservice_lookup(struct connmgr *mgr, const char *target)
 {
