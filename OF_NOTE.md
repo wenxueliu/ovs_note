@@ -114,14 +114,13 @@ dpif_netlink_flow_dump_next : 无限循环当前线程非阻塞地接受内核�
 dpif_netlink_flow_dump_destroy : 当遍历完或不想继续接受后续消息
 dpif_netlink_flow_dump_thread_destroy : 销毁遍历流表项的线程
 
-
 dpif_netlink_operate  : 对内核的流表执行批量操作, get, put, del, execute
 dpif_netlink_recv_set : 是否接受内核数据包
 dpif_netlink_handlers_set : 设置内核 handle, 刷新所有端口
 dpif_netlink_queue_to_priority : TODO
 
-dpif_netlink_recv : 对其中一个 handler, 如果所有的事件都处理完, 重新等待内核空间发送的消息, 否则, 
-                    非阻塞遍历所有的可读事件, 接受数据并处理
+dpif_netlink_recv : 对其中一个 handler, 如果所有的事件都处理完, 重新等待内核空间发送的消息,
+                    否则, 非阻塞遍历所有的可读事件, 接受数据并处理
 
 dpif_netlink_recv_wait : 将 POLLIN 加入 handler 的监听
 dpif_netlink_recv_purge :  将 dpif->handlers 中所有的 fd 监听的数据都丢弃
@@ -135,6 +134,34 @@ dpif_netdev_port_open_type : 返回 类型
 dpif_netdev_open : 创建 dpif_netdev 对象
 dpif_netdev_close : 对 dp_netdev 引用计数减一
 dpif_netdev_destroy : 如果 dp_netdev 还没有销毁, 引用技术减一
+dpif_netdev_get_stats : 获取 dp_netdev 的统计信息, 命中, 没有命中和丢失的包数
+dpif_netdev_port_add : 给 dp_netdev 增加端口
+dpif_netdev_port_del : 给 dp_netdev 删除端口
+dpif_netdev_port_query_by_number : 根据端口号在 dp_netdev 中查找端口
+dpif_netdev_port_query_by_name: 根据端口名在 dp_netdev 中查找端口
+
+dpif_netdev_port_dump_start : 创建 dp_netdev_port_state 对象
+dpif_netdev_port_dump_next : 由 dp_netdev_port_state 确定下一个 dp_netdev 的端口
+dpif_netdev_port_dump_done : 释放 dp_netdev_port_state 对象
+
+dpif_netdev_port_poll : 获取端口更新事件(增加, 删除), 返回 ENOBUFS
+dpif_netdev_port_poll_waiti : 等待端口发生变化
+
+dpif_netdev_flow_flush : 删除所有流表
+
+dpif_netdev_flow_dump_create : 初始化 dpif_netdev_flow_dump 对象
+dpif_netdev_flow_dump_destroy : 销毁 dpif_netdev_flow_dump 对象
+dpif_netdev_flow_dump_thread_create : 初始化 thread 对象
+dpif_netdev_flow_dump_thread_destroy : 释放 thread 对象
+
+
+
+
+
+
+
+
+
 
 ###数据结构
 

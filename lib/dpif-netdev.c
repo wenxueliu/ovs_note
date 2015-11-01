@@ -1041,11 +1041,10 @@ non_atomic_ullong_add(atomic_ullong *var, unsigned long long n)
 }
 
 /*
- * 对 dpif 所属的 dp_netdev 对象 dp
- * 遍历 dp->poll_threads 的所有元素 pmd 
+ * 对 dpif 所属的 dp_netdev 对象 dp, 遍历 dp->poll_threads 的所有元素 pmd
  * 将所有 pmd->stats.n[DP_STAT_MASKED_HIT] 和 pmd->stats.n[DP_STAT_EXACT_HIT] 加起来作为命中的包数
  * 将所有 pmd->stats.n[DP_STAT_MISS] 加起来作为没有命中的包数
- * 将所有 pmd->stats.n[DP_STAT_LOST] 加起来作为没有命中的包数
+ * 将所有 pmd->stats.n[DP_STAT_LOST] 加起来作为丢失的包数
  * 最后将结果写入 stats
  *
  */
@@ -1224,7 +1223,7 @@ dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev,
     int error;
 
     ovs_mutex_lock(&dp->port_mutex);
-    //获取端口名称
+    //获取端口名称, 一般情况返回 netdev->name
     dpif_port = netdev_vport_get_dpif_port(netdev, namebuf, sizeof namebuf);
     if (*port_nop != ODPP_NONE) {
         port_no = *port_nop;
@@ -1389,7 +1388,7 @@ has_pmd_port_for_numa(struct dp_netdev *dp, int numa_id)
 }
 
 
-//减少 port->ref_cnt - 1 = 1, 释放 port 对象
+//从 dp->ports 中删除 port 对象, 减少 port 的引用计数. 如果 port->ref_cnt - 1 = 1, 释放 port 对象
 static void
 do_del_port(struct dp_netdev *dp, struct dp_netdev_port *port)
     OVS_REQUIRES(dp->port_mutex)
@@ -2364,6 +2363,7 @@ dpif_netdev_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread_)
     free(thread);
 }
 
+//TODO
 static int
 dpif_netdev_flow_dump_next(struct dpif_flow_dump_thread *thread_,
                            struct dpif_flow *flows, int max_flows)
