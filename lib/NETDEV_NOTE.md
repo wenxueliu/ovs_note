@@ -12,8 +12,6 @@ static struct ovs_mutex netdev_class_mutex OVS_ACQ_BEFORE(netdev_mutex);
 static struct shash netdev_shash :
 
 
-
-
 static struct hmap netdev_classes : 保存所有已经注册的网络设备
 
 其中包括
@@ -847,3 +845,48 @@ int netdev_open(const char *name, const char *type, struct netdev **netdevp)
 
     这里加 1 的意义?
 
+
+###DPDK
+
+dp_netdev 由多个 poll_thread 对象, 每个 poll_thread 绑定到一个 numa 节点
+
+将 port 与 numa 节点绑定, 每个 numa 节点的所有 cores 都为该 port 服务. 该 port 的
+rxq 均匀地分配给各个 core
+
+查询所有的 numa 节点及每个 numa 节点下的 cpu core. 为每个 cpu core 分配一个 pmd
+线程.
+
+因此 pmd 与 port 的 rxq 可以是 1 对 1 或 1 对 n, 关系为 pmd->index = rxq % cores
+
+每个端口接受队列与 pmd 绑定, 包收到后首先在 pmd->flow_cache 中查找,
+* 如果找到, 加入 flow_cache->batch
+* 如果找不到就在 pmd->cls 中查找
+    * 如果找到, 加入 flow_cache, 并加入　flow->batch
+    * 如果找不到, 就调用 upcall.
+
+核心代码
+
+dpif_netdev_open
+    create_dp_netdev
+        do_add_port
+            dp_netdev_set_pmds_on_numa
+                pmd_thread_main
+                    dp_netdev_input
+                        emc_processing
+                        fast_path_processing
+
+交换机的所有端口开启混杂模式
+
+###NUMA 相关
+
+void discover_numa_and_core(void)
+
+在 /sys/devices/system/node/node%n 中查找所有 numa node, 每个 numa node 下的
+cpu. 并将 numa node 加入 all_numa_nodes, cpu core 加入 all_cpu_cores
+
+int ovs_numa_get_n_numas(void)
+int ovs_numa_get_n_cores(void)
+struct numa_node* get_numa_by_numa_id(int numa_id)
+bool ovs_numa_core_is_pinned(unsigned core_id)
+bool ovs_numa_core_id_is_valid(unsigned core_id)
+bool ovs_numa_numa_id_is_valid(int numa_id)

@@ -898,7 +898,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
 }
 
 /*
- * 检查 name, class 对应的 dp_netdev 是否存在, 如果不存在创建, 如果存在, create = false,
+ * 检查 name, class 对应的 dp_netdev 是否存在于 dp_netdevs, 如果不存在创建, 如果存在, create = false,
  * 返回 0, 否则返回错误值
  *
  * 如果 name 在 dp_netdevs 并且 dp->class = class && create = true, 返回 EEXIST
@@ -1109,7 +1109,10 @@ hash_port_no(odp_port_t port_no)
 
 /*
  * 初始化 port 对象并加入 dp->ports.
+ *
  * devname 唯一, 其中名称为 devname, type 为 dpif_netdev_port_open_type(dp->class, type)
+ *
+ * NOTE:开启混杂模式.
  */
 static int
 do_add_port(struct dp_netdev *dp, const char *devname, const char *type,
@@ -2656,7 +2659,11 @@ cycles_count_end(struct dp_netdev_pmd_thread *pmd,
 /*
  * @pmd : 线程 poll module driver
  * @port: 端口
- * @rxq : 接受队列
+ * @rxq : port 的其中一个请求接受队列
+ *
+ * port 中的 rxq 对接受的包首先在 pmd->flow_cache 中查找, 如果找到, 加入 flow->batach
+ * 如果没有找到就在 pmd->cls 中查找, 如果找到就加入 pmd->flow_cache. 如果在
+ * pmd->flow_cache 和 pmd->cls 中都没有找到, 就调用 upcall. 由 upcall 指定.
  *
  * 将 rxq 中的数据保存在 packets 中.  遍历 packets 每一元素 packet,
  * 1. 查找出 packets[i] 提取 key 在 pmd->flow_cache 是否存在对应的 flow:
@@ -2697,7 +2704,7 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
          * 遍历 packets 每一元素 packet,
          * 1. 查找出 packets[i] 提取 key 在 pmd->flow_cache 是否存在对应的 flow:
          * 如果存在, 并且 flow->batch 不为 null, 将 packets[i] 加入 flow->batch 并更新 flow->batch
-         * 如果存在, 并且 flow->batch 为 null, 将 flow  加入 batches
+         * 如果存在, 并且 flow->batch 为 null, 将 flow 加入 batches
          * 如果不存在, 将 packets[i] 提取的 key 加入 keys
          * 2. 对应 1 中的 keys(没有找到匹配的 flow ). 从 pmd->cls 中查找, 如果找到加入 pmd->flow_cache
          *    如果没有找到调用 upcall, 并 upcall 指定的 actions 执行对应的 actions. 之后递归重新查找。
@@ -2715,6 +2722,11 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
 /* Return true if needs to revalidate datapath flows. */
 
 /*
+ * 从 dp_netdev 的每个端口的接受队列中取出端口收到的包, 在
+ * dp_netdev->poll_threads 的 dp_netdev_pmd_thread 中查找
+ * 匹配的流表, 如果找到就是执行对应的 action, 如果找不到就
+ * 发送给 upcall(控制器或?)
+ *
  * 从 dpif 定位到所属的 dp_netdev 对象 dp
  * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
  * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
@@ -2805,6 +2817,14 @@ struct rxq_poll {
     struct netdev_rxq *rx;
 };
 
+/*
+ * @pmd
+ * @ppoll_list : 保存与 pmd 关联的端口
+ * @poll_cnt   : ppoll_list 的元素个数
+ *
+ * 找到 pmd 对应的 dp_netdev. 遍历该 dp_netdev 的所有端口, 找到 pmd->numa_id = port->netdev->numa_id
+ * 的 port, 将该 port->rxq % numa_id->cores 中 pmd->index 对应的 port 加入 ppoll_list
+ */
 static int
 pmd_load_queues(struct dp_netdev_pmd_thread *pmd,
                 struct rxq_poll **ppoll_list, int poll_cnt)
@@ -2822,6 +2842,8 @@ pmd_load_queues(struct dp_netdev_pmd_thread *pmd,
     n_pmds_on_numa = get_n_pmd_threads_on_numa(pmd->dp, pmd->numa_id);
     index = 0;
 
+    //遍历 pmd->dp 的每一个端口, 找到这个端口所属的 numa_id 与 pmd 匹配的 port,
+    //如果 port->rxq % numa->cores = pmd->index 就加入 ppoll_list
     CMAP_FOR_EACH (port, node, &pmd->dp->ports) {
         /* Calls port_try_ref() to prevent the main thread
          * from deleting the port. */
@@ -2852,6 +2874,13 @@ pmd_load_queues(struct dp_netdev_pmd_thread *pmd,
     return poll_cnt;
 }
 
+/*
+ *
+ * 1. 配置
+ * 2. 处理端口请求
+ *
+ *
+ */
 static void *
 pmd_thread_main(void *f_)
 {
@@ -2870,6 +2899,10 @@ pmd_thread_main(void *f_)
     pmd_thread_setaffinity_cpu(pmd->core_id);
 reload:
     emc_cache_init(&pmd->flow_cache);
+    /*
+     * 找到 pmd 对应的 dp_netdev. 遍历该 dp_netdev 的所有 port, 找到 pmd->numa_id = port->netdev->numa_id
+     * 的 port, 将该 port->rxq % numa_id->cores 中 pmd->index 对应的 port 加入 ppoll_list
+     */
     poll_cnt = pmd_load_queues(pmd, &poll_list, poll_cnt);
 
     /* List port/core affinity */
@@ -3137,6 +3170,15 @@ dp_netdev_del_pmds_on_numa(struct dp_netdev *dp, int numa_id)
 
 /* Checks the numa node id of 'netdev' and starts pmd threads for
  * the numa node. */
+/*
+ * 1. 将 numa_id 中 unpinned 的 core 与 pmd 绑定后加入 dp->poll_thread
+ * 2. 将 dp->ports 中的 rxq 与 dp->poll_thread 绑定. 之后接受每个端口的数据包处理
+ *
+ * dp->poll_thread 中的每一个 pmd 对应一个线程, dp->per_pmd_key 与 pmd
+ * 关联是线程局部对象
+ *
+ * 其中 rxq 与 dp->poll_thread 中的 pmd 是一对一或一对多
+ */
 static void
 dp_netdev_set_pmds_on_numa(struct dp_netdev *dp, int numa_id)
 {
@@ -3156,6 +3198,7 @@ dp_netdev_set_pmds_on_numa(struct dp_netdev *dp, int numa_id)
     if (!n_pmds) {
         int can_have, n_unpinned, i;
 
+        //找到没有 pinned 的 core 的数量
         n_unpinned = ovs_numa_get_n_unpinned_cores_on_numa(numa_id);
         if (!n_unpinned) {
             VLOG_ERR("Cannot create pmd threads due to out of unpinned "
@@ -3170,6 +3213,7 @@ dp_netdev_set_pmds_on_numa(struct dp_netdev *dp, int numa_id)
             struct dp_netdev_pmd_thread *pmd = xzalloc(sizeof *pmd);
             unsigned core_id = ovs_numa_get_unpinned_core_on_numa(numa_id);
 
+            //初始化 pmd 并将其加入 dp->poll_threads
             dp_netdev_configure_pmd(pmd, dp, i, core_id, numa_id);
             /* Each thread will distribute all devices rx-queues among
              * themselves. */
@@ -3182,6 +3226,10 @@ dp_netdev_set_pmds_on_numa(struct dp_netdev *dp, int numa_id)
 
 /* Called after pmd threads config change.  Restarts pmd threads with
  * new configuration. */
+/*
+ * 如果是 dpdk, 重置每个端口的 pmd
+ * 如果不是 dpdk, 什么也不做
+ */
 static void
 dp_netdev_reset_pmd_threads(struct dp_netdev *dp)
 {
@@ -3191,6 +3239,14 @@ dp_netdev_reset_pmd_threads(struct dp_netdev *dp)
         if (netdev_is_pmd(port->netdev)) {
             int numa_id = netdev_get_numa_id(port->netdev);
 
+            /*
+             * 在 dp->poll_threads 中找到与 numa_id 关联的 pmd 的数量
+             *
+             * 如果没有与 numa_id 关联的 pmd, 找到 numa_id 中没有 pinned 的 core 的数量 n_unpinned,
+             * 创建 n_unpinned 个线程 pmd, 每个线程调用 pmd_thread_main
+             *
+             * 如果有与 numa_id 关联的 pmd, 什么也不做
+             */
             dp_netdev_set_pmds_on_numa(dp, numa_id);
         }
     }
