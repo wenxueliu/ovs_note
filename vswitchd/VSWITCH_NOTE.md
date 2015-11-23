@@ -105,6 +105,9 @@ ovs-appctl ofproto/trace ovs-switch in_port=100,dl_src=66:4e:cc:ae:4d:20, dl_dst
 
 ovsdb-client dump
 
+ovs-ofctl add-flow s1 "table=0,priority=65535,arp,arp_tpa=10.0.0.254 actions=LOCAL"
+
+sudo ovs-vsctl -- --columns=name,ofport list Interface
 
 
 http://openvswitch.org/pipermail/discuss/2014-December/015968.html
