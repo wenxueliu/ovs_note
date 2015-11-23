@@ -497,14 +497,14 @@ requires_datapath_assistance(const struct nlattr *a)
 }
 
 /*
- * 解析 actions 中的每一个元素. 根据元素的 type 执行相应的 action
+ * 解析 actions 中的每一个元素. 根据元素的 type 对 packets 中的每个包执行相应的 action
  *
  * @packets : 需要执行 action 的数据包
  * @cnt     : packets 的数量
  * @steal   : 如果为 true, 最后将 packets 内存释放
  * @actions : 需要执行的 action
  * @actions_len : actions 的数量
- * @dp_execute_action : 对于actions 中元素满足条件 requires_datapath_assistance() 执行的 action
+ * @dp_execute_action : 对于 actions 中元素满足条件 requires_datapath_assistance() 执行的 action
  *
  */
 void

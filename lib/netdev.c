@@ -385,6 +385,12 @@ dpdk, dpdkr, dpdkvhostcuse, dpdkvhostuser 加入到 netdev_classes 中, 并调�
  * 3. 如果 type 在 netdev_classes 中, 调用 alloc 分配一个 netdev * 对象,初始化, 加入 netdev_shash.
  * 如果 type 不在 netdev_classes 中, 返回错误消息
  *
+ * 如果是 tap, 调用 netdev_tap_class
+ * 如果是 type = "" 调用 netdev_linux_class
+ * 如果是 type = internal 调用 netdev_internal_class
+ * 如果是 type = gren, list, stt, ipsec, vxlan 参见 netdev_vport_tunnel_register
+ * 如果是 type = dpdk, dpdkr, dpkdvhostcuse, dpdkhostuser, 参加 netdev_dpdk_register
+ *
  * 这里加 1 的意义?
  */
 int
@@ -536,9 +542,14 @@ netdev_get_tunnel_config(const struct netdev *netdev)
 
 /* Returns the id of the numa node the 'netdev' is on.  If the function
  * is not implemented, returns NETDEV_NUMA_UNSPEC. */
+/*
+ * NETDEV_NUMA_UNSPEC = INT_MAX
+ * 其中 netdev 所对应的 numa 在 netdev/dpdk.c 中 netdev_dpdk_init 中初始化
+ */
 int
 netdev_get_numa_id(const struct netdev *netdev)
 {
+    //dpdk 返回 true
     if (netdev->netdev_class->get_numa_id) {
         return netdev->netdev_class->get_numa_id(netdev);
     } else {
@@ -642,6 +653,15 @@ netdev_parse_name(const char *netdev_name_, char **name, char **type)
  *
  * Some kinds of network devices might not support receiving packets.  This
  * function returns EOPNOTSUPP in that case.*/
+/*
+ * netdev_linux_rxq_alloc -> netdev_linux_rxq_construct
+ * netdev_dpdk_rxq_alloc ->  netdev_dpdk_rxq_construct
+ *
+ * DPDK
+ * port->rxq[i]->netdev = netdev
+ * port->rxq[i]->queue_id = i
+ * port->rxq[i]->port_id = port->rxq[i]->up.netdev->port_id
+ */
 int
 netdev_rxq_open(struct netdev *netdev, struct netdev_rxq **rxp, int id)
     OVS_EXCLUDED(netdev_mutex)
@@ -747,6 +767,9 @@ netdev_rxq_drain(struct netdev_rxq *rx)
  * Caller should make decision on whether to restore the previous or
  * the default configuration.  Also, caller must make sure there is no
  * other thread accessing the queues at the same time. */
+/*
+ * 设置 netdev 的 rxq 和 txq 的数量, 目前 dpdk 支持, linux 不支持
+ */
 int
 netdev_set_multiq(struct netdev *netdev, unsigned int n_txq,
                   unsigned int n_rxq)

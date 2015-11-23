@@ -379,6 +379,10 @@ cmap_find(const struct cmap *cmap, uint32_t hash)
  * hash collisions. */
 /*
  *TODO 在 cmap 中根据 hashs 找到匹配的 buckets[i], 从 buckets[i] 根据 hashs[i] 找到 node 加入 nodes
+
+ * 返回 map 中
+ * 如果索引为 1 表示找到匹配项
+ * 如果索引为 0 表示没有找到匹配项
  */
 unsigned long
 cmap_find_batch(const struct cmap *cmap, unsigned long map,

@@ -4190,6 +4190,13 @@ parse_8021q_onward(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
 }
 
 /*
+ * @key
+ * @key_len
+ * @src_key
+ * @src_key_len
+ * @flow
+ * @src_flow
+ *
  * 遍历 key 并解析 key 的每一个元素初始化 flow
  */
 static enum odp_key_fitness
@@ -4201,7 +4208,7 @@ odp_flow_key_to_flow__(const struct nlattr *key, size_t key_len,
     uint64_t expected_attrs;
     uint64_t present_attrs;
     int out_of_range_attr;
-    //什么意思?
+    //是否存在掩码
     bool is_mask = src_flow != flow;
 
     memset(flow, 0, sizeof *flow);
@@ -4333,6 +4340,7 @@ odp_flow_key_to_flow(const struct nlattr *key, size_t key_len,
  * corresponding to 'mask' and similarly flow_key/flow_key_len must be the
  * attributes from that flow.  Returns an ODP_FIT_* value that indicates how
  * well 'key' fits our expectations for what a flow key should contain. */
+//TODO
 enum odp_key_fitness
 odp_flow_key_to_mask(const struct nlattr *mask_key, size_t mask_key_len,
                      const struct nlattr *flow_key, size_t flow_key_len,

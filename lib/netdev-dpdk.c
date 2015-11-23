@@ -2153,6 +2153,9 @@ netdev_dpdk_register(void)
     }
 }
 
+/*
+ * 将当前线程与 cpu 绑定
+ */
 int
 pmd_thread_setaffinity_cpu(unsigned cpu)
 {
