@@ -1,3 +1,8 @@
+
+
+
+
+
 ##设备管理
 
 dpif_netlink_open
@@ -127,7 +132,34 @@ dpif_netlink_recv_purge :  将 dpif->handlers 中所有的 fd 监听的数据都
 dpif_netlink_get_datapath_version : 获取 datapath 版本
 
 
-##用户空间的 datapath
+##用户空间的 datapath, dpif_netdev ---  DPDK
+
+dp_netdev 由多个 poll_thread 对象, 每个 poll_thread 绑定到一个 numa 节点
+
+将 port 与 numa 节点绑定, 每个 numa 节点的所有 cores 都为该 port 服务. 该 port 的
+rxq 均匀地分配给各个 core
+
+查询所有的 numa 节点及每个 numa 节点下的 cpu core. 为每个 cpu core 分配一个 pmd
+线程.
+
+因此 pmd 与 port 的 rxq 可以是 1 对 1 或 1 对 n, 关系为 pmd->index = rxq % cores
+
+每个端口接受队列与 pmd 绑定, 包收到后首先在 pmd->flow_cache 中查找,
+* 如果找到, 加入 flow_cache->batch
+* 如果找不到就在 pmd->cls 中查找
+    * 如果找到, 加入 flow_cache, 并加入　flow->batch
+    * 如果找不到, 就调用 upcall.
+
+###核心代码
+
+dpif_netdev_open
+    create_dp_netdev
+        do_add_port
+            dp_netdev_set_pmds_on_numa
+                pmd_thread_main
+                    dp_netdev_input
+                        emc_processing
+                        fast_path_processing
 
 dpif_netdev_enumerate : 从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 all_dps 中
 dpif_netdev_port_open_type : 返回 类型
@@ -155,7 +187,87 @@ dpif_netdev_flow_dump_thread_create : 初始化 thread 对象
 dpif_netdev_flow_dump_thread_destroy : 释放 thread 对象
 
 
+丢包的可能原因:
+1. dp_cls 中没有找到对应的 flow, 并且无法获取 upcall 锁
+2. 再次查询　dp_cls 仍然没有对应的 flow, 调用 upcall 失败
+3. 如果执行 upcall 成功, 再次查询 dp_cls 仍然没有对应的 flow, 加入 pmd->flow_cache
 
+
+###问题:
+
+1. 端口如何与 numa 绑定
+
+在端口初始化过程中, netdev_open() 中初始化 port->netdev 所属的 numa(仅 dpdk 实现)
+
+2. pmd 什么时候初始化?
+
+在增加端口的时候, 具体在 dp_netdev_set_pmds_on_numa 中实现
+
+1. pmd 是如何与 cpu core 或 numa 关联的 ?
+
+在 pmd 初始化过程中直接赋值. 参考 dpif_netdev.c 中的 dp_netdev_configure_pmd
+
+2. pmd 是如何与对应的线程关联 ?
+
+在 pmd 所属 datapath 中的所有端口中找到
+1. 在 pmd 初始化过程中, 将 numa 节点中没有 pinned 的 core 分配给 pmd
+2. 将 pmd 所在线程与 pmd->core 绑定
+
+增加端口的时候, 如果是 dpdk, 对交换机所属端口的 numa 节点扫描:
+1. 如果 dp->poll_threads 中存在与 numa 绑定的 pmd, 就什么也不做. (如果 numa 是动态增加的就存在问题)
+2. 如果 dp->poll_threads 中不存在与 numa 绑定的 pmd, 就遍历该 numa 找到没有 pinned 的 core, 创建 pmd 并将 pmd 所属的线程与 core 绑定.
+
+3. pmd 是如何与 port 的 rxq 绑定的?
+
+在 pmd_thread_main 中实现, pmd 对应的 rxq % cores = pmd->index 的 rxq
+
+port->rxq 可以通过 dpif_netdev_pmd_set 设置
+port->txq 为所有 numa 节点的 core + 1
+
+4. flow_cache, cls, flow_table 之间的关系
+
+   先查询 flow_cache, 找不到再查 cls, 再找不到, 发送 upcall, 之后再查询 cls.
+
+   参考 dp_netdev_flow_add
+
+   增加一条 flow:
+   1. flow->cr 加入 cls
+   2. flow->node 加入 flow_table
+
+5. 缓存替代算法
+
+ 将 key, flow 加入 cache
+ 1. 从 cache 中找到 key 匹配的 cache, 该 cache->flow = flow, cache->key = key
+ 2. 如果没有与 key 匹配的, 就替换第一条已经不再有效的 cache entry.
+ 3. 如果key 没有匹配, 并且所有 entry 都是有效的, 就替换 key.hash 最小的 entry
+
+6. dp 的 upcall 在哪里初始化, dp_netdev 的 upcall 具体实现在哪里?
+
+ 通过 dpif_netdev_register_upcall_cb, 也即 dpif_class 的 register_upcall_cb(dpif_netdev.c)
+ 注册, 对外暴露的接口是 dpif_register_upcall_cb(dpif.c)
+
+ 具体实现在 ofproto/ofproto_dpif_upcall.c 中的 upcall_cb
+
+
+7. 谈谈 batch 的作用
+
+struct packet_batch {
+    unsigned int packet_count;
+    unsigned int byte_count;
+    uint16_t tcp_flags;
+
+    struct dp_netdev_flow *flow;
+
+    struct dp_packet *packets[NETDEV_MAX_BURST];
+};
+
+交换机收到包后, 查询每个包, 并不是立即就对 packet 执行动作, 而是将 packet 加入
+batch 中, 每个 batch 对应一个 flow, 每个 batch 包含很多 packet, 所有的 packet 都
+对应相同的 flow. 具体可以参考 dp_netdev_queue_batches
+
+在经过快路径(flow_cache) 和慢路径(cls) 查询后, 对于存在匹配的对应 flow 的 packet
+都保持在 batch 中, 之后对 batch 中的每个 packet 执行其 flow 对应的 actions, 对于
+不匹配的包直接丢掉
 
 
 
@@ -998,24 +1110,30 @@ void pinsched_get_stats(const struct pinsched *ps, struct pinsched_stats *stats)
 /* Protects against changes to 'dp_netdevs'. */
 static struct ovs_mutex dp_netdev_mutex = OVS_MUTEX_INITIALIZER;
 
-dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池. 每个端口属于一个 netdev. 
-每个端口所属的 netdev 有一个接受队列, 每个线程有一个流表缓存池
-/* Contains all 'struct dp_netdev's. */
+/
+* dp_netdevs 下由很多 dp_netdev. 每一个 dp_netdev 下有一个线程池和端口池. 每个端口属于一个 netdev.
+* 每个端口所属的 netdev 有一个接受队列, 每个线程有一个流表缓存池
+* 由 dpif_netdev_open 创建 dp_netdev 对象, 暴露给外面的是 dpif_open(name, "netdev", dp_netdev) 调用
+*/
 static struct shash dp_netdevs
 
 //ofproto_dpif_upcall.c
 static struct ovs_list all_udpifs  //保存 udpif 对象
 
 /*
- * 保持 dpif_class->type : registered_dpif_class 类型 hash map
- * 目前保持有
+ * dpif_class 主要由 dpif_netdev_class 和 dpif_netlink_class 实现
+ * 保存 dpif_class->type : registered_dpif_class 类型 hash map
+ *
+ * dpif_class->type 必须是唯一标记一个 dpif_class
+ *
+ * 目前保存有
  * system : { .dpif_class = dpif_netlink_class, .refcount=0 }
  * netdev : { .dpif_class = dpif_netdev_class, .refcount=0 }
  */
 static struct shash dpif_classes = SHASH_INITIALIZER(&dpif_classes);
 
-//黑名单, 在 ovs-vswitchd 中可以将 system 加入该黑名单
-static struct sset dpif_blacklist = SSET_INITIALIZER(&dpif_blacklist); 
+//黑名单, 加入的是 dpif_class->type (在 ovs-vswitchd 中可以将 system 加入该黑名单)
+static struct sset dpif_blacklist = SSET_INITIALIZER(&dpif_blacklist);
 
 const struct dpif_class dpif_netlink_class = {
     "system",
@@ -1647,3 +1765,135 @@ if (setsockopt(sock->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
  *      from any number of threads at once, but each thread must use its own
  *      struct dpif_port_dump.
  */
+
+###NUMA 相关
+
+void discover_numa_and_core(void)
+
+在 /sys/devices/system/node/node%n 中查找所有 numa node, 每个 numa node 下的
+cpu. 并将 numa node 加入 all_numa_nodes, cpu core 加入 all_cpu_cores
+
+int ovs_numa_get_n_numas(void)
+int ovs_numa_get_n_cores(void)
+struct numa_node* get_numa_by_numa_id(int numa_id)
+bool ovs_numa_core_is_pinned(unsigned core_id)
+bool ovs_numa_core_id_is_valid(unsigned core_id)
+bool ovs_numa_numa_id_is_valid(int numa_id)
+
+###设计考量
+
+1. 为什么 upcall 要包含整个包?
+
+事实上可以这样优化, 但是这是不必要的, 因为典型的 需要 upcall 都是首包, 包
+的大小非常小, 因此是不是必须的. 如果业务场景包含大量 upcall 的包, 那么,
+对 upcall 的包的大小限制调是合理的.
+
+    An upcall contains an entire packet.  There is no attempt to, e.g., copy
+    only as much of the packet as normally needed to make a forwarding decision.
+    Such an optimization is doable, but experimental prototypes showed it to be
+    of little benefit because an upcall typically contains the first packet of a
+    flow, which is usually short (e.g. a TCP SYN).  Also, the entire packet can
+    sometimes really be needed.
+
+2. datapath 调用 upcall 的时机
+
+　1. table_miss
+  2. 显示地要求 upcall
+
+3. datapath 调用 upcall 之后是否会将包保留在 datapath, 等待用户态下发流表后, 继续走流表?
+
+   不会
+
+    After a client reads a given upcall, the datapath is finished with it, that
+    is, the datapath doesn't maintain any lingering state past that point.
+
+4. upcall 的顺序如何保证 ?
+
+如果将所有端口都加入同一队列, 如果某个端口的数据非常多速率非常大, 不能保证保证各个端口
+的其他端口的数据被丢掉或不合理的延迟.
+
+因此, 为每个端口维护一个队列,　如果端口过多就导致队列过多, 更好的方式是维护一个固定数量的队列,
+每个端口映射到每个队列.  可以将多个端口绑定到一个队列, 但是不允许将一个端口绑定到多个队列.
+
+miss 和 action 都到同一个队列
+
+miss 可以将一个端口绑定到多个 PID, 但需要确保特定的包始终映射到同一PID.
+actions 可以将一个端口绑定到多个 PID, 但需要确保特定的包始终映射到同一PID.
+
+    The minimal behavior, suitable for initial testing of a datapath
+    implementation, is that all upcalls are appended to a single queue, which is
+    delivered to the client in order.
+
+    The datapath should ensure that a high rate of upcalls from one particular
+    port cannot cause upcalls from other sources to be dropped or unreasonably
+    delayed.  Otherwise, one port conducting a port scan or otherwise initiating
+    high-rate traffic spanning many flows could suppress other traffic.
+    Ideally, the datapath should present upcalls from each port in a "round
+    robin" manner, to ensure fairness.
+
+    The client has no control over "miss" upcalls and no insight into the
+    datapath's implementation, so the datapath is entirely responsible for
+    queuing and delivering them.  On the other hand, the datapath has
+    considerable freedom of implementation.  One good approach is to maintain a
+    separate queue for each port, to prevent any given port's upcalls from
+    interfering with other ports' upcalls.  If this is impractical, then another
+    reasonable choice is to maintain some fixed number of queues and assign each
+    port to one of them.  Ports assigned to the same queue can then interfere
+    with each other, but not with ports assigned to different queues.  Other
+    approaches are also possible.
+
+    The client has some control over "action" upcalls: it can specify a 32-bit
+    "Netlink PID" as part of the action.  This terminology comes from the Linux
+    datapath implementation, which uses a protocol called Netlink in which a PID
+    designates a particular socket and the upcall data is delivered to the
+    socket's receive queue.  Generically, though, a Netlink PID identifies a
+    queue for upcalls.  The basic requirements on the datapath are:
+
+       - The datapath must provide a Netlink PID associated with each port.  The
+         client can retrieve the PID with dpif_port_get_pid().
+
+       - The datapath must provide a "special" Netlink PID not associated with
+         any port.  dpif_port_get_pid() also provides this PID.  (ovs-vswitchd
+         uses this PID to queue special packets that must not be lost even if a
+         port is otherwise busy, such as packets used for tunnel monitoring.)
+
+    The minimal behavior of dpif_port_get_pid() and the treatment of the Netlink
+    PID in "action" upcalls is that dpif_port_get_pid() returns a constant value
+    and all upcalls are appended to a single queue.
+
+    The preferred behavior is:
+
+       - Each port has a PID that identifies the queue used for "miss" upcalls
+         on that port.  (Thus, if each port has its own queue for "miss"
+         upcalls, then each port has a different Netlink PID.)
+
+       - "miss" upcalls for a given port and "action" upcalls that specify that
+         port's Netlink PID add their upcalls to the same queue.  The upcalls
+         are delivered to the datapath's client in the order that the packets
+         were received, regardless of whether the upcalls are "miss" or "action"
+         upcalls.
+
+       - Upcalls that specify the "special" Netlink PID are queued separately.
+
+    Multiple threads may want to read upcalls simultaneously from a single
+    datapath.  To support multiple threads well, one extends the above preferred
+    behavior:
+
+       - Each port has multiple PIDs.  The datapath distributes "miss" upcalls
+         across the PIDs, ensuring that a given flow is mapped in a stable way
+         to a single PID.
+
+       - For "action" upcalls, the thread can specify its own Netlink PID or
+         other threads' Netlink PID of the same port for offloading purpose
+         (e.g. in a "round robin" manner).
+
+
+3. 流表相互覆盖问题?
+
+ The flow table does not have priorities; that is, all flow entries have
+ equal priority.  Detecting overlapping flow entries is expensive in
+ general, so the datapath is not required to do it.  It is primarily the
+ client's responsibility not to install flow entries whose flow and mask
+ combinations overlap.
+
+
