@@ -329,6 +329,11 @@ netdev_enumerate_types(struct sset *types)
  * does not define it) or the datapath internal port name (e.g. ovs-system).
  *
  * Returns true if there is a name conflict, false otherwise. */
+/*
+ * 如果 name 是 dpif_classes 中的类型冲突 (即 base_dpif_classes 中的 system 或 netdev) 就返回 true
+ *
+ * 注: 实际为 ovs-netdev, 或 ovs-system 就返回 true
+ */
 bool
 netdev_is_reserved_name(const char *name)
     OVS_EXCLUDED(netdev_mutex)

@@ -112,11 +112,13 @@ static void log_flow_get_message(const struct dpif *,
 struct seq *tnl_conf_seq;
 
 /*
+ * 注册命令, 并将 dpif_netdev_class, dpif_netlink_class 加入 dpif_classes, 并初始化
+ *
  * 1. 注册 dpctl 命令
  * 2. 注册 tunnel port 命令
  * 3. 注册 tunnel arp cache 初始化
  * 4. 注册 route 命令
- * 4. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+ * 5. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
  * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
  *
  */
@@ -165,9 +167,13 @@ dp_initialize(void)
 }
 
 /*
+ * @new_class : 待注册的 dpif_class, 实际为 dpif_netlink_class, dpif_netdev_class
+ *
  * 0. 检查 new_class 是否已经加入 dpif_classes 和 dpif_blacklist, 如果加入返回, 否则继续步骤 1
  * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
  * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ *
+ * 注意: 在 dpif_classes 中每个 new_class->type 是唯一的
  */
 static int
 dp_register_provider__(const struct dpif_class *new_class)
@@ -206,9 +212,13 @@ dp_register_provider__(const struct dpif_class *new_class)
 /* Registers a new datapath provider.  After successful registration, new
  * datapaths of that type can be opened using dpif_open(). */
 /*
+ * @new_class : 待注册的 dpif_class, 实际为 dpif_netlink_class, dpif_netdev_class
+ *
  * 0. 检查 new_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
  * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
  * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ *
+ * 注意: 在 dpif_classes 中每个 new_class->type 是唯一的
  */
 int
 dp_register_provider(const struct dpif_class *new_class)
@@ -225,6 +235,7 @@ dp_register_provider(const struct dpif_class *new_class)
 /* Unregisters a datapath provider.  'type' must have been previously
  * registered and not currently be in use by any dpifs.  After unregistration
  * new datapaths of that type cannot be opened using dpif_open(). */
+//从 dpif_classes 删除 type 对应的 dpif_class
 static int
 dp_unregister_provider__(const char *type)
 {
@@ -318,7 +329,10 @@ dp_class_unref(struct registered_dpif_class *rc)
 }
 
 /*
+ * @type: dpif_class->type. system, netdev is optional
+ *
  * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+ *
  * NOTE:实际 dpif_classes 包含 dpif_netlink_class 和 dpif_netdev_class
  */
 static struct registered_dpif_class *
@@ -350,6 +364,8 @@ dp_class_lookup(const char *type)
  * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
  *
  * NOTE: 实际调用 dpif_netlink_class->enumerate 或 dpif_netdev_class->enumerate
+ * 当为 dpif_netdev_class  : 从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 names 中
+ * 当为 dpif_netlink_class : 遍历查询内核中的所有 dpif_netlink_dp 对象, 将其 name 加入 names
  */
 int
 dp_enumerate_names(const char *type, struct sset *names)

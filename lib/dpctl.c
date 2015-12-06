@@ -137,6 +137,7 @@ get_one_dp(struct dpctl_params *dpctl_p)
     size_t count = 0;
 
     sset_init(&types);
+    //将 base_dpif_classes 中的 dpif_netdev_class 和 dpif_netlink_class 加入 types
     dp_enumerate_types(&types);
     SSET_FOR_EACH (type, &types) {
         struct sset names;
@@ -625,6 +626,7 @@ dps_for_each(struct dpctl_params *dpctl_p, dps_for_each_cb cb)
     const char *type, *name;
     bool at_least_one = false;
 
+    //将 base_dpif_classes 中的 dpif_netdev_class 和 dpif_netlink_class 加入 types
     dp_enumerate_types(&dpif_types);
 
     SSET_FOR_EACH (type, &dpif_types) {

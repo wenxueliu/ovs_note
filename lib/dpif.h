@@ -144,6 +144,8 @@
  *      out" the wildcarded bits.)  This allows the client to unambiguously
  *      identify the flow entry in later flow table operations.
  *
+ *      CAUTION:
+ *
  *      The flow table does not have priorities; that is, all flow entries have
  *      equal priority.  Detecting overlapping flow entries is expensive in
  *      general, so the datapath is not required to do it.  It is primarily the

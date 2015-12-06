@@ -746,7 +746,10 @@ dpif_netdev_init(void)
     return 0;
 }
 
-//从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 all_dps 中
+/*
+ * 从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 all_dps 中
+ * 注: 被 dpif.c/dp_enumerate_names 调用
+ */
 static int
 dpif_netdev_enumerate(struct sset *all_dps,
                       const struct dpif_class *dpif_class)
@@ -4418,6 +4421,7 @@ dpif_dummy_register(enum dummy_level level)
         const char *type;
 
         sset_init(&types);
+        //将 base_dpif_classes 中的 dpif_netdev_class 和 dpif_netlink_class 加入 types
         dp_enumerate_types(&types);
         SSET_FOR_EACH (type, &types) {
             dpif_dummy_override(type);

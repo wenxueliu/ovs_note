@@ -229,6 +229,8 @@ dpif_netlink_cast(const struct dpif *dpif)
 
 /*
  * 遍历查询内核中的所有 dpif_netlink_dp 对象, 将其 name 加入 all_dps
+ *
+ * 注: 被 dpif.c/dp_enumerate_names 调用
  */
 static int
 dpif_netlink_enumerate(struct sset *all_dps,
