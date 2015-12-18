@@ -156,7 +156,7 @@ dp_initialize(void)
          * 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
          * 0. 检查 dpif_netlink_class 和 dpif_netdev_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
          * 1. 调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
-         * 2. 将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+         * 2. 将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class
          */
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
@@ -358,7 +358,7 @@ dp_class_lookup(const char *type)
  * considered an error. */
 /*
  * @type  : 目前为 system 或 netdev
- * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name. type=netdev, 包含 dp_netdev 的 name
+ * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name; type=netdev, 包含 dp_netdev 的 name
  *
  * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
  * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
@@ -411,6 +411,16 @@ dp_enumerate_names(const char *type, struct sset *names)
  * component pieces.  'name' and 'type' must be freed by the caller.
  *
  * The returned 'type' is normalized, as if by dpif_normalize_type(). */
+
+/*
+ * $ sudo ovs-dpctl show
+ * system@ovs-system:
+ *     lookups: hit:0 missed:0 lost:0
+ *     flows: 0
+ *     masks: hit:0 total:0 hit/pkt:0.00
+ *     port 0: ovs-system (internal)
+ *     port 1: ovs-switch (internal)
+ */
 void
 dp_parse_name(const char *datapath_name_, char **name, char **type)
 {
@@ -429,9 +439,9 @@ dp_parse_name(const char *datapath_name_, char **name, char **type)
 }
 
 /*
- * @type : 目前为 system, netdev
+ * @type   : 目前为 system, netdev
  * @create : 是否创建
- * @dpifp : dpif_classes 中 type 对应的 dpif_class
+ * @dpifp  : dpif_classes 中 type 对应的 dpif_class
  *
  * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法
  *
@@ -536,6 +546,12 @@ dpif_open(const char *name, const char *type, struct dpif **dpifp)
  * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
  * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)
  * )
+ *
+ * NOTE
+ * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,false,dpifp) : 向内核发送创建 datapath 的消息, 并用内核应答初始化一个 dpif_netlink 对象. dpifp 指向该对象
+ * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,false,dpifp) : 在 dp_netdevs 中创建 name 对应的 dp_netdev 对象, 并初始化, dpifp 指向该对象
+ *
+ * 详细见 do_open
  */
 int
 dpif_create(const char *name, const char *type, struct dpif **dpifp)
@@ -590,6 +606,27 @@ dpif_close(struct dpif *dpif)
 }
 
 /* Performs periodic work needed by 'dpif'. */
+/*
+ * 如果 type = netdev  dpif_netdev_run
+ *     从 dp_netdev 的每个端口的接受队列中取出端口收到的包, 在
+ *     dp_netdev->poll_threads 的 dp_netdev_pmd_thread 中查找
+ *     匹配的流表, 如果找到就是执行对应的 action, 如果找不到就
+ *     发送给 upcall(控制器或?)
+ *
+ *     从 dpif 定位到所属的 dp_netdev 对象 dp
+ *     1. 从 dp->poll_threads 中定位到线程 id 为 non_pmd_core_id 的 dp_netdev_pmd_thread 对象 pmd
+ *     2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+ *     如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+ *     如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ *     如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ *     如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+ *
+ * 如果 type = system  dpif_netdev_run
+ *     如果需要刷新 dpif 的 channel 就刷新. 返回 false
+ *
+ *     NOTE:
+ *     当存在的端口被删除的时候 refresh_channels = true
+ */
 bool
 dpif_run(struct dpif *dpif)
 {
@@ -601,6 +638,14 @@ dpif_run(struct dpif *dpif)
 
 /* Arranges for poll_block() to wake up when dp_run() needs to be called for
  * 'dpif'. */
+
+/*
+ * type=netdev dpif_netdev_wait
+ *    dpif 所属的 dp_netdev 的所有 port 的所有 rxq 如果有数据包准备好, 将数据包加入 rxq
+ *
+ * type=system
+ *    什么也不做
+ */
 void
 dpif_wait(struct dpif *dpif)
 {
@@ -645,6 +690,14 @@ dpif_normalize_type(const char *type)
 /* Destroys the datapath that 'dpif' is connected to, first removing all of its
  * ports.  After calling this function, it does not make sense to pass 'dpif'
  * to any functions other than dpif_name() or dpif_close(). */
+
+/*
+ * type=system
+ *     向内核发送消息删除 dpif_ 对应的 datapath
+ *
+ * type=netdev
+ *     如果 dpif 对应的 dp_netdev 还没有销毁, 引用计数减一
+ */
 int
 dpif_delete(struct dpif *dpif)
 {
@@ -659,6 +712,18 @@ dpif_delete(struct dpif *dpif)
 
 /* Retrieves statistics for 'dpif' into 'stats'.  Returns 0 if successful,
  * otherwise a positive errno value. */
+
+/*
+ * type=netdev dpif_netdev_get_stats
+ *    对 dpif 所属的 dp_netdev 对象 dp, 遍历 dp->poll_threads 的所有元素 pmd
+ *    将所有 pmd->stats.n[DP_STAT_MASKED_HIT] 和 pmd->stats.n[DP_STAT_EXACT_HIT] 加起来作为命中的包数
+ *    将所有 pmd->stats.n[DP_STAT_MISS] 加起来作为没有命中的包数
+ *    将所有 pmd->stats.n[DP_STAT_LOST] 加起来作为丢失的包数
+ *    最后将结果写入 stats
+ *
+ * type=netlink, dpif_netlink_get_stats
+ *    向内核发送消息获取 dpif_ 所在的 dpif_netlink 对象对应的 dpif_netlink_dp 对象 dp 的状态信息
+ */
 int
 dpif_get_dp_stats(const struct dpif *dpif, struct dpif_dp_stats *stats)
 {
@@ -671,8 +736,15 @@ dpif_get_dp_stats(const struct dpif *dpif, struct dpif_dp_stats *stats)
 }
 
 /*
+ * 将 datapath_type 解析后复制给 port_type
+ *
  * 如果 datapath_type = system, 调用 dpif_netlink_class->port_open_type(dpif_netlink_class, port_type)
+ *     什么也不做
+ *
  * 如果 datapath_type = netdev, 调用 dpif_netdev_class->port_open_type(dpif_netdev_class, port_type)
+ *     如果 type=internal, class=dpif_netdev_class 返回 dummy
+ *     如果 type=internal, class!=dpif_netdev_class 返回 tap
+ *     如果 type!=internal, 直接返回 type
  */
 const char *
 dpif_port_open_type(const char *datapath_type, const char *port_type)
@@ -699,6 +771,18 @@ dpif_port_open_type(const char *datapath_type, const char *port_type)
  * number (if 'port_nop' is non-null).  On failure, returns a positive
  * errno value and sets '*port_nop' to ODPP_NONE (if 'port_nop' is
  * non-null). */
+
+/*
+ * type=netdev
+ *     如果 port_nop 不为 ODPP_NONE, 查找释放存在 port_nop 的端口, 如果存在, 返回
+ *     EBUGS, 如果不存在, 增加之
+ *
+ *     如果 port_nop 为 ODPP_NONE, 选择一个端口, 增加之
+ *
+ * type=system
+ *     向内核发送在 dpif 中创建端口的消息, 并且关联 dpif->nl_handlers 个 nl_sock 与创建端口,
+ *     绑定与端口关联 fd POLLIN 消息, 即内核该端口的包需要与用户空间交互的时候, 发往对应的 fd.
+ */
 int
 dpif_port_add(struct dpif *dpif, struct netdev *netdev, odp_port_t *port_nop)
 {
@@ -729,6 +813,13 @@ dpif_port_add(struct dpif *dpif, struct netdev *netdev, odp_port_t *port_nop)
 
 /* Attempts to remove 'dpif''s port number 'port_no'.  Returns 0 if successful,
  * otherwise a positive errno value. */
+
+/*
+ * type=netdev
+ *      从 dpif 删除端口 port_no 对应的端口
+ * type=netlink
+ *      向内核发送从 dpif 删除端口 port_no 的请求
+ */
 int
 dpif_port_del(struct dpif *dpif, odp_port_t port_no)
 {
@@ -787,6 +878,14 @@ dpif_port_exists(const struct dpif *dpif, const char *devname)
  *
  * The caller owns the data in 'port' and must free it with
  * dpif_port_destroy() when it is no longer needed. */
+
+/*
+ * type=netdev
+ *      将 port_no 对应的 dp_netdev_port 的 name, type, port_no 初始化 dpif_port
+ *
+ * type=netlink
+ *      向内核发送获取 dpif 中 port_no 的消息. 如果 dpif_port != NULL, 将返回的消息保持在 dpif_port
+ */
 int
 dpif_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
                           struct dpif_port *port)
@@ -864,8 +963,13 @@ dpif_port_query_by_name(const struct dpif *dpif, const char *devname,
  * update all of the flows that it installed that contain
  * OVS_ACTION_ATTR_USERSPACE actions. */
 /*
- * 返回 dpif->handlers[hash % dpif->n_handlers]->channels[port_no].sock->pid
- * NOTE: 这里 dpif 为 dpif_netlink
+ *
+ * type=system
+ *      返回 dpif->handlers[hash % dpif->n_handlers]->channels[port_no].sock->pid
+ *      NOTE: 这里 dpif 为 dpif_netlink
+ *
+ * type=netdev
+ *      什么也不做
  */
 uint32_t
 dpif_port_get_pid(const struct dpif *dpif, odp_port_t port_no, uint32_t hash)
@@ -879,6 +983,9 @@ dpif_port_get_pid(const struct dpif *dpif, odp_port_t port_no, uint32_t hash)
  * the port's name into the 'name_size' bytes in 'name', ensuring that the
  * result is null-terminated.  On failure, returns a positive errno value and
  * makes 'name' the empty string. */
+/*
+ * 根据 port_no 查询 port, 将 port.name 拷贝到 name
+ */
 int
 dpif_port_get_name(struct dpif *dpif, odp_port_t port_no,
                    char *name, size_t name_size)
@@ -923,6 +1030,17 @@ dpif_port_dump_start(struct dpif_port_dump *dump, const struct dpif *dpif)
  * The dpif owns the data stored in 'port'.  It will remain valid until at
  * least the next time 'dump' is passed to dpif_port_dump_next() or
  * dpif_port_dump_done(). */
+
+/*
+ * type=netdev
+ *      从 dp->ports 的 state_->postion 中找到下一个节点, 初始化 dpif_port
+ *
+ * type=netlink
+ *      如果 buffer->size == 0, 非阻塞接受 dump->sock->fd 的 struct nlmsghdr 结构的消息格式化为 dpif_netlink_vport 保存在 vport 中
+ *      如果 buffer->size != 0, 将 buffer 中的 struct nlmsghdr 格式化为 dpif_netlink_vport 保存在 vport 中.
+ *      成功返回 0, 读完返回 EOF, 失败返回错误码
+ *
+ */
 bool
 dpif_port_dump_next(struct dpif_port_dump *dump, struct dpif_port *port)
 {
@@ -978,14 +1096,15 @@ dpif_port_dump_done(struct dpif_port_dump *dump)
  * wrong. */
 /*
  * @dpif
- * @devnamep : 
+ * @devnamep :被改变, 创建, 或删除的端口的名称
  * @return : ENOBUFS, EAGAIN, 0
  *
  * dpif->type:"system" :
  *     如果 dpif->port_notifier = NULL, 将 sock->fd 加入 ovs_vport_mcgroup　并返回 ENOBUF
  *     否则非阻塞地无限循环接受 sock->fd 消息保存在 buf, 将 buf 转为 vport. 直到发生错误或遇到端口 NEW, SET, DEL 返回 0, 返回错误
  *     返回只能是 EAGAIN, ENOBUFS, 0
- *     NOTE:devnamep : 被改变, 创建, 或删除的端口的名称/
+ *     NOTE:devnamep : 被改变, 创建, 或删除的端口的名称
+ *
  * dpif->type:"netdev" :
  *     从 dpif 定位到 dpif_netdev, 读取 dpif_netdev->dp->port_seq
  *     如果 dpif_netdev->last_port_seq != dpif_netdev->dp->port_seq 返回 ENOBUFS
@@ -1005,6 +1124,13 @@ dpif_port_poll(const struct dpif *dpif, char **devnamep)
 
 /* Arranges for the poll loop to wake up when port_poll(dpif) will return a
  * value other than EAGAIN. */
+
+/*
+ * type=netdev
+ *     等待 dpif->dp->ports 中端口发生变化
+ * type=netlink
+ *     等待内核发送端口发生变化的广播信息
+ */
 void
 dpif_port_poll_wait(const struct dpif *dpif)
 {
@@ -1064,6 +1190,13 @@ dpif_flow_hash(const struct dpif *dpif OVS_UNUSED,
 
 /* Deletes all flows from 'dpif'.  Returns 0 if successful, otherwise a
  * positive errno value.  */
+
+/*
+ * type=netlink
+ *      由 flow 构造 Netlink 消息发送给内核, 请求删除所有流表
+ * type=netdev
+ *      删除 dp->poll_threads 每个线程 pmd 下的 flow_table
+ */
 int
 dpif_flow_flush(struct dpif *dpif)
 {
@@ -1078,6 +1211,11 @@ dpif_flow_flush(struct dpif *dpif)
 
 /* Attempts to install 'key' into the datapath, fetches it, then deletes it.
  * Returns true if the datapath supported installing 'flow', false otherwise.
+ */
+/*
+ * 1. 安装流
+ * 2. 提取流
+ * 3. 删除流
  */
 bool
 dpif_probe_feature(struct dpif *dpif, const char *name,
@@ -1127,7 +1265,10 @@ dpif_probe_feature(struct dpif *dpif, const char *name,
 
 /* A dpif_operate() wrapper for performing a single DPIF_OP_FLOW_GET. */
 /*
- * 向内核查询流表, 保持在 flow.
+ * type=netlink
+ *      向内核查询流表, 保持在 flow.
+ * type=netdev
+ *      获取流表项
  */
 int
 dpif_flow_get(struct dpif *dpif,
@@ -1218,6 +1359,10 @@ dpif_flow_del(struct dpif *dpif,
  * @terse : 如果为 true, 用 ufid, 否则不用
  * @dpif  :
  *
+ * type=system
+ *      构造 genl Netlink 消息, 向内核发送 NETLINK_GENERIC 协议消息, 并初始化 dump 后返回 dump
+ * type=netdev
+ *      创建 dpif_netdev_flow_dump 对象, 并初始化
  */
 struct dpif_flow_dump *
 dpif_flow_dump_create(const struct dpif *dpif, bool terse)
@@ -1231,6 +1376,14 @@ dpif_flow_dump_create(const struct dpif *dpif, bool terse)
  *
  * Returns 0 if the dump operation was error-free, otherwise a positive errno
  * value describing the problem. */
+/*
+ * type=system
+ *      如果 dump->nl_dump->state = 0, 继续接受数据直到数据接受完或发生错误. 之后将 dump->nl_dump->sock 保存在 pools 中
+ *      如果数据接受完, 返回0, 否则返回具体错误代码
+ *      最后释放 dump 所占内存
+ * type=netdev
+ *      销毁 dpif_netdev_flow_dump 对象.
+ */
 int
 dpif_flow_dump_destroy(struct dpif_flow_dump *dump)
 {
@@ -1242,11 +1395,15 @@ dpif_flow_dump_destroy(struct dpif_flow_dump *dump)
 
 /* Returns new thread-local state for use with dpif_flow_dump_next(). */
 /*
- * 初始化一个线程对象 thread, 返回线程对象所在的 thread->up
- * thread->up->dpif = dump->up->dpif
- * thread->dump = dump
- * thread->nl_flows = malloc(NL_DUMP_BUFSIZE)
- * thread->nl_actions = NULL
+ * type=system
+ *     初始化一个线程对象 thread, 返回线程对象所在的 thread->up
+ *     thread->up->dpif = dump->up->dpif
+ *     thread->dump = dump
+ *     thread->nl_flows = malloc(NL_DUMP_BUFSIZE)
+ *     thread->nl_actions = NULL
+ *
+ * type=netdev
+ *     初始化 dpif_netdev_flow_dump_thread 对象
  */
 struct dpif_flow_dump_thread *
 dpif_flow_dump_thread_create(struct dpif_flow_dump *dump)
@@ -1255,6 +1412,12 @@ dpif_flow_dump_thread_create(struct dpif_flow_dump *dump)
 }
 
 /* Releases 'thread'. */
+/*
+ * type=system
+ *      销毁 thread 对象
+ * type=netdev
+ *      销毁 dpif_netdev_flow_dump_thread 对象
+ */
 void
 dpif_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
 {
@@ -1284,13 +1447,16 @@ dpif_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
  * @flows   : 保持从 thread->dump->nl_dump->sock->fd 中收到的数据
  * @max_flows : 期望最多的 flows 的大小, 如果 flows 中 flow 的数量大于 max_flows 退出
  *
- * 从 thread->dump->nl_dump->sock->fd 中收数据保持保存在 flows 中, 直到遇到错误或收到 max_flows 个 flow
- * 返回 flows 收的的流表数量
+ * type=system
+ *      从 thread->dump->nl_dump->sock->fd 中收数据保持保存在 flows 中, 直到遇到错误或收到 max_flows 个 flow
+ *      返回 flows 收的的流表数量
  *
- * NOTE:
- * flows 中 flow 的数量可能小于 max_flow
- * 如果遇到 flow 没有 actions 重新从内核中查询.
+ *      NOTE:
+ *      flows 中 flow 的数量可能小于 max_flow
+ *      如果遇到 flow 没有 actions 重新从内核中查询.
  *
+ * type=netdev
+ *      从 thread_->dump 开始遍历所有 pmd 下的 flow, 将 dump 之后的 flow 转换后, 保存在 flows 中
  */
 int
 dpif_flow_dump_next(struct dpif_flow_dump_thread *thread,
@@ -1362,8 +1528,10 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet **packets, int cnt,
         execute.needs_help = false;
         execute.probe = false;
         /*
-        * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
-        */
+         * type=system
+         *      将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+         * type=netdev
+         */
         aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &execute, true, aux->error);
 
@@ -1415,7 +1583,10 @@ dpif_execute_needs_help(const struct dpif_execute *execute)
 
 /* A dpif_operate() wrapper for performing a single DPIF_OP_EXECUTE. */
 /*
- * 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ * type=system
+ *      将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
+ *
+ * type=netdev
  */
 int
 dpif_execute(struct dpif *dpif, struct dpif_execute *execute)
@@ -1552,6 +1723,15 @@ dpif_upcall_type_to_string(enum dpif_upcall_type type)
  * assignments returned by dpif_port_get_pid().  If the client does this, it
  * must update all of the flows that have OVS_ACTION_ATTR_USERSPACE actions
  * using the new PID assignment. */
+
+/*
+ * type=netdev : 什么也不做
+ * type=netlink :
+ *     如果 enable = true; dpif->handlers != NULL, 返回 0
+ *     如果 enable = true; dpif->handlers = NULL, 刷新所有的 channels
+ *     如果 enable = false; dpif->handlers = NULL, 返回 0
+ *     如果 enable = false; dpif->handlers != NULL, 删除所有 channels
+ */
 int
 dpif_recv_set(struct dpif *dpif, bool enable)
 {
@@ -1584,6 +1764,19 @@ dpif_recv_set(struct dpif *dpif, bool enable)
  *          the corresponding poll loop.
  *
  * Returns 0 if successful, otherwise a positive errno value. */
+
+/*
+ * type=system : 重新配置 dpif->handlers 的数量
+ *     当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+ *
+ *     1. 如果 dpif->n_handlers != n_handlers, 销毁已经存在的 channels, 重新初始化 dpif 的 n_handlers 个 handler
+ *     2. 置 dpif 每个 handler 的 event_offset n_events 为 0
+ *     3. 遍历内核所有端口, 设置端口的 upcall_pids, 删除不在用的 channel
+ *
+ * type=netdev
+ *
+ *     什么也不做
+ */
 int
 dpif_handlers_set(struct dpif *dpif, uint32_t n_handlers)
 {
@@ -1596,6 +1789,10 @@ dpif_handlers_set(struct dpif *dpif, uint32_t n_handlers)
     return error;
 }
 
+/*
+ * type=netdev: 用 aux 初始化 dpif->upcall_aux, 用 cb 初始化 dpif->cb
+ * type=system: 什么也不做
+ */
 void
 dpif_register_upcall_cb(struct dpif *dpif, upcall_callback *cb, void *aux)
 {
@@ -1604,6 +1801,12 @@ dpif_register_upcall_cb(struct dpif *dpif, upcall_callback *cb, void *aux)
     }
 }
 
+/*
+ * type=netdev : dp_netdev->upcall_rwlock 解锁
+ * type=system: 什么也不做
+ *
+ * 调用方: ofproto/ofoproto-dpif-upcall.c
+ */
 void
 dpif_enable_upcall(struct dpif *dpif)
 {
@@ -1612,6 +1815,12 @@ dpif_enable_upcall(struct dpif *dpif)
     }
 }
 
+/*
+ * type=netdev : dp_netdev->upcall_rwlock 加锁
+ * type=system: 什么也不做
+ *
+ * 调用方: ofproto/ofoproto-dpif-upcall.c
+ */
 void
 dpif_disable_upcall(struct dpif *dpif)
 {
@@ -1644,6 +1853,12 @@ dpif_print_packet(struct dpif *dpif, struct dpif_upcall *upcall)
 
 /* If 'dpif' creates its own I/O polling threads, refreshes poll threads
  * configuration. */
+/*
+ * type=netdev : 如果 dp->n_dpdk_rxqs 或 dp->pmd_cmask 与 n_rxqs 与 cmask 不同, 删除 dp->poll_threads 所有元素之后重新初始化
+ * type=system : 什么也不做
+ *
+ * 在 ofproto/ofproto-dpif.c
+ */
 int
 dpif_poll_threads_set(struct dpif *dpif, unsigned int n_rxqs,
                       const char *cmask)
@@ -1678,6 +1893,30 @@ dpif_poll_threads_set(struct dpif *dpif, unsigned int n_rxqs,
  *
  * Returns 0 if successful, otherwise a positive errno value.  Returns EAGAIN
  * if no upcall is immediately available. */
+
+/*
+ * type=netdev : 什么也不做
+ *
+ * type=system :
+ *
+ *     handler = dpif->handlers[handler_id]
+ *     如果 handler->event_offset 小于 handler->n_event 表面上次 epoll_wait 的数据没有处理完, 继续处理.
+ *     否则 非阻塞地检查 handler->epoll_fd 是否有内核的 PACKET_IN 事件的数据包, 将可读的事件数量初始化 handler->n_event.
+ *     遍历 handler->events 数组, 成功读取一次数据后并初始化 upcall, 返回. 因此这个函数需要反复调用.
+ *
+ *     注: 这里假设 dpif->handlers[handler_id]->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
+ *
+ *     如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
+ *     否则
+ *         轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
+ *         如果成功接收, 初始化 upcall 后返回.
+ *         如果缓存不够, 重试 50 次后放弃.
+ *         如果数据 ch->sock 为非阻塞, event_offset++ 遍历下一个 epoll_events
+ *
+ *     注: 应该轮询的调用该函数直到返回 EAGAIN
+ *
+ *  在 ofoproto-dpif-upcall.c 中 recv_upcalls(struct handler *handler) 中调用该函数
+ */
 int
 dpif_recv(struct dpif *dpif, uint32_t handler_id, struct dpif_upcall *upcall,
           struct ofpbuf *buf)
@@ -1697,6 +1936,11 @@ dpif_recv(struct dpif *dpif, uint32_t handler_id, struct dpif_upcall *upcall,
 
 /* Discards all messages that would otherwise be received by dpif_recv() on
  * 'dpif'. */
+
+/*
+ * type=netdev : 什么也不做
+ * type=system : 将 dpif->handlers 中所有的 fd 监听的数据都丢弃
+ */
 void
 dpif_recv_purge(struct dpif *dpif)
 {
@@ -1710,6 +1954,19 @@ dpif_recv_purge(struct dpif *dpif)
  * 'dpif' has a message queued to be received with the recv member
  * function.  Since there can be multiple poll loops, 'handler_id' is
  * needed as index to identify the corresponding poll loop. */
+/*
+ * type=netdev :
+ *
+ *      什么也不做
+ *
+ * type=netlink :
+ *
+ *     dpif->hanelers[handler_id]->epoll_fd 中加入对 POLLIN 的监听
+ *     对于 dpif->hanelers[handler_id]->epoll_fd 所对应的 poll_node 节点,
+ *     如果已经存在于 poll_loop()->poll_nodes, 增加 POLLIN 事件.
+ *     否则加入 poll_loop()->poll_nodes
+ *
+ */
 void
 dpif_recv_wait(struct dpif *dpif, uint32_t handler_id)
 {
@@ -1721,6 +1978,11 @@ dpif_recv_wait(struct dpif *dpif, uint32_t handler_id)
 /*
  * Return the datapath version. Caller is responsible for freeing
  * the string.
+ */
+/*
+ * 如果 type=netdev, 返回 <built-in>
+ * 如果 type=netlink, 读取文件 /sys/module/openvswitch/version 中 80 个字符之后返回
+ *
  */
 char *
 dpif_get_dp_version(const struct dpif *dpif)
@@ -1736,6 +1998,11 @@ dpif_get_dp_version(const struct dpif *dpif)
 
 /* Obtains the NetFlow engine type and engine ID for 'dpif' into '*engine_type'
  * and '*engine_id', respectively. */
+
+/*
+ * 将 dpif->netflow_engine_type 和 dpif->netflow_engine_id 分别保存在
+ * engine_type, engine_id
+ */
 void
 dpif_get_netflow_ids(const struct dpif *dpif,
                      uint8_t *engine_type, uint8_t *engine_id)
@@ -1749,8 +2016,8 @@ dpif_get_netflow_ids(const struct dpif *dpif,
  * On success, returns 0 and stores the priority into '*priority'.
  * On failure, returns a positive errno value and stores 0 into '*priority'. */
 /*
- * type = "netdev" : 设置 priority = queue_id
- * type = "system" : if queue_id < 0xf000, *priority =  0x00010000 + queue_id + 1, 否则 *priority = 0
+ * type = "netdev" : 设置 priority = queue_id, 返回 0
+ * type = "system" : if queue_id < 0xf000, *priority =  0x00010000 + queue_id + 1 返回 0, 否则 *priority = 0, 返回 EINVAL
  */
 int
 dpif_queue_to_priority(const struct dpif *dpif, uint32_t queue_id,
@@ -1767,6 +2034,9 @@ dpif_queue_to_priority(const struct dpif *dpif, uint32_t queue_id,
     return error;
 }
 
+/*
+ * 用 name, netflow_engine_type, netflow_engine_id 初始化 dpif
+ */
 void
 dpif_init(struct dpif *dpif, const struct dpif_class *dpif_class,
           const char *name,
@@ -1785,6 +2055,9 @@ dpif_init(struct dpif *dpif, const struct dpif_class *dpif_class,
  * However, it may be called by providers due to an error on opening
  * that occurs after initialization.  It this case dpif_close() would
  * never be called. */
+/*
+ * 销毁 dpif
+ */
 void
 dpif_uninit(struct dpif *dpif, bool close)
 {
@@ -1813,6 +2086,9 @@ log_operation(const struct dpif *dpif, const char *operation, int error)
     }
 }
 
+/*
+ * error 不等于 0 且不等于 EEXIST, 返回 VLL_WARN; 否则 返回 VLL_DBG
+ */
 static enum vlog_level
 flow_message_log_level(int error)
 {
@@ -1824,6 +2100,10 @@ flow_message_log_level(int error)
     return (error && error != EEXIST) ? VLL_WARN : VLL_DBG;
 }
 
+/*
+ * error 不等于 0 且不等于 EEXIST, 不应该 VLL_WARN; 否则 返回 VLL_DBG
+ * TODO
+ */
 static bool
 should_log_flow_message(int error)
 {
@@ -1958,6 +2238,11 @@ log_flow_get_message(const struct dpif *dpif, const struct dpif_flow_get *get,
     }
 }
 
+/*
+ * type=system: 返回 false
+ * type=netdev: 返回 true
+ *
+ */
 bool
 dpif_supports_tnl_push_pop(const struct dpif *dpif)
 {

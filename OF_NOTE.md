@@ -57,6 +57,8 @@ ofconn->schedulers[i]->queues (i=0,1) 包含一系列以端口为索引的链表
 , 并将 socket 对应的 pid 传给内核, 内核当需要发送 PACKET_IN 消息时, 查询端口对应的 pid, 通过 NETLINK 将消息发送该
 PID, 用户态对应的 socket 就能收到该消息.
 
+此外, 用户态将端口变化的 fd 加入内核 NETLINK 的广播组, 当端口发生变化时, 内核会将端口改变的消息发送给用户态.
+
 
 /*
  * 保存 genl_family 对象, 以 genl_family->id 为索引
@@ -130,7 +132,7 @@ dpif_netlink_recv : 对其中一个 handler, 如果所有的事件都处理完, 
 dpif_netlink_recv_wait : 将 POLLIN 加入 handler 的监听
 dpif_netlink_recv_purge :  将 dpif->handlers 中所有的 fd 监听的数据都丢弃
 dpif_netlink_get_datapath_version : 获取 datapath 版本
-
+dpif_netdev_port_poll_wait : 监听内核发送的端口改变的广播消息.
 
 ##用户空间的 datapath, dpif_netdev ---  DPDK
 
@@ -1105,7 +1107,7 @@ void pinsched_get_stats(const struct pinsched *ps, struct pinsched_stats *stats)
     获取 pinsched 的统计信息
 
 
-##Datapath Interface
+##交换机接口(Datapath Interface)
 
 /* Protects against changes to 'dp_netdevs'. */
 static struct ovs_mutex dp_netdev_mutex = OVS_MUTEX_INITIALIZER;

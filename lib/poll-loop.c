@@ -153,7 +153,6 @@ poll_create_node(int fd, HANDLE wevent, short int events, const char *where)
 /*
  *  对于 fd 所对应的 poll_node 节点, 如果已经存在于 poll_loop()->poll_nodes, 增加 events 事件.  否则加入 poll_loop()->poll_nodes
  *  注: fd 用于 linux, wevent 用于 windows, 两者不能通知设置. fd=0&&wevent!=0 或 fd!=0&&wevent=0
- *
  */
 void
 poll_fd_wait_at(int fd, short int events, const char *where)

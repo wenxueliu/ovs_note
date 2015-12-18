@@ -536,8 +536,17 @@ udpif_set_threads(struct udpif *udpif, size_t n_handlers,
     if (!udpif->handlers && !udpif->revalidators) {
         int error;
 
-        //设置 dpif_netlink_class ->handlers_set(udpif->dpif, n_handlers)
-        //dpif_netdev_class 什么也不做
+        /*
+         * type=system : 重新配置 dpif->handlers 的数量
+         *     当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+         *
+         *     1. 如果 dpif->n_handlers != n_handlers, 销毁已经存在的 channels, 重新初始化 dpif 的 n_handlers 个 handler
+         *     2. 置 dpif 每个 handler 的 event_offset n_events 为 0
+         *     3. 遍历内核所有端口, 设置端口的 upcall_pids, 删除不在用的 channel
+         *
+         * type=netdev
+         *     什么也不做
+         */
         error = dpif_handlers_set(udpif->dpif, n_handlers);
         if (error) {
             VLOG_ERR("failed to configure handlers in dpif %s: %s",
@@ -736,19 +745,21 @@ recv_upcalls(struct handler *handler)
         ofpbuf_use_stub(recv_buf, recv_stubs[n_upcalls],
                         sizeof recv_stubs[n_upcalls]);
         /*
-         * handler = udpif->dpif->handlers[handler->handler_id]
-        *  handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 dupcall
-        *
-        * 注: 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
-        *
-        * 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
-        * 否则
-        *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
-        *     如果成功接收, 初始化 upcall 后返回.
-        *     如果缓存不够, 重试 50 次后放弃.
-        *     如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
-        *
-        * 注: 应该轮询的调用该函数直到返回 EAGAIN
+         * handler = dpif->handlers[handler_id]
+         * 如果 handler->event_offset 小于 handler->n_event 表面上次 epoll_wait 的数据没有处理完, 继续处理.
+         * 否则 检查 handler->epoll_fd 是否有内核的 PACKET_IN 事件的数据包, 将可读的事件数量初始化 handler->n_event.
+         * 遍历 handler->events 数组, 成功读取一次数据后并初始化 upcall, 返回. 因此这个函数需要反复调用.
+         *
+         * 如果 handler->event_offset >= handler->n_events, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
+         * 否则
+         *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
+         *     如果成功接收, 初始化 upcall 后返回.
+         *     如果缓存不够, 重试 50 次后放弃.
+         *     如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
+         *
+         * 注: 应该轮询的调用该函数直到返回 EAGAIN
+         *  1. 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据, 是否应该检查事件类型?
+         *  2. 如果遇到错误, 并且错误码不是 EAGAIN. 返回. 这样会导致某些消息的丢失. 不过这与 epoll 是 ET 还是 LT 有关
         */
         if (dpif_recv(udpif->dpif, handler->handler_id, dupcall, recv_buf)) {
             ofpbuf_uninit(recv_buf);
@@ -1220,6 +1231,17 @@ upcall_uninit(struct upcall *upcall)
 }
 
 /*
+ * @packet : 在流表缓存及流表中没有找到匹配的数据包
+ * @flow   :
+ * @ufid   :
+ * @pmd_id :
+ * @dpif_upcall_type :
+ * @userdata :
+ * @actions  :
+ * @wc       :
+ * @put_actions :
+ * @aux      :
+ *
  * TODO
  * 1. 用 aux->backer, packet, type, userdata, flow, ufid, pmd_id 初始化 upcall
  * 2. 根据 upcall->type 和 upcall->userdata 的类型来执行不同的动作

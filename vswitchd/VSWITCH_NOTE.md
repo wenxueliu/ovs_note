@@ -91,9 +91,12 @@ port 0: ovs-system (internal)
     port 3: p1 (internal)
     port 4: p2 (internal)
 
+ovs-ofctl add-flow ovs-switch "table=0,priority=65535,tcp,in_port=4,nw_src=10.1.2.25,nw_dst=10.1.2.100,tp_src=80 actions=output:4"
+
 屏蔽所有进入 OVS 的以太网广播数据包
 
 ovs-ofctl add-flow ovs-switch "table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, actions=drop"
+
 
 屏蔽 STP 协议的广播数据包
 

@@ -51,8 +51,9 @@ NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 * key 的生成
 * 流表的匹配
 * actions 的执行
-* 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么
+* 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么? 会
 * 如何与用户空间的 vswitchd 交互, 支持哪些交换操作
+* 如何保证 upcall 的包的顺序, 有哪些实现方式? 目前的实现方式是什么?
 
 ##vswitch 需要解决的问题
 
@@ -470,7 +471,6 @@ struct ovs_net {
         dp_stats->n_lost : 所有 cpu 的 n_lost
 
 ###static int ovs_dp_cmd_del(struct sk_buff *skb, struct genl_info *info)
-
 
     通过 skb->sk->net info->userhdr, info->attrs 找到待删除的 dp
     销毁 dp 下的每个端口

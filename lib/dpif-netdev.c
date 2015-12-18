@@ -1018,7 +1018,7 @@ dpif_netdev_close(struct dpif *dpif)
     free(dpif);
 }
 
-//如果 dpif 对应的 dp_netdev 还没有销毁, 引用技术减一
+//如果 dpif 对应的 dp_netdev 还没有销毁, 引用计数减一
 static int
 dpif_netdev_destroy(struct dpif *dpif)
 {
@@ -1693,6 +1693,7 @@ dpif_netdev_port_poll(const struct dpif *dpif_, char **devnamep OVS_UNUSED)
     return error;
 }
 
+//等待 dpif->dp->ports 中端口发生变化
 static void
 dpif_netdev_port_poll_wait(const struct dpif *dpif_)
 {
@@ -2537,9 +2538,7 @@ dpif_netdev_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread_)
  * @flows  : 保存 dump 之后的 flow
  * @max_flows : 最多 dump 的 flow 的数量
  *
- * 从 thread_->dump 开始遍历所有 pmd 下的 flow, 将 dump 之后的 flow 转换后, 保存在 flows
- * 中
- *
+ * 从 thread_->dump 开始遍历所有 pmd 下的 flow, 将 dump 之后的 flow 转换后, 保存在 flows 中
  */
 static int
 dpif_netdev_flow_dump_next(struct dpif_flow_dump_thread *thread_,
@@ -2920,7 +2919,7 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
  * 发送给 upcall(控制器或?)
  *
  * 从 dpif 定位到所属的 dp_netdev 对象 dp
- * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
+ * 1. 从 dp->poll_threads 中定位到线程 id 为 non_pmd_core_id 的 dp_netdev_pmd_thread 对象 pmd
  * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
  * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
  * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
