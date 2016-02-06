@@ -378,7 +378,32 @@ bridge_init_ofproto(const struct ovsrec_open_vswitch *cfg)
         }
     }
 
-    //
+    /*
+     * 1. 将 ofproto_dpif_class 加入 ofproto_classes
+     * 2. 拷贝 iface_hints 到 init_ofp_ports
+     * 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. 拷贝 init_ofp_ports 到 ofproto-dpif 的 init_ofp_ports
+     * 4. 注册 ofproto, fdb, mdb, dpif 命令
+     *
+     * 注册的命令:
+     *  ofproto/list
+     *  ofproto/trace
+     *  ofproto/trace-packet-out
+     *  fdb/show
+     *  fdb/flush
+     *  mdb/show
+     *  mdb/flush
+     *  dpif/dump-dps
+     *  dpif/dump-flows
+     *  ofproto/tnl-push-pop
+     *  upcall/show
+     *  upcall/disable-megaflows
+     *  upcall/enable-megaflows
+     *  upcall/disable-ufid
+     *  upcall/enable-ufid
+     *  upcall/set-flow-limit
+     *  revalidator/wait
+     *  revalidator/purge
+     */
     ofproto_init(&iface_hints);
 
     shash_destroy_free_data(&iface_hints);
