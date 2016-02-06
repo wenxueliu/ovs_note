@@ -1,18 +1,106 @@
+
+OVS 应该关闭网卡的 LRO 功能
+
+
 ##基本概念
 
 参考 ofproto-provider.h
 
-###ofproto
+###ofproto 交换机链路聚合
 
-交换机
+ovs-vsctl add-br ovsbr1
 
-###ofport
+ovs-vsctl add-bond <bridge name> <bond name> <list of interfaces>
+ovs-appctl bond/show <bond name>
+ovs-appctl lacp/show <bond name>
+ovs-vsctl list port <bond name>
 
-端口
+**方法一**
 
-###rule
+ovs-vsctl add-bond ovsbr1 bond0 eth1 eth3
+ovs-vsctl set port bond0 lacp=active
 
-流表
+**方法二**
+
+ovs-vsctl add-bond ovsbr1 bond0 eth1 eth3 lacp=active
+ovs-appctl bond/show bond0
+ovs-appctl lacp/show bond0
+ovs-vsctl list port bond0
+
+###ofport 端口
+
+ovs-ofctl dump-ports ovs0
+
+    OFPST_PORT reply (xid=0x2): 8 ports
+      port LOCAL: rx pkts=1366873, bytes=462487719, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=28852724, bytes=2334930553, drop=0, errs=0, coll=0
+      port  5: rx pkts=49425127, bytes=8122230011, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=90807573, bytes=16046207616, drop=0, errs=0, coll=0
+      port  1: rx pkts=106886595, bytes=38991858694, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=135400145, bytes=14595057059, drop=0, errs=0, coll=0
+      port  4: rx pkts=34392345, bytes=3074145124, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=30962095, bytes=2897800325, drop=0, errs=0, coll=0
+      port  6: rx pkts=0, bytes=0, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=26072601, bytes=1984434045, drop=0, errs=0, coll=0
+      port  7: rx pkts=0, bytes=0, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=26072601, bytes=1984434045, drop=0, errs=0, coll=0
+      port  2: rx pkts=151805437, bytes=18752433580, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=170173374, bytes=42169459971, drop=0, errs=0, coll=0
+      port  3: rx pkts=40831778, bytes=7006642394, drop=0, errs=0, frame=0, over=0, crc=0
+               tx pkts=59534299, bytes=8273995081, drop=0, errs=0, coll=0
+
+ovs-ofctl mod-ports ovs0 eth0
+
+
+#限速
+
+    "ingress_policing_rate": the maximum rate (in Kbps) that this VM should be allowed to send.
+    "ingress_policing_burst": a parameter to the policing algorithm to indicate the maximum amount of data (in Kb) that this interface can send beyond the policing rate.
+
+    ovs-vsctl -- set port tap0  qos=@newqos \
+    -- --id=@newqos create qos type=linux-htb other-config:max-rate=100000000 queues=0=@q0,1=@q1 \
+    -- --id=@q0 create queue other-config:min-rate=100000000 other-config:max-rate=100000000 \
+    -- --id=@q1 create queue other-config:min-rate=500000000 \
+
+ovs-vsctl set interface eth0 ingress_policing_rate=1000
+ovs-vsctl set interface eth0 ingress_policing_burst=1000
+
+ovs-vsctl list interface eth0
+ovs-vsctl list qos
+ovs-vsctl list queue
+
+ovs-vsctl -- destroy QoS tap0 -- clear Port tap0 qos
+ovs-vsctl -- destroy queue
+ovs-vsctl -- destroy qos
+
+Open vSwitch uses the Linux "traffic-control" capability for rate-limiting. If you are not seeing
+the configured rate-limit have any effect, make sure that your kernel is built with "ingress qdisc"
+enabled, and that the user-space utilities (e.g., /sbin/tc) are installed.
+
+
+Open vSwitch's rate-limiting uses policing, which does not queue packets. It drops any packets beyond
+the specified rate. Specifying a larger burst size lets the algorithm be more forgiving, which is
+important for protocols like TCP that react severely to dropped packets. Setting a burst size of less
+than than the MTU (e.g., 10 kb) should be avoided.
+
+For TCP traffic, setting a burst size to be a sizeable fraction (e.g., > 10%) of the overall policy rate
+helps a flow come closer to achieving the full rate. If a burst size is set to be a large fraction of
+the overall rate, the client will actually experience an average rate slightly higher than the specific
+policing rate.
+
+For UDP traffic, set the burst size to be slightly greater than the MTU and make sure that your performance
+tool does not send packets that are larger than your MTU (otherwise these packets will be fragmented,
+causing poor performance).
+
+
+###rule 流表
+
+
+//packets with a multicast source address are not valid, so we can add a flow to drop them at ingress to the switch with:
+ovs-ofctl add-flow br0 "table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, actions=drop"
+
+//A switch should also not forward IEEE 802.1D Spanning Tree Protocol (STP) packets
+ovs-ofctl add-flow br0 "table=0, dl_dst=01:80:c2:00:00:00/ff:ff:ff:ff:ff:f0, actions=drop"
 
 ###ofgroup
 
@@ -41,12 +129,7 @@ ovs-vsctl del-port br0 eth-0-5
 ovs-vsctl del-port br0 eth-0-6
 ovs-vsctl add-bond br0 bond2 eth-0-5 eth-0-5 bond_mode=balance-slb -- set interface eth-0-5 type=switch -- set interface eth-0-6 type=switch
 
-#限速
 
-sudo ovs-vsctl list interface tap1
-sudo ovs-vsctl set interface tap1 ingress_policing_burst=100
-sudo ovs-vsctl set interface tap1 ingress_policing_rate=1000
-sudo ovs-vsctl list Interface tap1
 
 组表
 
@@ -80,6 +163,8 @@ ovs-vsctl set Interface p0 type=internal
 Linux 系统中创建一个可以用来收发数据的模拟网络设备。我们可以为这个网络设备配置
 IP 地址、进行数据监听等等。
 
+ovs-vsctl list controller
+
 ovs-dpctl show
 
 system@ovs-system:
@@ -112,6 +197,19 @@ ovs-ofctl add-flow s1 "table=0,priority=65535,arp,arp_tpa=10.0.0.254 actions=LOC
 
 sudo ovs-vsctl -- --columns=name,ofport list Interface
 
+监控通信
+
+sudo ofctl snoop
+
+
+
+配置
+ovsdb-tool show-log /etc/openvswitch/conf.db
+
+日志
+
+ovs-appctl vlog/list
+ovs-appctl vlog/set ofproto:file:dbg
 
 http://openvswitch.org/pipermail/discuss/2014-December/015968.html
 
@@ -345,5 +443,3 @@ static void process_command(struct unixctl_conn *conn, struct jsonrpc_msg *reque
     unixctl_command_register("exit", "", 0, 0, ovs_vswitchd_exit, &exiting);
 
     unixctl_command_register("memory/show", "", 0, 0, memory_unixctl_show, NULL);
-
-
