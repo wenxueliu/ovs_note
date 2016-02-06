@@ -141,6 +141,7 @@ tun_metadata_init(void)
     ovs_mutex_lock(&tab_mutex);
 
     if (!ovsrcu_get_protected(struct tun_table *, &metadata_tab)) {
+        //metadata_tab 为 tun_table
         ovsrcu_set(&metadata_tab, table_alloc(NULL));
     }
 

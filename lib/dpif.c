@@ -114,13 +114,46 @@ struct seq *tnl_conf_seq;
 /*
  * 注册命令, 并将 dpif_netdev_class, dpif_netlink_class 加入 dpif_classes, 并初始化
  *
- * 1. 注册 dpctl 命令
- * 2. 注册 tunnel port 命令
- * 3. 注册 tunnel arp cache 初始化
- * 4. 注册 route 命令
- * 5. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
- * (调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes)
  *
+ * 1. 注册命令
+ *    1) 对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
+ *    2) 注册
+ *       tnl/ports/show
+ *       tnl/arp/show
+ *       tnl/arp/flush
+ *       ovs/route/add
+ *       ovs/route/show
+ *       ovs/route/del
+ *       ovs/route/lookup
+ *       dpif-netdev/pmd-stats-show
+ *       dpif-netdev/pmd-stats-clear
+ * 2. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+ * (dpif_netdev_class->init(), dpif_netlink_class->init() 并将 dpif_netdev_class
+ * 与 dpif_netlink_class 加入 dpif_classes)
+ *
+ *
+ * ###dpif_netdev_class->init()
+ *
+ * 注册
+ *       dpif-netdev/pmd-stats-show
+ *       dpif-netdev/pmd-stats-clear
+ * 命令
+ *
+ * ###dpif_netlink_class->init()
+ *
+ * 1. 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+ * 2. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+ * 3. 确保 OVS_VPORT_FAMILY 中存在 OVS_VPORT_MCGROUP 对应 ID 的 ovs_vport_mcgroup
+ *
+ * genl_family:
+ *       id                 name
+ * OVS_DATAPATH_FAMILY ovs_datapath_family
+ * OVS_VPORT_FAMILY    ovs_vport_family
+ * OVS_FLOW_FAMILY     ovs_flow_family
+ * OVS_PACKET_FAMILY   ovs_packet_family
+ *
+ *                   CTRL_ATTR_MCAST_GRP_NAME CTRL_ATTR_MCAST_GRP_ID
+ * OVS_VPORT_FAMILY     OVS_VPORT_FAMILY         ovs_vport_mcgroup
  */
 static void
 dp_initialize(void)
@@ -131,19 +164,23 @@ dp_initialize(void)
         int i;
 
         tnl_conf_seq = seq_create();
-        //注册 dpctl 命令
+        //1. 对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
         dpctl_unixctl_register();
         /*
          * classifier_init(&cls, flow_segment_u64s);
-         * 注册 tunnel port 命令
+         * 2. 注册 tnl/ports/show 命令
          */
         tnl_port_map_init();
-        //注册tunnel arp 命令
+        // 3. 注册 tnl/arp/show, tnl/arp/flush 命令
         tnl_arp_cache_init();
         /*
-        * 1. classifier_init(&cls, NULL)
-        * 2. 注册 route 命令
-        */
+         * 1. classifier_init(&cls, NULL)
+         * 2. 注册 route 命令
+         *    ovs/route/add
+         *    ovs/route/show
+         *    ovs/route/del
+         *    ovs/route/lookup
+         */
         route_table_init();
 
         /* static const struct dpif_class *base_dpif_classes[] = {
@@ -156,7 +193,7 @@ dp_initialize(void)
          * 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
          * 0. 检查 dpif_netlink_class 和 dpif_netdev_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
          * 1. 调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
-         * 2. 将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class
+         * 2. 将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_classes
          */
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
@@ -171,7 +208,7 @@ dp_initialize(void)
  *
  * 0. 检查 new_class 是否已经加入 dpif_classes 和 dpif_blacklist, 如果加入返回, 否则继续步骤 1
  * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
- * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_classes)
  *
  * 注意: 在 dpif_classes 中每个 new_class->type 是唯一的
  */
@@ -216,7 +253,7 @@ dp_register_provider__(const struct dpif_class *new_class)
  *
  * 0. 检查 new_class 是否已经加入 dpif_classes 或 dpif_blacklist, 如果加入返回, 否则继续步骤 1
  * 1. 调用 new_class->init() (实际调用 dpif_netlink_class->init() 和 dpif_netdev_class->init())
- * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_class)
+ * 2. 将 new_class 加入 dpif_classes(将 dpif_netdev_class 和 dpif_netlink_class 加入 dpif_classes)
  *
  * 注意: 在 dpif_classes 中每个 new_class->type 是唯一的
  */
@@ -292,9 +329,24 @@ dp_blacklist_provider(const char *type)
  * The caller must first initialize the sset. */
 
 /*
- * 注册 tunnel port, tunnel arp, dpctl, route 命令
- * 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
- * 将 base_dpif_classes 中的每个元素的 type 加入 types (实际上 types 包含 dpif_netlink_class->type(system), dpif_netdev_class->type(netdev) 两个元素)
+ * 注册命令, 并将 dpif_netdev_class, dpif_netlink_class 加入 dpif_classes, 并初始化, 之后将 dpif_classes 中每个元素 type 加入 types
+ *
+ * 1. 注册命令
+ *    1) 对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
+ *    2) 注册
+ *       tnl/ports/show
+ *       tnl/arp/show
+ *       tnl/arp/flush
+ *       ovs/route/add
+ *       ovs/route/show
+ *       ovs/route/del
+ *       ovs/route/lookup
+ *       dpif-netdev/pmd-stats-show
+ *       dpif-netdev/pmd-stats-clear
+ * 2. 调用 dpif_netlink_class 和 dpif_netdev_class 的 init(), 将其加入 dpif_classes
+ *    将 base_dpif_classes 中的每个元素的 type 加入 types
+ *    (实际上 types 包含 dpif_netlink_class->type(system), dpif_netdev_class->type(netdev) 两个元素)
+ * 3. dpif_classes 中的元素 type 加入 types
  */
 void
 dp_enumerate_types(struct sset *types)
@@ -302,15 +354,51 @@ dp_enumerate_types(struct sset *types)
     struct shash_node *node;
 
     /*
-    * 1. 注册 dpctl 命令
-    * 2. 注册 tunnel port 命令
-    * 3. 注册 tunnel arp cache 初始化
-    * 4. 注册 route 命令
-    * 5. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
-    * 其中 5: 调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
-    */
+     * 注册命令, 并将 dpif_netdev_class, dpif_netlink_class 加入 dpif_classes, 并初始化
+     *
+     *
+     * 1. 注册命令
+     *    1) 对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
+     *    2) 注册
+     *       tnl/ports/show
+     *       tnl/arp/show
+     *       tnl/arp/flush
+     *       ovs/route/add
+     *       ovs/route/show
+     *       ovs/route/del
+     *       ovs/route/lookup
+     *       dpif-netdev/pmd-stats-show
+     *       dpif-netdev/pmd-stats-clear
+     * 2. 调用 base_dpif_classes 中元素的 init() 方法并加入 dpif_classes
+     * (dpif_netdev_class->init(), dpif_netlink_class->init() 并将 dpif_netdev_class
+     * 与 dpif_netlink_class 加入 dpif_classes)
+     *
+     * ###dpif_netdev_class->init()
+     *
+     * 注册
+     *       dpif-netdev/pmd-stats-show
+     *       dpif-netdev/pmd-stats-clear
+     * 命令
+     *
+     * ###dpif_netlink_class->init()
+     *
+     * 1. 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+     * 2. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+     * 3. 确保 OVS_VPORT_FAMILY 中存在 OVS_VPORT_MCGROUP 对应 ID 的 ovs_vport_mcgroup
+     *
+     * genl_family:
+     *       id                 name
+     * OVS_DATAPATH_FAMILY ovs_datapath_family
+     * OVS_VPORT_FAMILY    ovs_vport_family
+     * OVS_FLOW_FAMILY     ovs_flow_family
+     * OVS_PACKET_FAMILY   ovs_packet_family
+     *
+     *                   CTRL_ATTR_MCAST_GRP_NAME CTRL_ATTR_MCAST_GRP_ID
+     * OVS_VPORT_FAMILY     OVS_VPORT_FAMILY         ovs_vport_mcgroup
+     */
     dp_initialize();
 
+    //3. dpif_classes 中的元素 type 加入 types
     ovs_mutex_lock(&dpif_mutex);
     SHASH_FOR_EACH(node, &dpif_classes) {
         const struct registered_dpif_class *registered_class = node->data;
@@ -360,11 +448,13 @@ dp_class_lookup(const char *type)
  * @type  : 目前为 system 或 netdev
  * @names : 目前 type=system, 包含内核所有 dpif_netlink_dp 的 name; type=netdev, 包含 dp_netdev 的 name
  *
- * 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
- * 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
+ * 将 type 的 dpif_class 的 name 加入 names
+ *
+ * 1. 在 dpif_classes 中查找 type 对应的 registered_dpif_class.
+ * 2. 调用 registered_class->dpif_class->enumerate(names, registered_dpif_class->dpif_class) 方法初始化 names
  *
  * NOTE: 实际调用 dpif_netlink_class->enumerate 或 dpif_netdev_class->enumerate
- * 当为 dpif_netdev_class  : 从 dp_netdevs 中找到 class = dpif_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 names 中
+ * 当为 dpif_netdev_class  : 从 dp_netdevs 中找到 class = dpif_nedev_class 的 dp_netdev 对象, 将 dp_netdev->name 保存在 names 中
  * 当为 dpif_netlink_class : 遍历查询内核中的所有 dpif_netlink_dp 对象, 将其 name 加入 names
  */
 int
@@ -566,7 +656,7 @@ dpif_create(const char *name, const char *type, struct dpif **dpifp)
  * errno value. On success stores a pointer to the datapath in '*dpifp',
  * otherwise a null pointer. */
 /*
- * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法, 把创建的对象指向 backer->dpif
+ * 在 dpif_classes 根据 type 找到注册的 dpif_class, 调用 dpif_class->dpif_class->open() 方法, dpifp 指向创建的对象
  * (
  * 如果 type = system 调用 dpif_netlink_class->open(dpif_netlink_class,name,create,dpifp)
  * 如果 type = netdev 调用 dpif_netdev_class->open(dpif_netlink_class,name,create,dpifp)

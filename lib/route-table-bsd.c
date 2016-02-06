@@ -179,6 +179,10 @@ route_table_get_change_seq(void)
 /*
  * 1. classifier_init(&cls, NULL)
  * 2. 注册 route 命令
+ *    ovs/route/add
+ *    ovs/route/show
+ *    ovs/route/del
+ *    ovs/route/lookup
  */
 void
 route_table_init(void)

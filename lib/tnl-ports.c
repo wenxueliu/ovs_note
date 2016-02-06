@@ -191,7 +191,7 @@ tnl_port_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
 /*
  * classifier_init(&cls, flow_segment_u64s);
- * 注册 tunnel port 命令
+ * 注册 tnl/ports/show 命令
  */
 void
 tnl_port_map_init(void)

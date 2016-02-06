@@ -1662,7 +1662,7 @@ dpctl_unixctl_handler(struct unixctl_conn *conn, int argc, const char *argv[],
     ds_destroy(&ds);
 }
 
-//注册 dpctl 命令
+//对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
 void
 dpctl_unixctl_register(void)
 {

@@ -180,6 +180,9 @@ static inline void eth_addr_random(uint8_t ea[ETH_ADDR_LEN])
     random_bytes(ea, ETH_ADDR_LEN);
     eth_addr_mark_random(ea);
 }
+/*
+ * ea[0] 中 eth_addr_mark_random(ea) 没有起作用
+ */
 static inline void eth_addr_nicira_random(uint8_t ea[ETH_ADDR_LEN])
 {
     eth_addr_random(ea);

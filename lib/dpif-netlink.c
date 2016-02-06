@@ -1278,6 +1278,9 @@ dpif_netlink_port_del__(struct dpif_netlink *dpif, odp_port_t port_no)
     return error;
 }
 
+/*
+ * 向内核发送从 dpif 删除端口 port_no 的请求
+ */
 static int
 dpif_netlink_port_del(struct dpif *dpif_, odp_port_t port_no)
 {
@@ -1716,8 +1719,6 @@ dpif_netlink_port_dump_done(const struct dpif *dpif_ OVS_UNUSED, void *state_)
  *
  * NOTE:
  * 当端口被删除的时候, refresh_channels = true
- *
- *
  */
 static int
 dpif_netlink_port_poll(const struct dpif *dpif_, char **devnamep)
@@ -1827,6 +1828,7 @@ dpif_netlink_port_poll(const struct dpif *dpif_, char **devnamep)
     }
 }
 
+//等待内核发送端口发生变化的广播消息
 static void
 dpif_netlink_port_poll_wait(const struct dpif *dpif_)
 {
@@ -3489,11 +3491,11 @@ dpif_netlink_recv_windows(struct dpif_netlink *dpif, uint32_t handler_id,
 
 /*
  * handler = dpif->handlers[handler_id]
- * handler 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
+ * 如果 handler->event_offset 小于 handler->n_event 表面上次 epoll_wait 的数据没有处理完, 继续处理.
+ * 否则 非阻塞地检查 handler->epoll_fd 是否有内核的 PACKET_IN 事件的数据包, 将可读的事件数量初始化 handler->n_event.
+ * 遍历 handler->events 数组, 成功读取一次数据后并初始化 upcall, 返回. 因此这个函数需要反复调用.
  *
- * 注: 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
- *
- * 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
+ * 如果 handler->event_offset >= handler->n_events, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
  * 否则
  *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
  *     如果成功接收, 初始化 upcall 后返回.
@@ -3501,6 +3503,8 @@ dpif_netlink_recv_windows(struct dpif_netlink *dpif, uint32_t handler_id,
  *     如果数据ch->sock为非阻塞, event_offset++ 遍历下一个 epoll_events
  *
  * 注: 应该轮询的调用该函数直到返回 EAGAIN
+ *  1. 这里假设 handler->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据, 是否应该检查事件类型?
+ *  2. 如果遇到错误, 并且错误码不是 EAGAIN. 返回. 这样会导致某些消息的丢失. 不过这与 epoll 是 ET 还是 LT 有关
  */
 static int
 dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
@@ -3588,7 +3592,6 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
             * upcall->out_tun_key = a[OVS_PACKET_ATTR_EGRESS_TUN_KEY]
             * upcall->actions = a[OVS_PACKET_ATTR_ACTIONS]
             * upcall->packet = a[OVS_PACKET_ATTR_PACKET]
-            *
             */
             error = parse_odp_packet(dpif, buf, upcall, &dp_ifindex);
             if (!error && dp_ifindex == dpif->dp_ifindex) {
@@ -3604,19 +3607,19 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
 #endif
 
 /*
-* dpif->handlers[handler_id] 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
-*
-* 注: 这里假设 dpif->handlers[handler_id]->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
-*
-* 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
-* 否则
-*     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
-*     如果成功接收, 初始化 upcall 后返回.
-*     如果缓存不够, 重试 50 次后放弃.
-*     如果数据 ch->sock 为非阻塞, event_offset++ 遍历下一个 epoll_events
-*
-* 注: 应该轮询的调用该函数直到返回 EAGAIN
-*/
+ * dpif->handlers[handler_id] 接受内核的 PACKET_IN 事件的数据包, 成功读取一次数据后并初始化 upcall
+ *
+ * 注: 这里假设 dpif->handlers[handler_id]->events 为 POLLIN 事件. 因为调用 recv 接受数据. 而不是发送数据
+ *
+ * 如果 handler->event_offset >= handler->n_handlers, 表明所有的事件都已经处理完成, 重新监听 handler->epoll_fd 的 handler->epoll_events 事件
+ * 否则
+ *     轮询接受所有的 handler->epoll_events, 阻塞地接受 ch->sock 准备好的数据:
+ *     如果成功接收, 初始化 upcall 后返回.
+ *     如果缓存不够, 重试 50 次后放弃.
+ *     如果数据 ch->sock 为非阻塞, event_offset++ 遍历下一个 epoll_events
+ *
+ * 注: 应该轮询的调用该函数直到返回 EAGAIN
+ */
 static int
 dpif_netlink_recv(struct dpif *dpif_, uint32_t handler_id,
                   struct dpif_upcall *upcall, struct ofpbuf *buf)
@@ -3742,7 +3745,7 @@ dpif_netlink_recv_purge(struct dpif *dpif_)
 
     fat_rwlock_wrlock(&dpif->upcall_lock);
     /*
-     * 找到第一个端口对应的 sock 不为 NULL 的端口号, 丢弃该端口所有 socket * 收到的数据包
+     * 将 dpif->handlers 中所有的 fd 监听的数据都丢弃
      */
     dpif_netlink_recv_purge__(dpif);
     fat_rwlock_unlock(&dpif->upcall_lock);
