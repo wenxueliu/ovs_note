@@ -1,5 +1,101 @@
 
+mlockall 对系统性能的影响?
 
+Core component in the system:
+* Communicates with outside world using OpenFlow
+* Communicates with ovsdb-server using OVSDB protocol
+* Communicates with kernel module over netlink
+* Communicates with the system through netdev abstract interface
+
+ovs-appctl 命令支持参数
+
+upcall/show
+upcall/disable-megaflows
+upcall/ensable-megaflows
+upcall/disable-ufid
+upcall/enable-ufid
+upcall/set-flow-limit
+revalidator/wait
+revalidator/purge
+
+ofproto/list
+ofproto/trace
+ofproto/trace-packet-out
+fdb/flush
+fdb/show
+mdb/flush
+mdb/show
+dpif/dump-dps
+dpif/show
+dpif/dump-flows
+ofproto/tnl-push-pop
+
+
+
+
+##Ofproto
+
+通过修改 N_TABLES 可以改变的数量. 可以增加到编译选项?
+
+OFPP_LOCAL : 如果 ofproto_port->name 与 ofproto->name
+//目前只包含 ofproto_dpif_class
+/* All registered ofproto classes, in probe order. */
+static const struct ofproto_class **ofproto_classes;
+static size_t n_ofproto_classes;         //ofproto_classes 实际的元素数量
+static size_t allocated_ofproto_classes; //ofproto_classes 的容量
+
+unsigned ofproto_flow_limit = OFPROTO_FLOW_LIMIT_DEFAULT;
+unsigned ofproto_max_idle = OFPROTO_MAX_IDLE_DEFAULT;
+
+size_t n_handlers, n_revalidators;
+size_t n_dpdk_rxqs;
+char *pmd_cpu_mask;
+
+/* Map from datapath name to struct ofproto, for use by unixctl commands. */
+static struct hmap all_ofprotos = HMAP_INITIALIZER(&all_ofprotos);
+
+/*
+ * 在创建 ofproto_dpif 的时候, 如果 ofproto_dpif->backer->dpif 存在与 init_ofp_ports 中,
+ * 从 init_ofp_ports 中删除, 将其加入 ofproto-dpif->ports 成员
+ *
+ * 初始化完 ofproto, 就将 init_ofp_ports 中属于 ofproto 的端口删除
+ */
+/* Initial mappings of port to OpenFlow number mappings. */
+static struct shash init_ofp_ports = SHASH_INITIALIZER(&init_ofp_ports);
+
+/* The default value of true waits for flow restore. */
+static bool flow_restore_wait = true;
+
+###核心函数
+
+ofproto_init() :
+ofproto_class_register()    : 将 ofproto_class 加入 ofproto_classes 中
+ofproto_class_unregister()  : 将 ofproto_class 从 ofproto_classes 中删除
+ofproto_enumerate_types()   : ofproto_classes 每个元素的 enumerate_types 方法
+ofproto_enumerate_names()   : ofproto_classes 每个元素的 enumerate_names 方法
+ofproto_create()            : 
+
+具体实现见 ofproto/ofproto.c ofproto/ofproto-dpif.c
+
+###ofport
+
+ofport->port_by_name 保持了所有端口的名称. 在添加端口时, 基于此来检查端口是否已经添加.
+
+ofproto 与 ofport 通过 ofproto->ports 关联
+
+
+###revalidator 
+
+enum revalidate_reason {
+    REV_RECONFIGURE = 1,       /* Switch configuration changed. */
+    REV_STP,                   /* Spanning tree protocol port status change. */
+    REV_RSTP,                  /* RSTP port status change. */
+    REV_BOND,                  /* Bonding changed. */
+    REV_PORT_TOGGLED,          /* Port enabled or disabled by CFM, LACP, ...*/
+    REV_FLOW_TABLE,            /* Flow table changed. */
+    REV_MAC_LEARNING,          /* Mac learning changed. */
+    REV_MCAST_SNOOPING,        /* Multicast snooping changed. */
+};
 
 
 
@@ -338,6 +434,7 @@ enum nx_packet_in_format {
 struct ofproto_controller {
     char *target;               /* e.g. "tcp:127.0.0.1" */
     int max_backoff;            /* Maximum reconnection backoff, in seconds. */
+    //如果不为0, 最少为 5 s
     int probe_interval;         /* Max idle time before probing, in seconds. */
     enum ofproto_band band;     /* In-band or out-of-band? */
     bool enable_async_msgs;     /* Initially enable asynchronous messages? */
@@ -366,6 +463,112 @@ struct ofservice {
     uint32_t allowed_versions;  /* OpenFlow protocol versions that may
                                  * be negotiated for a session. */
 };
+
+####openflow port
+
+/* A port within an OpenFlow switch.
+ *
+ * 'name' and 'type' are suitable for passing to netdev_open(). */
+struct ofproto_port {
+    char *name;                 /* Network device name, e.g. "eth0". */
+    char *type;                 /* Network device type, e.g. "system". */
+    ofp_port_t ofp_port;        /* OpenFlow port number. */
+};
+
+#### vlan mode
+
+/* The behaviour of the port regarding VLAN handling */
+enum port_vlan_mode {
+    /* This port is an access port.  'vlan' is the VLAN ID.  'trunks' is
+     * ignored. */
+    PORT_VLAN_ACCESS,
+
+    /* This port is a trunk.  'trunks' is the set of trunks. 'vlan' is
+     * ignored. */
+    PORT_VLAN_TRUNK,
+
+    /* Untagged incoming packets are part of 'vlan', as are incoming packets
+     * tagged with 'vlan'.  Outgoing packets tagged with 'vlan' stay tagged.
+     * Other VLANs in 'trunks' are trunked. */
+    PORT_VLAN_NATIVE_TAGGED,
+
+    /* Untagged incoming packets are part of 'vlan', as are incoming packets
+     * tagged with 'vlan'.  Outgoing packets tagged with 'vlan' are untagged.
+     * Other VLANs in 'trunks' are trunked. */
+    PORT_VLAN_NATIVE_UNTAGGED
+};
+
+#### Bundle ????
+
+/* Registers a "bundle" associated with client data pointer 'aux' in 'ofproto'.
+ * A bundle is the same concept as a Port in OVSDB, that is, it consists of one
+ * or more "slave" devices (Interfaces, in OVSDB) along with a VLAN
+ * configuration plus, if there is more than one slave, a bonding
+ * configuration.
+ *
+ * If 'aux' is already registered then this function updates its configuration
+ * to 's'.  Otherwise, this function registers a new bundle.
+ *
+ * Bundles only affect the NXAST_AUTOPATH action and output to the OFPP_NORMAL
+ * port. */
+
+
+/* Configuration of bundles. */
+struct ofproto_bundle_settings {
+    char *name;                 /* For use in log messages. */
+
+    ofp_port_t *slaves;         /* OpenFlow port numbers for slaves. */
+    size_t n_slaves;
+
+    enum port_vlan_mode vlan_mode; /* Selects mode for vlan and trunks */
+    int vlan;                   /* VLAN VID, except for PORT_VLAN_TRUNK. */
+    unsigned long *trunks;      /* vlan_bitmap, except for PORT_VLAN_ACCESS. */
+    bool use_priority_tags;     /* Use 802.1p tag for frames in VLAN 0? */
+
+    struct bond_settings *bond; /* Must be nonnull iff if n_slaves > 1. */
+
+    struct lacp_settings *lacp;              /* Nonnull to enable LACP. */
+    struct lacp_slave_settings *lacp_slaves; /* Array of n_slaves elements. */
+
+    /* Linux VLAN device support (e.g. "eth0.10" for VLAN 10.)
+     *
+     * This is deprecated.  It is only for compatibility with broken device
+     * drivers in old versions of Linux that do not properly support VLANs when
+     * VLAN devices are not used.  When broken device drivers are no longer in
+     * widespread use, we will delete these interfaces. */
+    ofp_port_t realdev_ofp_port;/* OpenFlow port number of real device. */
+};
+
+#### flow Table
+
+struct ofproto_table_settings {
+    char *name;                 /* Name exported via OpenFlow or NULL. */
+    unsigned int max_flows;     /* Maximum number of flows or UINT_MAX. */
+
+    /* These members, together with OpenFlow OFPT_TABLE_MOD, determine the
+     * handling of an attempt to add a flow that would cause the table to have
+     * more than 'max_flows' flows:
+     *
+     *    - If 'enable_eviction' is false and OFPT_TABLE_MOD does not enable
+     *      eviction, overflows will be rejected with an error.
+     *
+     *    - If 'enable_eviction' is true or OFPT_TABLE_MOD enables eviction, an
+     *      overflow will cause a flow to be removed.  The flow to be removed
+     *      is chosen to give fairness among groups distinguished by different
+     *      values for the 'n_groups' subfields within 'groups'. */
+    bool enable_eviction;
+    struct mf_subfield *groups;
+    size_t n_groups;
+
+    /*
+     * Fields for which prefix trie lookup is maintained.
+     */
+    unsigned int n_prefix_fields;
+    enum mf_field_id prefix_fields[CLS_MAX_TRIES];
+};
+
+max_flows   : 由 bridge->cfg->n_flow_limit 配置
+groups      : 由 bridge->cfg->n_groups 个
 
 ####fail_open 模式
 
@@ -409,6 +612,8 @@ enum ofproto_fail_mode {
 };
 
 ###操作
+
+控制器信息 connmgr_get_controller_info 可以获取当前控制器的状态信息
 
 void connmgr_run(struct connmgr *mgr, void ( *handle_openflow)(struct ofconn *, const struct ofpbuf *ofp_msg))
 
@@ -1001,8 +1206,8 @@ struct ofpbuf *ofpbuf_clone(const struct ofpbuf *buffer)
 
 ###PACKET_IN 消息
 
-每个 pinsched 中的 queues 中包含 N 个 pinqueue, 每个 pinqueue
-包含很多 ofpbuf 对象, 一个 ofpbuf 就是一个 PACKET_IN 消息
+每个 pinsched 中的 queues 中包含 N(pinsched->n_queued) 个 pinqueue, 每个 pinqueue
+包含很多 ofpbuf 对象(pinqueue->packets), 一个 ofpbuf 就是一个 PACKET_IN 消息
 
 每个 pinqueue->node 被 hash_int(port_no) 后保存在 pinsched->queues 的某一个队列中
 
@@ -1010,11 +1215,17 @@ token_bucket 中 rate 代表 N packets/msec, 每过 M msec, token + N*M, 但是 
 不能超过 burst, last_fill 代表上次更新时间. 如果 packet_send 每秒调用的频率大于
 rate, 后续的包就必须加入队列, 而不是直接发送. packet_send() 每次调用, 检查 ps
 如果已经超出速度限制就将包加入 ps 的队列中, 否则直接加入 txq 中, 准备发送, 当
-包的数量超出了 burst 的限制, 就丢掉最长队里的第一个包.
+包的数量超出了 burst 的限制, 就丢掉最长队里的第一个包, 经新的包加入 ps->queues 中.
 
-* pinsched_create() 创建 pinsched 对象
-* pinsched_destroy() 销毁 pinsched 对象
-* packet_send() 发送数据包
+这里的速率限制参数由 ofproto_controller 中 rate_limit, burst_limit 配置,
+初始化由 ofservice 中 rate_limit, burst_limit 决定, ofservice 中实际由
+ofproto_controller 设置
+
+* pinsched_create() : 创建 pinsched 对象
+* pinsched_destroy(): 销毁 pinsched 对象
+* packet_send()     : 发送数据包, 如果超过速率, 进行限速处理
+* pinsched_wait()   : 等待直到满足速率限制, 退出
+* pinsched_run()    : 在满足限速的条件下, 取出　50 个数据包加入待发送队列
 
 //PACKET_IN Message Queue
 struct pinqueue {
