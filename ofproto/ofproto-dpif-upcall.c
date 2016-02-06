@@ -310,7 +310,16 @@ static upcall_callback upcall_cb;
 static atomic_bool enable_megaflows = ATOMIC_VAR_INIT(true);
 static atomic_bool enable_ufid = ATOMIC_VAR_INIT(true);
 
-//注册 upcall 命令
+/* 注册 upcall 命令
+ * upcall/show
+ * upcall/disable-megaflows
+ * upcall/enable-megaflows
+ * upcall/disable-ufid
+ * upcall/enable-ufid
+ * upcall/set-flow-limit
+ * revalidator/wait
+ * revalidator/purge
+ */
 void
 udpif_init(void)
 {

@@ -57,10 +57,12 @@ struct pinsched {
 };
 
 /*
- * 轮询从 ps->queues 中取出一个 pinqueue 对象, ps->next_txq 指向该对象
+ * 初始化 ps->next_txq
  *
- * 如果 ps->next_txq != NULL, ps->next_txq->node = NULL, 从 ps->queues->buckets 从 (node->hash & hmap->mask) + 1) 开始找到不为 NULL 的节点 node, ps->next_txq = node, 否则为 node, ps->next_txq = NULL;
- * 如果 ps->next_txq == NULL, 从 ps->queues->buckets 从 0 开始找到不为 NULL 的节点 node, ps->next_txq = node, 否则为 node, ps->next_txq = NULL;
+ * 轮询从 ps->queues 中取出一个 pinqueue 对象初始化 ps->next_txq 对象
+ *
+ * 如果 ps->next_txq != NULL, ps->next_txq->node->next = NULL, 从 ps->queues->buckets 索引 (node->hash & hmap->mask) + 1) 到 hmap->mask中找到不为 NULL 的节点 node(可能为 NULL), ps->next_txq = node, 否则为 ps->next_txq = ps->next_txq->node->next;
+ * 如果 ps->next_txq == NULL, 从 ps->queues->buckets 索引 0 开始找到不为 NULL 的节点 node, ps->next_txq = node, 否则为 ps->next_txq = NULL;
  */
 static void
 advance_txq(struct pinsched *ps)
@@ -110,7 +112,6 @@ pinqueue_destroy(struct pinsched *ps, struct pinqueue *q)
 }
 
 //从 ps 中获取 port_no 对应的 pinqueue
-//TODO ps 不能为 NULL, 当然这可以作为约定
 static struct pinqueue *
 pinqueue_get(struct pinsched *ps, ofp_port_t port_no)
 {
@@ -168,7 +169,7 @@ drop_packet(struct pinsched *ps)
 
 /* Remove and return the next packet to transmit (in round-robin order). */
 /*
- * 通过 ps->next_txq 遍历 ps, 从 ps->next_txq->packets 中删除一个数据包. 返回该数据包
+ * 从 ps->next_txq->packets 中删除一个数据包. 返回该数据包
  *
  * TODO 如果 pinsched 进行了 hash 重分配, 会有什么样的影响 ?
  */
@@ -208,7 +209,7 @@ get_token(struct pinsched *ps)
 
 /*
  * 如果 ps 为 NULL, 将 packet 加入 txq
- * 如果 ps->n_queued = 0 && ps->token_bucket->tokens > 100, 表明不进行速率限制, 将 ps->n_normal++, packet 加入 txq
+ * 如果 ps->n_queued = 0 && ps->token_bucket->tokens > 1000, 表明不进行速率限制, 将 ps->n_normal++, packet 加入 txq
  * 否则, 进行速率限制, 将 packet 加入 port_no 对应的 pinqueue.
  *
  * NOTE:
@@ -255,7 +256,12 @@ pinsched_send(struct pinsched *ps, ofp_port_t port_no,
     }
 }
 
-//在满足限速的条件下, 从 ps 中取出　50 个数据包加入 txq 中
+/*
+ * 在满足限速的条件下, 从 ps 中取出　50 个数据包加入 txq 中
+ *
+ * NOTE:
+ * 50 是经验值?
+ */
 void
 pinsched_run(struct pinsched *ps, struct ovs_list *txq)
 {
@@ -272,6 +278,15 @@ pinsched_run(struct pinsched *ps, struct ovs_list *txq)
     }
 }
 
+/*
+ * 如果没有达到速率限制, 退出, 否则, 等待直到达到速率限制
+ *
+ * 如果 ps->token_bucket 超过 1000, 直接返回
+ * 否则 等待 ps->token_bucket->last_fill + (1000 - ps->token_bucket->token)/ps->token_bucket->rate + 1 秒
+ *
+ * NOTE:
+ * 1000 是经验值?
+ */
 void
 pinsched_wait(struct pinsched *ps)
 {

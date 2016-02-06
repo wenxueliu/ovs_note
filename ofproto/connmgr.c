@@ -229,7 +229,11 @@ static void ofmonitor_wait(struct connmgr *);
  * a name for the ofproto suitable for using in log messages.
  * 'local_port_name' is the name of the local port (OFPP_LOCAL) within
  * 'ofproto'. */
-//初始化 connmgr 对象 mgr 并返回 mgr. 指针统一初始化为 NULL, 其他见 struct connmgr 定义
+/*
+ * 初始化 connmgr 对象 mgr 并返回 mgr. 指针统一初始化为 NULL, 其他见 struct connmgr 定义
+ *
+ * 实际 name, local_port_name 为 datapath_name
+ */
 struct connmgr *
 connmgr_create(struct ofproto *ofproto,
                const char *name, const char *local_port_name)

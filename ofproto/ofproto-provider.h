@@ -84,7 +84,7 @@ struct ofproto {
     struct hmap ports;          /* Contains "struct ofport"s. */
     struct shash port_by_name;
     struct simap ofp_requests;  /* OpenFlow port number requests. */
-    uint16_t alloc_port_no;     /* Last allocated OpenFlow port number. */
+    uint16_t alloc_port_no;     /* Last allocated OpenFlow port number. 分配的最大端口号 */
     uint16_t max_ports;         /* Max possible OpenFlow port num, plus one. */
     struct hmap ofport_usage;   /* Map ofport to last used time. */
     uint64_t change_seq;        /* Change sequence for netdev status. */

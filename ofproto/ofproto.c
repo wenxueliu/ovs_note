@@ -363,8 +363,28 @@ static bool flow_restore_wait = true;
 /*
  * 1. 将 ofproto_dpif_class 加入 ofproto_classes
  * 2. 拷贝 iface_hints 到 init_ofp_ports
- * 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. ofproto_classes[i]->init(&init_ofp_ports);
- * 4. 注册 ofproto/list 到 ovsdb
+ * 3. 遍历 ofproto_classes 每个元素 ofproto_classes[i], 调用对应的 init() 方法. 拷贝 init_ofp_ports 到 ofproto-dpif 的 init_ofp_ports
+ * 4. 注册 ofproto, fdb, mdb, dpif 命令
+ *
+ * 注册的命令:
+ *  ofproto/list
+ *  ofproto/trace
+ *  ofproto/trace-packet-out
+ *  fdb/show
+ *  fdb/flush
+ *  mdb/show
+ *  mdb/flush
+ *  dpif/dump-dps
+ *  dpif/dump-flows
+ *  ofproto/tnl-push-pop
+ *  upcall/show
+ *  upcall/disable-megaflows
+ *  upcall/enable-megaflows
+ *  upcall/disable-ufid
+ *  upcall/enable-ufid
+ *  upcall/set-flow-limit
+ *  revalidator/wait
+ *  revalidator/purge
  */
 void
 ofproto_init(const struct shash *iface_hints)
@@ -395,7 +415,7 @@ ofproto_init(const struct shash *iface_hints)
         ofproto_classes[i]->init(&init_ofp_ports);
     }
 
-    // 4. 注册 ofproto/list 到 ovsdb
+    // 4. 注册 ofproto/list 命令
     ofproto_unixctl_init();
 }
 
@@ -404,6 +424,8 @@ ofproto_init(const struct shash *iface_hints)
  * structure, or a null pointer if there is none registered for 'type'. */
 
 /*
+ * 根据类型在 ofproto_classes[i]->enumerate_types() 中查找 type 对应的 ofproto_class
+ *
  * 由于 ofproto_classes 只包含 ofproto_dpif_class, 因此返回 ofproto_dpif_class.
  * type 目前只有 system, netdev
  */
@@ -418,6 +440,13 @@ ofproto_class_find__(const char *type)
         bool found;
 
         sset_init(&types);
+        /*
+         * 注册 tunnel port, tunnel arp, dpctl, route 命令
+         * 调用 dpif_netlink_class 和 dpif_netdev_class 的 init(), 将其加入 dpif_classes
+         *
+         * 将 base_dpif_classes 中的每个元素的 type 加入 types
+         * (实际上 types 包含 dpif_netlink_class->type(system), dpif_netdev_class->type(netdev) 两个元素)
+         */
         class->enumerate_types(&types);
         found = sset_contains(&types, type);
         sset_destroy(&types);
@@ -434,9 +463,12 @@ ofproto_class_find__(const char *type)
  * of that type can be created using ofproto_create(). */
 /*
  * 将 new_class 加入 ofproto_classes(实际将 ofproto_dpif_class 加入 ofproto_classes)
+ *
  * 1. 检查 new_class 是否与 ofproto_classes 中的元素重复
  * 2. 如果 ofproto_classes 空间不够, 扩容 2 倍
  * 3. new_class 加入 ofproto_classes
+ *
+ * NOTE: new_class == ofproto_classes[i] 的相等性比较是比较地址吧? 这是期望的么?
  */
 int
 ofproto_class_register(const struct ofproto_class *new_class)
@@ -462,12 +494,14 @@ ofproto_class_register(const struct ofproto_class *new_class)
  * registered and not currently be in use by any ofprotos.  After
  * unregistration new datapaths of that type cannot be opened using
  * ofproto_create(). */
+//如果 class 存在于 ofproto_classes, 从 ofproto_classes 中删除 class
 int
 ofproto_class_unregister(const struct ofproto_class *class)
 {
     size_t i;
 
     for (i = 0; i < n_ofproto_classes; i++) {
+        //NOTE 这里的相等性是否符合期望
         if (ofproto_classes[i] == class) {
             for (i++; i < n_ofproto_classes; i++) {
                 ofproto_classes[i - 1] = ofproto_classes[i];
@@ -485,10 +519,50 @@ ofproto_class_unregister(const struct ofproto_class *class)
  * caller must first initialize the sset. */
 
 /*
- * 调用 ofproto_classes每个元素的 enumerate_types 方法初始化 types.(实际上 ofproto_classes 只有 ofproto_dpif_class,types 仅包含 system, netdev)
- * 1. 注册 tunnel port, tunnel arp, dpctl, route 命令
- * 2. 将调用 dpif_netlink_class 和 dpif_netdev_class 初始化, 将其加入 dpif_classes
- * 3. 将 dpif_classes 中的每个元素的 type 加入 types(实际上 types 仅包含 system, netdev)
+ * 调用 ofproto_classes 每个元素的 enumerate_types 方法初始化 types.
+ *
+ * 实际由于 ofproto_classes 只包含 ofproto-dpif. 因此, 流程为
+ * 注册命令, 并将 dpif_netdev_class, dpif_netlink_class 加入 dpif_classes, 并初始化, 之后将 dpif_classes 中每个元素 type 加入 types
+ *
+ * 1. 注册命令
+ *    1) 对 all_commands 中每一个元素 commond, 注册 dpctl/commond 命令
+ *    2) 注册
+ *       tnl/ports/show
+ *       tnl/arp/show
+ *       tnl/arp/flush
+ *       ovs/route/add
+ *       ovs/route/show
+ *       ovs/route/del
+ *       ovs/route/lookup
+ *       dpif-netdev/pmd-stats-show
+ *       dpif-netdev/pmd-stats-clear
+ * 2. 调用 dpif_netlink_class 和 dpif_netdev_class 的 init(), 将其加入 dpif_classes
+ *    将 base_dpif_classes 中的每个元素的 type 加入 types
+ *    (实际上 types 包含 dpif_netlink_class->type(system), dpif_netdev_class->type(netdev) 两个元素)
+ * 3. dpif_classes 中的元素加入 types
+ *
+ * ###dpif_netdev_class->init()
+ *
+ * 注册
+ *       dpif-netdev/pmd-stats-show
+ *       dpif-netdev/pmd-stats-clear
+ * 命令
+ *
+ * ###dpif_netlink_class->init()
+ *
+ * 1. 与内核建立 NETLINK_GENERIC 协议连接, 发送请求获取 name (genl_family->name) 对应的 number(genl_family->id)
+ * 2. 将 OVS_DATAPATH_FAMILY, OVS_VPORT_FAMILY, OVS_FLOW_FAMILY 加入 genl_families
+ * 3. 确保 OVS_VPORT_FAMILY 中存在 OVS_VPORT_MCGROUP 对应 ID 的 ovs_vport_mcgroup
+ *
+ * genl_family:
+ *       id                 name
+ * OVS_DATAPATH_FAMILY ovs_datapath_family
+ * OVS_VPORT_FAMILY    ovs_vport_family
+ * OVS_FLOW_FAMILY     ovs_flow_family
+ * OVS_PACKET_FAMILY   ovs_packet_family
+ *
+ *                   CTRL_ATTR_MCAST_GRP_NAME CTRL_ATTR_MCAST_GRP_ID
+ * OVS_VPORT_FAMILY     OVS_VPORT_FAMILY         ovs_vport_mcgroup
  */
 void
 ofproto_enumerate_types(struct sset *types)
@@ -517,6 +591,16 @@ ofproto_normalize_type(const char *type)
  *
  * Some kinds of datapaths might not be practically enumerable.  This is not
  * considered an error. */
+/*
+ * 1. 遍历 ofproto_classes 每个元素, 并调用每个元素的 enumerate_types() 初始化 types.
+ * 如果 type 在 types 中, 返回该元素
+ *
+ * 实际 types 为 system, netdev. 如果 type=system 或 netdev, 返回 ofproto_dpif_class, 否则返回 EAFNOSUPPORT
+ *
+ * 2. 调用与 type 匹配的第一个 ofproto_class->enumerate_names(type,names)
+ *
+ * 遍历 all_ofproto_dpifs 中的元素 ofproto(类型 ofproto_dpif), 如果 ofproto.up.type = type, 将 ofproto->up.name 加入 names
+ */
 int
 ofproto_enumerate_names(const char *type, struct sset *names)
 {
@@ -533,6 +617,17 @@ ofproto_bump_tables_version(struct ofproto *ofproto)
                                                ofproto->tables_version);
 }
 
+/*
+ * 1. 找到 datapath_type 对应的 ofproto_class 对象 class
+ * 2. calloc 分配 ofproto_dpif 对象, ofproto = ofproto_dpif->up
+ * 3. 初始化 ofproto(ofproto_dpif->up) 及 ofproto_dpif
+ * 4. 初始化 ofproto_dpif->backer 及 ofproto_dpif 其余成员
+ * 5. 
+ * 6. 初始化 ofproto 中的所有端口 ofport_dpif, ofport, 遍历 init_ofp_ports 中所有元素, 如果 p->name 等于 br->name, 从 init_ofp_ports 中删除之
+ * 7. 初始化 meter 表
+ * 8. 初始化 ofproto 版本
+ *
+ */
 int
 ofproto_create(const char *datapath_name, const char *datapath_type,
                struct ofproto **ofprotop)
@@ -544,7 +639,14 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
 
     *ofprotop = NULL;
 
+    //1. 找到 datapath_type 对应的 ofproto_class 对象 class
     datapath_type = ofproto_normalize_type(datapath_type);
+    /*
+     * 根据类型在 ofproto_classes[i]->enumerate_types() 中查找 datapath_type 对应的 ofproto_class
+     *
+     * 由于 ofproto_classes 只包含 ofproto_dpif_class, 因此返回 ofproto_dpif_class.
+     * type 目前只有 system, netdev
+     */
     class = ofproto_class_find__(datapath_type);
     if (!class) {
         VLOG_WARN("could not create datapath %s of unknown type %s",
@@ -552,6 +654,7 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
         return EAFNOSUPPORT;
     }
 
+    //2. calloc 分配 ofproto_dpif 对象内存. ofproto = ofproto_dpif->up
     ofproto = class->alloc();
     if (!ofproto) {
         VLOG_ERR("failed to allocate datapath %s of type %s",
@@ -559,6 +662,7 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
         return ENOMEM;
     }
 
+    //3. 初始化 ofproto(ofproto_dpif->up)
     /* Initialize. */
     ovs_mutex_lock(&ofproto_mutex);
     memset(ofproto, 0, sizeof *ofproto);
@@ -569,6 +673,15 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
                 hash_string(ofproto->name, 0));
     ofproto->datapath_id = 0;
     ofproto->forward_bpdu = false;
+    /*
+     * @return : 返回 ea
+     * 1. 设置 ea 的地址为随机数
+     * 2. ea[0] = 0x00
+     *    ea[1] = 0x23
+     *    ea[2] = 0x20
+     *    ea[3] |= 0x80
+     *
+     */
     ofproto->fallback_dpid = pick_fallback_dpid();
     ofproto->mfr_desc = NULL;
     ofproto->hw_desc = NULL;
@@ -599,12 +712,18 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
     ofproto->ogf.types = 0xf;
     ofproto->ogf.capabilities = OFPGFC_CHAINING | OFPGFC_SELECT_LIVENESS |
                                 OFPGFC_SELECT_WEIGHT;
+    //why 4 ?
     for (i = 0; i < 4; i++) {
         ofproto->ogf.max_groups[i] = OFPG_MAX;
         ofproto->ogf.ofpacts[i] = (UINT64_C(1) << N_OFPACTS) - 1;
     }
+    //初始化tun-metadata.c 中 metadata_tab
     tun_metadata_init();
 
+    /*
+     * 4. 初始化 ofproto_dpif 其余成员.
+     * 调用 class 的 construct 初始化 ofproto 所属的 ofproto-dpif, 实际为 ofproto-dpif->construct
+     */
     error = ofproto->ofproto_class->construct(ofproto);
     if (error) {
         VLOG_ERR("failed to open datapath %s: %s",
@@ -614,6 +733,7 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
         return error;
     }
 
+    //5. TODO why 检查
     /* Check that hidden tables, if any, are at the end. */
     ovs_assert(ofproto->n_tables);
     for (i = 0; i + 1 < ofproto->n_tables; i++) {
@@ -623,7 +743,23 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
         ovs_assert(!(flags & OFTABLE_HIDDEN) || next_flags & OFTABLE_HIDDEN);
     }
 
+    //datapath_id 为 OFPP_LOCAL, 则返回 local port 的 mac, 否则为 ofproto->fallback_dpid
     ofproto->datapath_id = pick_datapath_id(ofproto);
+    /*
+     * 1. 通过
+     *      p->ofproto_class->port_dump_start()
+     *      p->ofproto_class->port_dump_next()
+     *      p->ofproto_class->port_dump_done()
+     * 遍历 p->ofproto_class 下所有端口
+     *
+     * 2. 如果端口 name 已经在 p->port_by_name 中, 打印警告信息
+     *    否则, 1) 如果端口 name 已经在 init_ofp_ports 中, 将其加入 p->ofp_requests
+     *          2) 初始化端口 ofport_dpif 及 ofport
+     *          3) 初始化 p->alloc_port_no
+     *
+     * 3. 遍历 init_ofp_ports 中所有元素, 如果 p->name 等于 br->name, 从 init_ofp_ports 中删除之
+     *
+     */
     init_ports(ofproto);
 
     /* Initialize meters table. */
@@ -688,6 +824,9 @@ ofproto_get_datapath_id(const struct ofproto *ofproto)
     return ofproto->datapath_id;
 }
 
+/*
+ * 设置 p->datapath_id 为 datapath_id, 之后要重连 controller
+ */
 void
 ofproto_set_datapath_id(struct ofproto *p, uint64_t datapath_id)
 {
@@ -827,6 +966,7 @@ ofproto_set_cpu_mask(const char *cmask)
     pmd_cpu_mask = cmask ? xstrdup(cmask) : NULL;
 }
 
+//n_handlers_ 与 n_revalidators_ 之间的关系
 void
 ofproto_set_threads(int n_handlers_, int n_revalidators_)
 {
@@ -1445,6 +1585,8 @@ ofproto_get_n_visible_tables(const struct ofproto *ofproto)
  * OpenFlow tables in 'ofproto' minus 1, inclusive.
  *
  * For read-only tables, only the name may be configured. */
+
+//设置 ofproto->tables[table_id]
 void
 ofproto_configure_table(struct ofproto *ofproto, int table_id,
                         const struct ofproto_table_settings *s)
@@ -1520,6 +1662,7 @@ ofproto_rule_delete(struct ofproto *ofproto, struct rule *rule)
     ovs_mutex_unlock(&ofproto_mutex);
 }
 
+//先刷新, 之后遍历所有流表将每个流表的流表项删除
 static void
 ofproto_flush__(struct ofproto *ofproto)
     OVS_EXCLUDED(ofproto_mutex)
@@ -1538,6 +1681,7 @@ ofproto_flush__(struct ofproto *ofproto)
      * the same mutex. */
 
     ovs_mutex_lock(&ofproto_mutex);
+    //将 ofproto 的每个 table 中的规则加入 rules 之后删除
     OFPROTO_FOR_EACH_TABLE (table, ofproto) {
         struct rule_collection rules;
         struct rule *rule;
@@ -1605,6 +1749,7 @@ ofproto_destroy__(struct ofproto *ofproto)
 /* Destroying rules is doubly deferred, must have 'ofproto' around for them.
  * - 1st we defer the removal of the rules from the classifier
  * - 2nd we defer the actual destruction of the rules. */
+//TODO
 static void
 ofproto_destroy_defer__(struct ofproto *ofproto)
     OVS_EXCLUDED(ofproto_mutex)
@@ -1623,6 +1768,7 @@ ofproto_destroy(struct ofproto *p)
         return;
     }
 
+    //释放 meter 内存
     if (p->meters) {
         meter_delete(p, 1, p->meter_features.max_meters);
         p->meter_features.max_meters = 0;
@@ -1630,11 +1776,14 @@ ofproto_destroy(struct ofproto *p)
         p->meters = NULL;
     }
 
+    //先刷新, 之后遍历所有流表将每个流表的流表项删除
     ofproto_flush__(p);
+    //释放端口
     HMAP_FOR_EACH_SAFE (ofport, next_ofport, hmap_node, &p->ports) {
         ofport_destroy(ofport);
     }
 
+    //是否 usage
     HMAP_FOR_EACH_SAFE (usage, next_usage, hmap_node, &p->ofport_usage) {
         hmap_remove(&p->ofport_usage, &usage->hmap_node);
         free(usage);
@@ -1647,6 +1796,7 @@ ofproto_destroy(struct ofproto *p)
      * by other threads */
     connmgr_destroy(p->connmgr);
 
+    //TODO
     /* Destroying rules is deferred, must have 'ofproto' around for them. */
     ovsrcu_postpone(ofproto_destroy_defer__, p);
 }
@@ -1699,6 +1849,14 @@ ofproto_type_run(const char *datapath_type)
      */
     class = ofproto_class_find__(datapath_type);
 
+    /*
+     * 核心实现
+     * 1. 将 ofproto->pins 的所有包发送给控制器
+     * 2. 运行 netflow, sflow, ipfix, boundle, stp, rstp, mac_learn, mcast_snooping, ofboundle
+     * 3. 遍历 ofproto->up.ports 的每一个端口, 调用　port_run(ofport)
+     * 4. 删除过期流表
+     * 5. boundle 重平衡
+     */
     error = class->type_run ? class->type_run(datapath_type) : 0;
     if (error && error != EAGAIN) {
         VLOG_ERR_RL(&rl, "%s: type_run failed (%s)",
@@ -2097,9 +2255,9 @@ ofproto_port_add(struct ofproto *ofproto, struct netdev *netdev,
  * ofproto_port_destroy() when it is no longer needed. */
 
 /*
- * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
- * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
- * 查找到的端口初始化 port
+ * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询, 找到的保存在 ofproto_port 中
+ * 如果 devname 不在 ofproto->ghost_ports 中, 但在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+ * 查找到的端口保存在 ofproto_port
  */
 int
 ofproto_port_query_by_name(const struct ofproto *ofproto, const char *devname,
@@ -2107,6 +2265,11 @@ ofproto_port_query_by_name(const struct ofproto *ofproto, const char *devname,
 {
     int error;
 
+    /*
+     * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询, 找到的保存在 ofproto_port 中
+     * 如果 devname 不在 ofproto->ghost_ports 中, 但在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
+     * 查找到的端口保存在 ofproto_port
+     */
     error = ofproto->ofproto_class->port_query_by_name(ofproto, devname, port);
     if (error) {
         memset(port, 0, sizeof *port);
@@ -2315,7 +2478,7 @@ ofproto_flush_flows(struct ofproto *ofproto)
 }
 
 /*
- * 将 p->ports 和 p->ghost_ports 的所有端口名加入 devnames, 对 devnames 每个 devname 对应的 ofport 进行更新.
+ * 将 p->ports 和 p->ghost_ports 的所有端口名加入 devnames, 对 devnames 每个 devname 对应的 ofport 进行(调用 update_port)更新.
  */
 static void
 reinit_ports(struct ofproto *p)
@@ -2344,8 +2507,16 @@ reinit_ports(struct ofproto *p)
     sset_destroy(&devnames);
 }
 
-//TODO
-//分配端口号的机理
+/*
+ * 分配端口号的机理
+ * 1. 如果 ofproto->ofp_requests 存在 netdev_name 对应的 port_idx, 直接更新 usage
+ * 2. 否则, 如果获取 port_idx 的 usage->last_used = LLONG_MAX
+ *    1. 如果已分配的端口号大于 32768(可配置?), alloc_port_no = 1
+ *    2. 如果 ofproto->alloc_port_no 的 last_used 为 0, port_idx = alloc_port_no
+ *       如果 ofproto->alloc_port_no 的 last_used 在 1 小时以前, 删除 alloc_port_no 对应的 usage, port_idx = alloc_port_no
+ *
+ * TODO 算法存疑?
+ */
 static ofp_port_t
 alloc_ofp_port(struct ofproto *ofproto, const char *netdev_name)
 {
@@ -2383,10 +2554,12 @@ alloc_ofp_port(struct ofproto *ofproto, const char *netdev_name)
                 port_idx = ofproto->alloc_port_no;
                 break;
             } else if (last_used_at < lru) {
+                //有意义么?
                 lru = last_used_at;
                 lru_ofport = ofproto->alloc_port_no;
             }
 
+            //有意义么?
             if (ofproto->alloc_port_no == end_port_no) {
                 if (lru_ofport) {
                     port_idx = lru_ofport;
@@ -2396,6 +2569,11 @@ alloc_ofp_port(struct ofproto *ofproto, const char *netdev_name)
             }
         }
     }
+    /*
+     * 初始化 ofproto->ofport_usage 中 port_idx 对应的 usage.
+     * 如果存在于 ofproto->ofport_usage 中, 更新 last_used.
+     * 如果不存在, 创建之.
+     */
     ofport_set_usage(ofproto, u16_to_ofp(port_idx), LLONG_MAX);
     return u16_to_ofp(port_idx);
 }
@@ -2413,11 +2591,14 @@ dealloc_ofp_port(struct ofproto *ofproto, ofp_port_t ofp_port)
  * pointer if the netdev cannot be opened.  On success, also fills in
  * '*pp'.  */
 /*
- * 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
- * 如果找到 error = 0, netdev 指向找到的设备,
+ * 用 ofproto_port->name 和 ofproto_port->type 获取对应的 netdev 对象, 用 netdev,
+ * ofproto_port 并初始化 pp
+ *
+ * 1. 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
+ * 2. 如果找到 error = 0, netdev 指向找到的设备,
  * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
  *             如果 ofproto_port.type 不在 netdev_classes 中, error = EAFNOSUPPORT, netdev = NULL
- * 用 ofproto_port, netdev 初始化 pp
+ * 3. 用 ofproto_port, netdev 初始化 pp
  * 详情参见 lib/netdev.c
  */
 static struct netdev *
@@ -2493,7 +2674,15 @@ ofport_equal(const struct ofputil_phy_port *a,
  * The caller must ensure that 'p' does not have a conflicting ofport (that is,
  * one with the same name or port number). */
 
-//构造一个 ofport 对象, 用 p, netdev, pp 初始化, 并发送给控制端口改变信息
+/*
+ * 构造并用 p, netdev, pp 初始化一个 ofport 对象, 已经初始化ofproto 所在的 ofport_dpif 对象, 并发送给控制端口改变信息
+ * 1. 分配 ofport_dpif 内存.
+ * 2. ofport = ofport_dpif->up. 初始化 ofport 各个成员
+ * 3. 将 ofport 加入 p->ports 和 p->port_by_name
+ * 4. 更新 mtu
+ * 5. ofproto-dpif.c port_construct 初始化 ofproto_dpif, 将 odp 到 ofp 的映射加入 ofproto->backer->odp_to_ofport_map
+ * 6. 给控制器发送端口消息
+ */
 static void
 ofport_install(struct ofproto *p,
                struct netdev *netdev, const struct ofputil_phy_port *pp)
@@ -2503,6 +2692,7 @@ ofport_install(struct ofproto *p,
     int error;
 
     /* Create ofport. */
+    //malloc 分配对象 ofport_dpif 内存. ofport = ofport-dpif->up
     ofport = p->ofproto_class->port_alloc();
     if (!ofport) {
         error = ENOMEM;
@@ -2520,13 +2710,32 @@ ofport_install(struct ofproto *p,
                 hash_ofp_port(ofport->ofp_port));
     shash_add(&p->port_by_name, netdev_name, ofport);
 
+    /*
+     * 设置端口 port 的 mtu
+     *
+     * 如果是 internal 类型端口:
+     *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 成功. port->mtu 为 ofproto 的最小 mtu
+     *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 失败. port->mtu 为 port->netdev 的 mtu
+     * 如果不是 internal 类型端口
+     *    更新 port->mtu 为 port->netdev 的 mtu
+     *    检查 p->min_mtu 是否发生变化, 如果发生变化, 将 p->ports中所有 internal 端口的 mtu 设置为 p->min_mtu
+     */
     update_mtu(p, ofport);
 
     /* Let the ofproto_class initialize its private data. */
+    /*
+     * 初始化 ofport_dpif 并 将 odp 到 ofp 的映射加入 ofproto->backer->odp_to_ofport_map
+     *
+     * 1. 初始化 ofport_dpif
+     * 2. 根据 port_->netdev 找到端口名对应的 dpif_port, 并加入 ofproto->backer->odp_to_ofport_map
+     *
+     * 实际为 ofport-dpif.c port_construct
+     */
     error = p->ofproto_class->port_construct(ofport);
     if (error) {
         goto error;
     }
+    //遍历 p->connmgr->all_conns 所有元素 ofconn, 如果 ofconn->rconn->conn->version 版本大于 1.5 或 ofconn != NULL 发送端口状态消息
     connmgr_send_port_status(p->connmgr, NULL, pp, OFPPR_ADD);
     return;
 
@@ -2664,6 +2873,11 @@ ofport_destroy(struct ofport *port)
      }
 }
 
+/*
+ * 找到 ofp_port 对应的 ofport.
+ *
+ * 实际 OFPP_LOCAL　
+ */
 struct ofport *
 ofproto_get_port(const struct ofproto *ofproto, ofp_port_t ofp_port)
 {
@@ -2745,6 +2959,11 @@ ofproto_port_get_stats(const struct ofport *port, struct netdev_stats *stats)
 /*
  * 更新 name 对应的 ofport
  *
+ * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, 就在 ofproto->up.port_by_name 中查询, 如果查询不到,
+ *      1) 从 ofproto->port_by_name 中找到 name 对应的 ofport, 向控制器发送删除端口的消息, 并销毁 port 对象的数据成员和 port 对象本身
+ *      2) 从 ofproto->port_by_name 中没有找到 name 对应的 ofport, 什么也不做
+
+ *
  * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name == ofproto_port->name, 删除 name, port 对应旧设备, 更新新设备及配置
  * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 在 ofproto->ports 中存在对应的 ofport, ofport->name != ofproto_port->name, 分别删除 name 和 port 对应的旧设备, 更新新设备及配置
  * 如果 name 在 ofproto->ghost_ports 中存在对应的 ofport_port, ofport_port.ofp_port 不在 ofproto->ports 中存在对应的 ofport, 创建 netdev 对象,删除 name 对应的旧设备, 更新新设备及配置
@@ -2763,10 +2982,16 @@ update_port(struct ofproto *ofproto, const char *name)
 
     /* Fetch 'name''s location and properties from the datapath. */
     /*
-     * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询
-     * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询
-     * 查找到的端口初始化 ofproto_port.
+     * 1. ofproto_port_query_by_name(ofproto, name, &ofproto_port)
+     * 如果 devname 在 ofproto->ghost_ports 存在, 就在 ofproto->up.port_by_name 中查询, 如果查询到, 用查询到的端口初始化 ofproto_port.
+     * 如果查询不到, netdev = NULL
      *
+     * 如果 devname 在 ofproto->ports 存在, 就在 ofproto->dpif 对应的内核查询, 如果查询到, 用查询到的端口初始化 ofproto_port.
+     * 如果查询不到 netdev = NULL
+     *
+     * 如果 devname 在 ofproto->ghost_ports 和 ofproto->ports 都不存在, netdev = NULL
+     *
+     * 2. ofport_open(ofproto, &ofproto_port, &pp)
      * 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
      * 如果找到 error = 0, netdev 指向找到的设备,
      * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
@@ -2791,7 +3016,16 @@ update_port(struct ofproto *ofproto, const char *name)
                 ofport_modified(port, &pp);
             }
 
-            //TODO
+            /*
+             * 设置端口 port 的 mtu
+             *
+             * 如果是 internal 类型端口:
+             *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 成功. port->mtu 为 ofproto 的最小 mtu
+             *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 失败. port->mtu 为 port->netdev 的 mtu
+             * 如果不是 internal 类型端口
+             *    更新 port->mtu 为 port->netdev 的 mtu
+             *    检查 p->min_mtu 是否发生变化, 如果发生变化, 将 p->ports中所有 internal 端口的 mtu 设置为 p->min_mtu
+             */
             update_mtu(ofproto, port);
 
             /* Install the newly opened netdev in case it has changed.
@@ -2820,7 +3054,15 @@ update_port(struct ofproto *ofproto, const char *name)
              * 从 ofproto->port_by_name 中没有找到 name 对应的 ofport, 什么也不做
              */
             ofport_remove_with_name(ofproto, name);
-            //构造一个 ofport 对象, 用 ofproto, netdev, pp 初始化, 并发送给控制端口改变信息
+            /*
+             * 构造并用 ofproto, netdev, pp 初始化一个 ofport 对象, 已经初始化 ofproto 所在的 ofport_dpif 对象, 并发送给控制端口改变信息
+             * 1. 分配 ofport_dpif 内存.
+             * 2. ofport = ofport_dpif->up. 初始化 ofport 各个成员
+             * 3. 将 ofport 加入 p->ports 和 p->port_by_name
+             * 4. 更新 mtu
+             * 5. ofproto-dpif.c port_construct 初始化 ofproto_dpif, 将 odp 到 ofp 的映射加入 ofproto->backer->odp_to_ofport_map
+             * 6. 给控制器发送端口消息
+             */
             ofport_install(ofproto, netdev, &pp);
         }
     } else {
@@ -2834,6 +3076,21 @@ update_port(struct ofproto *ofproto, const char *name)
     ofproto_port_destroy(&ofproto_port);
 }
 
+/*
+ * 1. 通过
+ *      p->ofproto_class->port_dump_start()
+ *      p->ofproto_class->port_dump_next()
+ *      p->ofproto_class->port_dump_done()
+ * 遍历 p->ofproto_class 下所有端口
+ *
+ * 2. 如果端口 name 已经在 p->port_by_name 中, 打印警告信息
+ *    否则, 1) 如果端口 name 已经在 init_ofp_ports 中, 将其加入 p->ofp_requests
+ *          2) 初始化端口 ofport_dpif 及 ofport
+ *          3) 初始化 p->alloc_port_no
+ *
+ * 3. 遍历 init_ofp_ports 中所有元素, 如果 p->name 等于 br->name, 从 init_ofp_ports 中删除之
+ *
+ */
 static int
 init_ports(struct ofproto *p)
 {
@@ -2841,6 +3098,7 @@ init_ports(struct ofproto *p)
     struct ofproto_port ofproto_port;
     struct shash_node *node, *next;
 
+    //初始化 p 中所有端口
     OFPROTO_PORT_FOR_EACH (&ofproto_port, &dump, p) {
         const char *name = ofproto_port.name;
 
@@ -2860,11 +3118,28 @@ init_ports(struct ofproto *p)
             }
 
             /*
-             * 打开 ofproto_port->name 和 ofproto_port->type 对应的 netdev 设备, 并用 ofport_port 初始化 pp
+             * 打开 ofproto_port->name 和 ofproto_port->type 获取对应的 netdev 设备, 并用 netdev, ofport_port 初始化 pp
+             *
+             * 1. 在 netdev_shash 中查找 ofproto_port.name 对应的 netdev,
+             * 2. 如果找到 error = 0, netdev 指向找到的设备,
+             * 如果找不到, 如果 ofproto_port.type 在 netdev_classes 中, 就创建 ofproto_port.type 对应的 netdev 对象, netdev 指向该对象, error = 0
+             *             如果 ofproto_port.type 不在 netdev_classes 中, error = EAFNOSUPPORT, netdev = NULL
+             * 3. 用 ofproto_port, netdev 初始化 pp
+             * 详情参见 lib/netdev.c
              */
             netdev = ofport_open(p, &ofproto_port, &pp);
             if (netdev) {
+                /*
+                 * 构造并用 p, netdev, pp 初始化一个 ofport 对象, 已经初始化ofproto 所在的 ofport_dpif 对象, 并发送给控制端口改变信息
+                 * 1. 分配 ofport_dpif 内存.
+                 * 2. ofport = ofport_dpif->up. 初始化 ofport 各个成员
+                 * 3. 将 ofport 加入 p->ports 和 p->port_by_name
+                 * 4. 更新 mtu
+                 * 5. ofproto-dpif.c port_construct 初始化 ofproto_dpif, 将 odp 到 ofp 的映射加入 ofproto->backer->odp_to_ofport_map
+                 * 6. 给控制器发送端口消息
+                 */
                 ofport_install(p, netdev, &pp);
+                //更新 ofproto->alloc_port_no 为最大端口号
                 if (ofp_to_u16(ofproto_port.ofp_port) < p->max_ports) {
                     p->alloc_port_no = MAX(p->alloc_port_no,
                                            ofp_to_u16(ofproto_port.ofp_port));
@@ -2889,6 +3164,7 @@ init_ports(struct ofproto *p)
 
 /* Find the minimum MTU of all non-datapath devices attached to 'p'.
  * Returns ETH_PAYLOAD_MAX or the minimum of the ports. */
+//遍历 p->ports 所有端口的 mtu, 返回最小 mtu
 static int
 find_min_mtu(struct ofproto *p)
 {
@@ -2918,6 +3194,16 @@ find_min_mtu(struct ofproto *p)
 
 /* Update MTU of all datapath devices on 'p' to the minimum of the
  * non-datapath ports in event of 'port' added or changed. */
+/*
+ * 设置端口 port 的 mtu
+ *
+ * 如果是 internal 类型端口:
+ *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 成功. port->mtu 为 ofproto 的最小 mtu
+ *    如果设置 port->netdev 的 mtu 为 ofproto 的最小 mtu 失败. port->mtu 为 port->netdev 的 mtu
+ * 如果不是 internal 类型端口
+ *    更新 port->mtu 为 port->netdev 的 mtu
+ *    检查 p->min_mtu 是否发生变化, 如果发生变化, 将 p->ports中所有 internal 端口的 mtu 设置为 p->min_mtu
+ */
 static void
 update_mtu(struct ofproto *p, struct ofport *port)
 {
@@ -2943,6 +3229,14 @@ update_mtu(struct ofproto *p, struct ofport *port)
     /* For non-internal port find new min mtu. */
     old_min = p->min_mtu;
     port->mtu = dev_mtu;
+
+    /*
+     * 检查 min_mtu 是否发生改变, 如果 p->min_mtu 发生改变, 那么, 就需要
+     * 将 p->ports 中所有 internal 的 mtu 重新设置为 min_mtu
+     * 注: 这里还会同时有其他端口添加? 是否直接比较 dev_mtu 与 p->min_mtu
+     * 更为合适, 如果有, 那么上面 internal 添加也必须重新遍历. 此外, 遍历
+     * 之前必须加锁
+     */
     p->min_mtu = find_min_mtu(p);
     if (p->min_mtu == old_min) {
         return;
@@ -7843,6 +8137,11 @@ send_buffered_packet(const struct flow_mod_requester *req, uint32_t buffer_id,
     }
 }
 
+
+/*
+ * 如果 OFPP_LOCAL 存在, 返回其对应的 MAC 地址
+ * 否则 ofproto->fallback_dpid
+ */
 static uint64_t
 pick_datapath_id(const struct ofproto *ofproto)
 {
@@ -7864,6 +8163,14 @@ pick_datapath_id(const struct ofproto *ofproto)
     return ofproto->fallback_dpid;
 }
 
+/*
+ * @return : 返回 ea
+ * 1. 设置 ea 的地址为随机数
+ * 2. ea[0] 0x00
+ *    ea[1] 0x23
+ *    ea[2] 0x20
+ *    ea[3] |= 0x80
+ */
 static uint64_t
 pick_fallback_dpid(void)
 {
