@@ -54,6 +54,7 @@ NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 * 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么? 会
 * 如何与用户空间的 vswitchd 交互, 支持哪些交换操作
 * 如何保证 upcall 的包的顺序, 有哪些实现方式? 目前的实现方式是什么?
+* 如果端口宕掉, 会发生什么? 对 vswitch 和 controller 有什么影响
 
 ##vswitch 需要解决的问题
 
