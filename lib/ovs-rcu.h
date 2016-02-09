@@ -125,6 +125,18 @@
  *         ovs_mutex_unlock(&mutex);
  *     }
  *
+ *
+ * 设计思想
+ *
+ * 多读少写的场景
+ * 新版本的写要等待所有的旧版的读操作都完成
+ *
+ * ovsrcu_quiesce   : 让当前线程完成旧版操作
+ * ovsrcu_synchronize : 等待所有线程旧版本操作都完成.
+ * ovsrcu_call_postponed : 当前处于 Quiescent 状态, 返回 false, 不处于 Quiescent, 等待直到进入 Quiescent, 返回 true.
+ *
+ * 问题: 在多线程模式下, ovsrcu_quiesce_start, ovsrcu_quiesce 每次调用都会创建一个新的线程处理
+ * flushed_cbsets, 这是否是期望的?
  */
 
 #include "compiler.h"
@@ -133,6 +145,7 @@
 #if __GNUC__
 #define OVSRCU_TYPE(TYPE) struct { ATOMIC(TYPE) p; }
 #define OVSRCU_INITIALIZER(VALUE) { ATOMIC_VAR_INIT(VALUE) }
+// 为什么不对 ORDER 进行 memory_order ovsrcu_order = (ORDER);
 #define ovsrcu_get__(TYPE, VAR, ORDER)                                  \
     ({                                                                  \
         TYPE value__;                                                   \
@@ -152,6 +165,7 @@
  * any of the body of the atomic_store_explicit.  Since the type of
  * 'VAR' is not fixed, we cannot use an inline function to get
  * function semantics for this. */
+//(void*) 0 意义何在?
 #define ovsrcu_set__(VAR, VALUE, ORDER)                                 \
     ({                                                                  \
         typeof(VAR) ovsrcu_var = (VAR);                                 \
@@ -205,6 +219,10 @@ static inline void ovsrcu_set__(struct ovsrcu_pointer *pointer,
 
 /* Calls FUNCTION passing ARG as its pointer-type argument following the next
  * grace period.  See "Usage" above for an example. */
+/*
+ * 为当前线程增加回调函数, 如果 perthread->cbset 实际数量多于 cbset->cbs 的大小,
+ * 将当前线程的 cbset 加入全局的 flushed_cbsets.
+ */
 void ovsrcu_postpone__(void (*function)(void *aux), void *aux);
 #define ovsrcu_postpone(FUNCTION, ARG)                          \
     ((void) sizeof((FUNCTION)(ARG), 1),                         \
@@ -212,13 +230,18 @@ void ovsrcu_postpone__(void (*function)(void *aux), void *aux);
      ovsrcu_postpone__((void (*)(void *))(FUNCTION), ARG))
 
 /* Quiescent states. */
+//设置当前线程专有数据 perthread_key 对应的 perthread 为 null, 并调用对应的回调函数
 void ovsrcu_quiesce_start(void);
+//重新初始化线程专有数据 perthread_key 为 ovsrcu_perthread
 void ovsrcu_quiesce_end(void);
+//完成旧版操作(即当前线程的 cbset 刷新到全局的 flushed_cbsets, 并用额外的线程处理 flushed_cbsets 的回调)
 void ovsrcu_quiesce(void);
+//当前线程专有数据 perthread_key 是为 null
 bool ovsrcu_is_quiescent(void);
 
 /* Synchronization.  Waits for all non-quiescent threads to quiesce at least
  * once.  This can block for a relatively long time. */
+// 释放当前线程的 perthread_key, 新创建线程调用 flushed_cbsets 回调函数, 等待所有线程 seqno 变化, 然后初始化当前线程的 perthread_key
 void ovsrcu_synchronize(void);
 
 #endif /* ovs-rcu.h */

@@ -34,7 +34,9 @@ struct ovsrcu_cb {
 
 struct ovsrcu_cbset {
     struct ovs_list list_node;
-    struct ovsrcu_cb cbs[16];
+    //16 是线程专有回调函数刷入全局 flushed_cbsets 的阈值
+    struct ovsrcu_cb cbs[16]; //为什么是 16 ?,
+    //实际 cbs 大小
     int n_cbs;
 };
 
@@ -47,10 +49,14 @@ struct ovsrcu_perthread {
     char name[16];              /* This thread's name. */
 };
 
+//标记旧版本操作完成(即线程的局部 cbset 刷新到全局 flushed_cbsets)
 static struct seq *global_seqno;
 
+//线程专有数据
 static pthread_key_t perthread_key;
+//保存所有线程专有数据 perthread_key 对应的 ovsrcu_perthread
 static struct ovs_list ovsrcu_threads;
+//ovsrcu_threads 的锁
 static struct ovs_mutex ovsrcu_threads_mutex;
 
 static struct guarded_list flushed_cbsets;
@@ -62,6 +68,13 @@ static void ovsrcu_unregister__(struct ovsrcu_perthread *);
 static bool ovsrcu_call_postponed(void);
 static void *ovsrcu_postpone_thread(void *arg OVS_UNUSED);
 
+/*
+ * 初始化线程专有数据 perthread_key 为 ovsrcu_perthread, 并返回 ovsrcu_perthread
+ *
+ * 注: 在 perthread_key 没有通过 pthread_key_create() 创建, 或已经通
+ * 过 pthread_key_delete() 删除, 调用 pthread_getspecific() 或
+ * pthread_setspecific() 是未定义的行为.
+ */
 static struct ovsrcu_perthread *
 ovsrcu_perthread_get(void)
 {
@@ -94,16 +107,29 @@ ovsrcu_perthread_get(void)
  *
  * Quiescent states don't stack or nest, so this always ends a quiescent state
  * even if ovsrcu_quiesce_start() was called multiple times in a row. */
+/*
+ * 初始化线程专有数据 perthread_key 为 ovsrcu_perthread
+ */
 void
 ovsrcu_quiesce_end(void)
 {
     ovsrcu_perthread_get();
 }
 
+/*
+ * 如果是单线程:
+ *      遍历 flushed_cbsets 的每个元素的回调函数
+ * 如果是多线程:
+ *      创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+ */
 static void
 ovsrcu_quiesced(void)
 {
     if (single_threaded()) {
+        /*
+         * 如果 flushed_cbsets 为 null, 返回 false;
+         * 否则 调用 flushed_cbsets 的每个元素的回调函数, 返回 true
+         */
         ovsrcu_call_postponed();
     } else {
         static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
@@ -116,6 +142,25 @@ ovsrcu_quiesced(void)
 
 /* Indicates the beginning of a quiescent state.  See "Details" near the top of
  * ovs-rcu.h. */
+/*
+ * 设置当前线程专有数据 perthread_key 对应的 perthread 为 null, 并调用对应的回调函数
+ *
+ * 如果 perthread 不为 null, 设置 perthread_key 对应的 perthread 为 null
+ *      从 ovsrcu_threads 中删除 perthread_key 对应的值 perthread, 并释放 perthread 内存,
+ *      并通知其他线程有线程专有数据 perthread_key 被删除退出
+ *
+ *      如果是单线程:
+ *          遍历 flushed_cbsets 的每个元素的回调函数, 返回 true
+ *      如果是多线程:
+ *          创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+ * 否则
+ *      如果是单线程:
+ *          遍历 flushed_cbsets 的每个元素的回调函数, 返回 true
+ *      如果是多线程:
+ *          创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+ *
+ *  问题: 如果调用 该函数多次, 将会有多个线程执行 flushed_cbsets 是否是期望的?
+ */
 void
 ovsrcu_quiesce_start(void)
 {
@@ -125,9 +170,19 @@ ovsrcu_quiesce_start(void)
     perthread = pthread_getspecific(perthread_key);
     if (perthread) {
         pthread_setspecific(perthread_key, NULL);
+        /*
+         * 从 ovsrcu_threads 中删除当前线程 perthread_key 对应的值 perthread, 并释放 perthread 内存,
+         * 并通知其他线程有线程专有数据 perthread_key 被删除退出
+         */
         ovsrcu_unregister__(perthread);
     }
 
+    /*
+     * 如果是单线程:
+     *      遍历 flushed_cbsets 的每个元素的回调函数
+     * 如果是多线程:
+     *      创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+     */
     ovsrcu_quiesced();
 }
 
@@ -135,6 +190,15 @@ ovsrcu_quiesce_start(void)
  * ovs-rcu.h.
  *
  * Provides a full memory barrier via seq_change().
+ */
+/*
+ * 将当前线程专有数据 perthread_key 对应的 perthread 的 flushed_cbsets
+ * 刷新到全局变量 flushed_cbsets, 并调用对应的回调函数
+ *
+ * 1. 将线程局部数据 perthread->cbset 加入全局数据 flushed_cbsets. 并通知其他线程, flushed_cbsets 被更新了
+ * 2. 通知当前线程 seqno 改变了
+ * 3. 如果是单线程: 遍历 flushed_cbsets 的每个元素的回调函数
+ *    如果是多线程: 创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
  */
 void
 ovsrcu_quiesce(void)
@@ -144,13 +208,21 @@ ovsrcu_quiesce(void)
     perthread = ovsrcu_perthread_get();
     perthread->seqno = seq_read(global_seqno);
     if (perthread->cbset) {
+        //1. 将线程局部数据 perthread->cbset 加入全局数据 flushed_cbsets. 并通知其他线程, flushed_cbsets 被更新了
         ovsrcu_flush_cbset(perthread);
     }
     seq_change(global_seqno);
 
+    /*
+     * 如果是单线程:
+     *      遍历 flushed_cbsets 的每个元素的回调函数
+     * 如果是多线程:
+     *      创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+     */
     ovsrcu_quiesced();
 }
 
+//当前线程的 perthread_key 是否为 NULL
 bool
 ovsrcu_is_quiescent(void)
 {
@@ -158,6 +230,16 @@ ovsrcu_is_quiescent(void)
     return pthread_getspecific(perthread_key) == NULL;
 }
 
+/*
+ * 释放当前线程的 perthread_key, 新创建线程调用 flushed_cbsets 回调函数, 等待所有线程 seqno 变化, 然后初始化当前线程的 perthread_key
+ *
+ * 1. 如果是单线程, 返回
+ * 2. 如果是多线程, 删除当前线程 perthread_key 对应的 perthread, 之后, 等待所有
+ * 线程都删除该 perthread_key, 退出, 之后重新初始化该线程的 perthread_key
+ *
+ * NOTE: 这是 RCU 的核心机理, 等待所有的读者都释放旧值, 才初始化新的写者(seqno),
+ * 这里的需要注意的 RCU 操作必须尽量短, 如果是网络IO, 尽量是非阻塞的接口.
+ */
 void
 ovsrcu_synchronize(void)
 {
@@ -170,6 +252,14 @@ ovsrcu_synchronize(void)
     }
 
     target_seqno = seq_read(global_seqno);
+    /*
+     * 设置当前线程专有数据 perthread_key 对应的 perthread 为 null, 并调用对应的回调函数
+     *
+     * 1. 从 ovsrcu_threads 中删除 perthread_key 对应的值 perthread, 并释放 perthread 内存,
+     * 并通知其他线程有线程专有数据 perthread_key 被删除退出
+     *
+     * 2. 创建新线程, 脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
+     */
     ovsrcu_quiesce_start();
     start = time_msec();
 
@@ -180,6 +270,7 @@ ovsrcu_synchronize(void)
         unsigned int elapsed;
         bool done = true;
 
+        //等待所有线程的 seqno 都大于 target_seqno
         ovs_mutex_lock(&ovsrcu_threads_mutex);
         LIST_FOR_EACH (perthread, list_node, &ovsrcu_threads) {
             if (perthread->seqno <= target_seqno) {
@@ -228,6 +319,10 @@ ovsrcu_synchronize(void)
  * This function is more conveniently called through the ovsrcu_postpone()
  * macro, which provides a type-safe way to allow 'function''s parameter to be
  * any pointer type. */
+/*
+ * 为当前线程增加回调函数, 如果 perthread->cbset 实际数量多于 cbset->cbs 的大小,
+ * 将当前线程的 cbset 加入全局的 flushed_cbsets.
+ */
 void
 ovsrcu_postpone__(void (*function)(void *aux), void *aux)
 {
@@ -250,6 +345,12 @@ ovsrcu_postpone__(void (*function)(void *aux), void *aux)
     }
 }
 
+/*
+ * 当前处于 Quiescent 状态, 返回 false, 不处于 Quiescent, 等待直到进入 Quiescent, 返回 true.
+ *
+ * 如果 flushed_cbsets 为 null, 返回 false;
+ * 否则 调用 flushed_cbsets 的每个元素的回调函数, 返回 true
+ */
 static bool
 ovsrcu_call_postponed(void)
 {
@@ -261,8 +362,19 @@ ovsrcu_call_postponed(void)
         return false;
     }
 
+    /*
+     * 等待所有线程 perthread_key 都释放, 然后初始化当前线程的 perthread_key
+     *
+     * 1. 如果是单线程, 返回
+     * 2. 如果是多线程, 删除当前线程 perthread_key 对应的 perthread, 之后, 等待所有
+     * 线程都删除该 perthread_key, 退出, 之后重新初始化该线程的 perthread_key
+     *
+     * NOTE: 这是 RCU 的核心机理, 等待所有的读者都释放旧值, 才初始化新的写者, 这里的
+     * 需要注意的 RCU 操作必须尽量短, 如果是网络IO, 尽量是非阻塞的接口.
+     */
     ovsrcu_synchronize();
 
+    //调用 flushed_cbsets 的每个元素的回调函数
     LIST_FOR_EACH_POP (cbset, list_node, &cbsets) {
         struct ovsrcu_cb *cb;
 
@@ -275,6 +387,7 @@ ovsrcu_call_postponed(void)
     return true;
 }
 
+//当前线程脱离主线程, 循环遍历 flushed_cbsets 中的每个元素, 并调用对应的回调函数
 static void *
 ovsrcu_postpone_thread(void *arg OVS_UNUSED)
 {
@@ -282,6 +395,12 @@ ovsrcu_postpone_thread(void *arg OVS_UNUSED)
 
     for (;;) {
         uint64_t seqno = seq_read(flushed_cbsets_seq);
+        /*
+         * 当前处于 Quiescent 状态, 返回 false, 不处于 Quiescent, 等待直到进入 Quiescent, 返回 true.
+         *
+         * 如果 flushed_cbsets 为 null, 返回 false;
+         * 否则 调用 flushed_cbsets 的每个元素的回调函数, 返回 true
+         */
         if (!ovsrcu_call_postponed()) {
             seq_wait(flushed_cbsets_seq, seqno);
             poll_block();
@@ -291,6 +410,8 @@ ovsrcu_postpone_thread(void *arg OVS_UNUSED)
     OVS_NOT_REACHED();
 }
 
+//将线程局部数据 perthread->cbset 加入全局数据 flushed_cbsets. 并通知其他线程,
+//flushed_cbsets 被更新了
 static void
 ovsrcu_flush_cbset(struct ovsrcu_perthread *perthread)
 {
@@ -304,6 +425,10 @@ ovsrcu_flush_cbset(struct ovsrcu_perthread *perthread)
     }
 }
 
+/*
+ * 从 ovsrcu_threads 中删除 perthread_key 对应的值 perthread, 并释放 perthread 内存,
+ * 并通知其他线程有线程专有数据 perthread_key 被删除退出
+ */
 static void
 ovsrcu_unregister__(struct ovsrcu_perthread *perthread)
 {
@@ -321,6 +446,7 @@ ovsrcu_unregister__(struct ovsrcu_perthread *perthread)
     seq_change(global_seqno);
 }
 
+//线程专有数据 perthread_key 被删除时的回调函数
 static void
 ovsrcu_thread_exit_cb(void *perthread)
 {
@@ -333,12 +459,16 @@ ovsrcu_thread_exit_cb(void *perthread)
  * is needed while using pthreads-win32 library in Windows. It has been
  * observed that in pthreads-win32, a call to the destructor during
  * main thread exit causes undefined behavior. */
+//TODO
 static void
 ovsrcu_cancel_thread_exit_cb(void *aux OVS_UNUSED)
 {
     pthread_setspecific(perthread_key, NULL);
 }
 
+/*
+ * 保证线程专有数据和全局数据只被初始化一次
+ */
 static void
 ovsrcu_init_module(void)
 {
