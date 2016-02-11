@@ -154,6 +154,7 @@ rculist_poison__(struct rculist *list)
 }
 
 /* rculist insertion. */
+//elem 插入 before 之前
 static inline void
 rculist_insert(struct rculist *before, struct rculist *elem)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -167,6 +168,11 @@ rculist_insert(struct rculist *before, struct rculist *elem)
 /* Removes elements 'first' though 'last' (exclusive) from their current list,
  * which may NOT be visible to any other threads (== be hidden from them),
  * then inserts them just before 'before'. */
+/*
+ * 将 first~last 从当前链表删除, 之后加入 before 之前.
+ *
+ * NOTE: 这里 first 和 last 必须在同一链表
+ */
 static inline void
 rculist_splice_hidden(struct rculist *before, struct rculist *first,
                       struct rculist *last)
@@ -193,6 +199,7 @@ rculist_splice_hidden(struct rculist *before, struct rculist *first,
 
 /* Inserts 'elem' at the beginning of 'list', so that it becomes the front in
  * 'list'. */
+//elem 插入 list 之后
 static inline void
 rculist_push_front(struct rculist *list, struct rculist *elem)
 {
@@ -201,6 +208,7 @@ rculist_push_front(struct rculist *list, struct rculist *elem)
 
 /* Inserts 'elem' at the end of 'list', so that it becomes the back in
  * 'list'. */
+//elem 插入 list 之前
 static inline void
 rculist_push_back(struct rculist *list, struct rculist *elem)
 {
@@ -214,6 +222,11 @@ rculist_push_back(struct rculist *list, struct rculist *elem)
  * until all other threads quiesce.  The replaced node ('position') may not be
  * re-inserted, re-initialized, or deleted until after all other threads have
  * quiesced (use ovsrcu_postpone). */
+/*
+ * 用 element 代替 position 在链表中的位置
+ *
+ * position 可以继续访问后面的元素但是无法访问前面的元素
+ */
 static inline void
 rculist_replace(struct rculist *element, struct rculist *position)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -224,6 +237,7 @@ rculist_replace(struct rculist *element, struct rculist *position)
     position_next->prev = element;
     element->prev = position->prev;
     ovsrcu_set(&element->prev->next, element);
+    //position 可以继续访问后面的元素但是无法访问前面的元素
     rculist_poison(position);
 }
 
@@ -233,6 +247,7 @@ rculist_replace(struct rculist *element, struct rculist *position)
  *
  * Memory for 'src' must be kept around until the next RCU quiescent period.
  * rculist cannot be simply reallocated, so there is no rculist_moved(). */
+//用 src 替代 dst. 与 rculist_replace 没有区别
 static inline void
 rculist_move(struct rculist *dst, struct rculist *src)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -248,6 +263,7 @@ rculist_move(struct rculist *dst, struct rculist *src)
     } else {
         rculist_init(dst);
     }
+    //position 可以继续访问后面的元素但是无法访问前面的元素
     rculist_poison(src);
 }
 
@@ -261,6 +277,7 @@ rculist_move(struct rculist *dst, struct rculist *src)
  * re-inserted, re-initialized, or deleted until after all other threads have
  * quiesced (use ovsrcu_postpone).
  */
+//将 elem 从所属的列表删除, 返回 elem->next
 static inline struct rculist *
 rculist_remove(struct rculist *elem)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -269,6 +286,7 @@ rculist_remove(struct rculist *elem)
 
     elem_next->prev = elem->prev;
     ovsrcu_set(&elem->prev->next, elem_next);
+    //position 可以继续访问后面的元素但是无法访问前面的元素
     rculist_poison(elem);
     return elem_next;
 }
@@ -281,6 +299,7 @@ rculist_remove(struct rculist *elem)
  * by other threads until all other threads quiesce.  The returned node may not
  * be re-inserted, re-initialized, or deleted until after all other threads
  * have quiesced (use ovsrcu_postpone). */
+//将 list 下一个元素从所属链表删除
 static inline struct rculist *
 rculist_pop_front(struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -298,6 +317,7 @@ rculist_pop_front(struct rculist *list)
  * by other threads until all other threads quiesce.  The returned node may not
  * be re-inserted, re-initialized, or deleted until after all other threads
  * have quiesced (use ovsrcu_postpone). */
+//将 list 上一个元素从所属链表删除
 static inline struct rculist *
 rculist_pop_back(struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -309,6 +329,7 @@ rculist_pop_back(struct rculist *list)
 
 /* Returns the front element in 'list_'.
  * Undefined behavior if 'list_' is empty. */
+//找到 list 下一个元素
 static inline const struct rculist *
 rculist_front(const struct rculist *list)
 {
@@ -319,6 +340,7 @@ rculist_front(const struct rculist *list)
 
 /* Returns the back element in 'list_'.
  * Returns the 'list_' itself, if 'list_' is empty. */
+//返回到 list->prev 元素
 static inline struct rculist *
 rculist_back_protected(const struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -328,6 +350,7 @@ rculist_back_protected(const struct rculist *list)
 
 /* Returns the number of elements in 'list'.
  * Runs in O(n) in the number of elements. */
+//获取 rculist 的元素个数 O(n)
 static inline size_t
 rculist_size(const struct rculist *list)
 {
@@ -348,6 +371,7 @@ rculist_is_empty(const struct rculist *list)
 }
 
 /* Returns true if 'list' has 0 or 1 elements, false otherwise. */
+//是否 list 有一个元素
 static inline bool
 rculist_is_short_protected(const struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -356,6 +380,7 @@ rculist_is_short_protected(const struct rculist *list)
 }
 
 /* Returns true if 'list' has exactly 1 element, false otherwise. */
+//list 是否只有一个元素
 static inline bool
 rculist_is_singleton_protected(const struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
