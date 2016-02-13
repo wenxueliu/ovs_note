@@ -500,6 +500,7 @@ rightmost_1bit(uintmax_t x)
 
 /* Returns 'x' with its rightmost 1-bit changed to a zero (e.g. 01011000 =>
  * 01010000), or 0 if 'x' is 0. */
+//x 最右的 1 bit 为 0
 static inline uintmax_t
 zero_rightmost_1bit(uintmax_t x)
 {

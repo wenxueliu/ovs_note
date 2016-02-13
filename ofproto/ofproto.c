@@ -1849,14 +1849,6 @@ ofproto_type_run(const char *datapath_type)
      */
     class = ofproto_class_find__(datapath_type);
 
-    /*
-     * 核心实现
-     * 1. 将 ofproto->pins 的所有包发送给控制器
-     * 2. 运行 netflow, sflow, ipfix, boundle, stp, rstp, mac_learn, mcast_snooping, ofboundle
-     * 3. 遍历 ofproto->up.ports 的每一个端口, 调用　port_run(ofport)
-     * 4. 删除过期流表
-     * 5. boundle 重平衡
-     */
     error = class->type_run ? class->type_run(datapath_type) : 0;
     if (error && error != EAGAIN) {
         VLOG_ERR_RL(&rl, "%s: type_run failed (%s)",
@@ -1865,6 +1857,12 @@ ofproto_type_run(const char *datapath_type)
     return error;
 }
 
+/*
+ *
+ * dpif 所属的 dp_netdev 的所有 port 的所有 rxq 如果有数据包准备好(可读), 将数据包加入 rxq
+ *
+ * 实际调用 ofproto_dpif.c 中 type_wait
+ */
 void
 ofproto_type_wait(const char *datapath_type)
 {
@@ -1884,9 +1882,9 @@ ofproto_type_wait(const char *datapath_type)
  * 3. 遍历 ofproto->up.ports 的每一个端口, 设置 ofport 相关成员
  * 4. 删除过期流表
  * 5. 遍历 ofproto->rule_executes 中的所有 execute 将 execute 构造为 Netlink 消息, 发送给内核,要求内核执行 execute 中指定的的 action
- * 6. 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group,
- *    如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
- * 7. 更新 ofproto->port_poll_set 中每个元素对应的 ofport
+ * 6. 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group,
+ * 加入 eviction_group, 如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
+ * 7. 从 ofproto->port_poll_set 中依次取出元素, 更新每个元素对应的 ofport, 直到 ofproto->port_poll_set 为 NULL 或发生错误.
  * 8. 当发生配置更新时, 遍历 ofport->ports 中每一个端口 port, 如果 port->change_seq != port->netdev->change_seq, 表明 port 属性已经更改,更新之
  * 9. 最主要的就是将包发送出去, 然后调用回调函数处理应答. 此外, connmgr 中其他运行起来
  */
@@ -1922,8 +1920,10 @@ ofproto_run(struct ofproto *p)
 
     /* Restore the eviction group heap invariant occasionally. */
     /*
-     * 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,  如果 rule 不是永久存在流表, 如果不在 eviction_group, 加入 eviction_group,
-     * 如果已经存在, 计算 rule->evg_node->priority, 并对 table->eviction_groups_by_size 进行重排序
+     * 遍历 p->tables 的每张 table, 让每张 table 的所有的 rule,
+     * 1. 如果 rule 不是永久存在流表并且不在 eviction_group, 加入 eviction_group
+     * 如果已经存在, 计算 rule->evg_node->priority,
+     * 2. 对 table->eviction_groups_by_size 进行重排序
      */
     if (p->eviction_group_timer < time_msec()) {
         size_t i;
@@ -1949,11 +1949,12 @@ ofproto_run(struct ofproto *p)
             ovs_mutex_lock(&ofproto_mutex);
             /*
              * 通过遍历 CLS->subtables->subtable->rules_list 列表. 通过 rules_list 定位到 cls_rule, 通过 cls_rule 定位到 rule.
+             * 如果 rule->eviction != null 并且有过期时间, 就将其加入 rule->eviction_group->rules, 否则, 改变rule 的 priority
              */
             CLS_FOR_EACH (rule, cr, &table->cls) {
                 if (rule->idle_timeout || rule->hard_timeout) {
                     if (!rule->eviction_group) {
-                        //当 rule 所属的 table->eviction 不为 NULL, rule 有过期时间, 就将 rule 加入对应的 eviction_group 中
+                        //当 rule 所属的 table->eviction 不为 NULL 且 rule 有过期时间, 就将 rule 加入其所属的的 eviction_group 中
                         eviction_group_add_rule(rule);
                     } else {
                         //rule->evg_node->priority = rule_eviction_priority(p, rule)
@@ -1972,11 +1973,11 @@ ofproto_run(struct ofproto *p)
     }
 
     /*
-     * 更新 ofproto->port_poll_set 中每个元素对应的 ofport
+     * 从 ofproto->port_poll_set 中依次取出元素, 更新每个元素对应的 ofport, 直到 ofproto->port_poll_set 为 NULL 或发生错误.
      *
      * 如果 ofproto->port_poll_errno != 0, 返回 ofproto->port_poll_errno
      * 如果 ofproto->port_poll_set = NULL, 返回 EAGAIN
-     * 否则 从 ofproto->port_poll_set 弹出一个元素赋值给 devname, 更新  devname 对应的 ofport
+     * 否则 从 ofproto->port_poll_set 弹出一个元素赋值给 devname, 更新  devname 对应的 ofport, 直到 ofproto->port_poll_set 为 NULL
      */
     if (p->ofproto_class->port_poll) {
         char *devname;
@@ -2040,11 +2041,23 @@ ofproto_run(struct ofproto *p)
 void
 ofproto_wait(struct ofproto *p)
 {
+    /*
+     * 每个组件要不是超时唤醒, 要不是通过事件唤醒
+     * 包含组件: rstp, stp, lacp, netflow, sflow, ipfix, ml, ms, pins_seq
+     */
     p->ofproto_class->wait(p);
     if (p->ofproto_class->port_poll_wait) {
+        /*
+         * type=netdev
+         *     等待 dpif->dp->ports 中端口发生变化
+         * type=netlink
+         *     等待内核发送端口发生变化的广播信息
+         */
         p->ofproto_class->port_poll_wait(p);
     }
+    //pmd port 发生改变
     seq_wait(connectivity_seq_get(), p->change_seq);
+    //TODO
     connmgr_wait(p->connmgr);
 }
 
@@ -2086,6 +2099,9 @@ ofproto_type_get_memory_usage(const char *datapath_type, struct simap *usage)
     class = ofproto_class_find__(datapath_type);
 
     if (class && class->type_get_memory_usage) {
+        /*
+         * 获取 type 对应的  handlers, revalidators, udpif keys
+         */
         class->type_get_memory_usage(datapath_type, usage);
     }
 }
@@ -2130,11 +2146,13 @@ ofproto_port_destroy(struct ofproto_port *ofproto_port)
  * dump operation is provided when it is completed by calling
  * ofproto_port_dump_done().
  */
+//分配 port_dump_start 对象内存
 void
 ofproto_port_dump_start(struct ofproto_port_dump *dump,
                         const struct ofproto *ofproto)
 {
     dump->ofproto = ofproto;
+    //分配 port_dump_start 对象内存
     dump->error = ofproto->ofproto_class->port_dump_start(ofproto,
                                                           &dump->state);
 }
@@ -2160,6 +2178,15 @@ ofproto_port_dump_next(struct ofproto_port_dump *dump,
         return false;
     }
 
+    /*
+     * 如果 state->ghost = NULL, 遍历 ofproto->ghost_ports, ofproto->ports
+     * 如果 state->ghost != NULL, 遍历 ofproto->ghost_ports
+     *
+     * state_->ghost != NULL, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找到初始化 port, state_
+     * state_->ghost != NULL, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找不到返回 EOF
+     * state_->ghost == NULL, 遍历 ofproto->ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找到返回初始化 port, state_
+     * state_->ghost == NULL, 遍历 ofproto->ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 遍历 ofproto->ghost_ports 找到下一个在 ofport->ghost_ports 或 ofproto->ports 设备, 如果找不到返回 EOF; 如果找到初始化 port, state;
+     */
     dump->error = ofproto->ofproto_class->port_dump_next(ofproto, dump->state,
                                                          port);
     if (dump->error) {
@@ -2172,6 +2199,7 @@ ofproto_port_dump_next(struct ofproto_port_dump *dump,
 /* Completes port table dump operation 'dump', which must have been created
  * with ofproto_port_dump_start().  Returns 0 if the dump operation was
  * error-free, otherwise a positive errno value describing the problem. */
+//销毁 dump->state 内存
 int
 ofproto_port_dump_done(struct ofproto_port_dump *dump)
 {
@@ -2191,6 +2219,7 @@ ofproto_port_dump_done(struct ofproto_port_dump *dump)
  *
  * Returns either 'type' itself or a string literal, which must not be
  * freed. */
+//
 const char *
 ofproto_port_open_type(const char *datapath_type, const char *port_type)
 {
@@ -2202,6 +2231,17 @@ ofproto_port_open_type(const char *datapath_type, const char *port_type)
         return port_type;
     }
 
+    /*
+     * 将 datapath_type 解析后复制给 port_type
+     *
+     * 如果 datapath_type = system, 调用 dpif_netlink_class->port_open_type(dpif_netlink_class, port_type)
+     *     什么也不做
+     *
+     * 如果 datapath_type = netdev, 调用 dpif_netdev_class->port_open_type(dpif_netdev_class, port_type)
+     *     如果 type=internal, class=dpif_netdev_class 返回 dummy
+     *     如果 type=internal, class!=dpif_netdev_class 返回 tap
+     *     如果 type!=internal, 直接返回 type
+     */
     return (class->port_open_type
             ? class->port_open_type(datapath_type, port_type)
             : port_type);
@@ -2215,6 +2255,8 @@ ofproto_port_open_type(const char *datapath_type, const char *port_type)
  * OpenFlow port number (if 'ofp_portp' is non-null).  On failure,
  * returns a positive errno value and sets '*ofp_portp' to OFPP_NONE (if
  * 'ofp_portp' is non-null). */
+
+//将 ofp_portp 加入 ofproto->ofp_requests, 销毁 ofp_portp 对应的内存
 int
 ofproto_port_add(struct ofproto *ofproto, struct netdev *netdev,
                  ofp_port_t *ofp_portp)
@@ -2279,6 +2321,7 @@ ofproto_port_query_by_name(const struct ofproto *ofproto, const char *devname,
 
 /* Deletes port number 'ofp_port' from the datapath for 'ofproto'.
  * Returns 0 if successful, otherwise a positive errno. */
+//从 ofproto->ofp_requests 删除 ofp_port 对应的 ofport.
 int
 ofproto_port_del(struct ofproto *ofproto, ofp_port_t ofp_port)
 {
@@ -2292,6 +2335,10 @@ ofproto_port_del(struct ofproto *ofproto, ofp_port_t ofp_port)
         simap_delete(&ofproto->ofp_requests, ofp_request_node);
     }
 
+    /*
+     * 1. 从 ofproto->ghost_ports 删除 ofp_port 对应的元素
+     * 2. 如果 ofp_port 既不是 patch, 也不是 tunnel, 就从 dpif 删除 ofp_port
+     */
     error = ofproto->ofproto_class->port_del(ofproto, ofp_port);
     if (!error && ofport) {
         /* 'name' is the netdev's name and update_port() is going to close the
@@ -2305,6 +2352,7 @@ ofproto_port_del(struct ofproto *ofproto, ofp_port_t ofp_port)
     return error;
 }
 
+//用其他参数初始化 fm
 static void
 flow_mod_init(struct ofputil_flow_mod *fm,
               const struct match *match, int priority,
@@ -4354,6 +4402,7 @@ hash_cookie(ovs_be64 cookie)
     return hash_uint64((OVS_FORCE uint64_t)cookie);
 }
 
+// rule 加入 ofproto->cookies
 static void
 cookies_insert(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -5122,6 +5171,11 @@ handle_queue_stats_request(struct ofconn *ofconn,
     return error;
 }
 
+/*
+ * 如果 table 配置了淘汰机制(table->eviction == true), 从
+ * table->eviction_groups_by_size 中找出 table->n_flows - table->max_flows
+ * 条 rule, 之后删除这些 rule
+ */
 static enum ofperr
 evict_rules_from_table(struct oftable *table)
     OVS_REQUIRES(ofproto_mutex)
@@ -5133,6 +5187,16 @@ evict_rules_from_table(struct oftable *table)
 
     rule_collection_init(&rules);
 
+    /*
+     * 如果 table->eviction == false, 直接退出
+     * 否则, 循环从 table->eviction_groups_by_size 中找出一条流表, 从 rule->eviction_group
+     * 中删除, 加入 rules, 直到 table->n_flows 小于 table->max_flows
+     *
+     * FIXME:
+     * 这里刚刚让 table->n_flows 变为 table->max_flows 似乎不合适,
+     * 更为合适的是根据流表添加速度, 即将过期流表数量, 估计流表下次满的时间 10,
+     * 删除直到数量的rule
+     */
     while (count-- > max_flows) {
         struct rule *rule;
 
@@ -5140,15 +5204,27 @@ evict_rules_from_table(struct oftable *table)
             error = OFPERR_OFPFMFC_TABLE_FULL;
             break;
         } else {
+            /*
+             * 将 rule->eviction_group 删除 rule->evg_node.
+             * 如果 rule->eviction_group 为空, 从 table->eviction_groups_by_size 和 table->eviction_groups_by_id 中删除 rule->eviction_group
+             * 如果 rule->eviction_group 不为空, 重新分配 table->eviction_groups_by_size
+             */
             eviction_group_remove_rule(rule);
             rule_collection_add(&rules, rule);
         }
     }
+    //TODO
     delete_flows__(&rules, OFPRR_EVICTION, NULL);
 
     return error;
 }
 
+/*
+ * conjsp : 指向 fm->ofpacts 中所有 type 为 OFPACT_CONJUNCTION 的 ofpact_conjunction
+ * n_conjsp : fm->ofpacts 中 type 为 OFPACT_CONJUNCTION 的个数
+ *
+ * 用 fm 初始化 conjsp, n_conjsp
+ */
 static void
 get_conjunctions(const struct ofputil_flow_mod *fm,
                  struct cls_conjunction **conjsp, size_t *n_conjsp)
@@ -5158,6 +5234,7 @@ get_conjunctions(const struct ofputil_flow_mod *fm,
     int n_conjs = 0;
 
     const struct ofpact *ofpact;
+    //遍历 fm->ofpacts 的每个元素 ofpact, 
     OFPACT_FOR_EACH (ofpact, fm->ofpacts, fm->ofpacts_len) {
         if (ofpact->type == OFPACT_CONJUNCTION) {
             n_conjs++;
@@ -5202,7 +5279,7 @@ get_conjunctions(const struct ofputil_flow_mod *fm,
  * 1. 检查 fm->table_id 的合法性
  * 2. 计算合适的 table_id
  * 3. 根据 table_id 找到 table(ofproto->tables[table_id])
- * 4. 检查 fm->flags 和 table->flags 的一致性
+ * 4. 检查 fm->flags 和 table->flags 的合法性
  *
  * TODO
  *
@@ -5230,6 +5307,7 @@ add_flow_start(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
 
     /* Pick table. */
     if (fm->table_id == 0xff) {
+        //目前不会执行
         if (ofproto->ofproto_class->rule_choose_table) {
             error = ofproto->ofproto_class->rule_choose_table(ofproto,
                                                               &fm->match,
@@ -5260,28 +5338,51 @@ add_flow_start(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
         return OFPERR_OFPBRC_EPERM;
     }
 
+    //用 fm->priority, fm->match 初始化 cr
     cls_rule_init(&cr, &fm->match, fm->priority);
 
     /* Check for the existence of an identical rule.
      * This will not return rules earlier marked for removal. */
+    /*
+     * 1. 在 table->cls-subtables_map 中找到 cr->match.mask 的 subtable
+     * 2. 在 subtable 中找到 cr->match.flow 的 head
+     * 3. 在 head 找到 rule->priority == cr->priority 的 head->cls_rule
+     * 4. 如果找到根据找到的 head->cls_rule 所属的 rule
+     *    如果没有找到, rule = null
+     */
     rule = rule_from_cls_rule(classifier_find_rule_exactly(&table->cls, &cr,
                                                            ofm->version));
     *old_rule = rule;
     if (!rule) {
         /* Check for overlap, if requested. */
+        //检查 table->cls 中是否存在与 ofm->mf 相同的流表
         if (fm->flags & OFPUTIL_FF_CHECK_OVERLAP
+            /*
+             * 在 version 约束下, 检查 cls 中是否存在与 target 相同的流表.
+             *
+             * 1. 遍历 cls->subtables 的每个 subtable
+             * 2. 遍历 subtable->rules_list 找到与 target 匹配的 rule. 返回 true
+             *
+             * 如果在 1,2 中没有找到匹配的, 返回 false
+             */
             && classifier_rule_overlaps(&table->cls, &cr, ofm->version)) {
             cls_rule_destroy(&cr);
             return OFPERR_OFPFMFC_OVERLAP;
         }
 
         /* If necessary, evict an existing rule to clear out space. */
+        //如果实际流表数量大于流表的最大容量, 试图清除一些流表
         if (table->n_flows >= table->max_flows) {
             if (!choose_rule_to_evict(table, &rule)) {
                 error = OFPERR_OFPFMFC_TABLE_FULL;
                 cls_rule_destroy(&cr);
                 return error;
             }
+            /*
+             * 将 rule->eviction_group 删除 rule->evg_node.
+             * 如果 rule->eviction_group 为空, 从 table->eviction_groups_by_size 和 table->eviction_groups_by_id 中删除 rule->eviction_group
+             * 如果 rule->eviction_group 不为空, 重新分配 table->eviction_groups_by_size
+             */
             eviction_group_remove_rule(rule);
             /* Marks '*old_rule' as an evicted rule rather than replaced rule.
              */
@@ -5293,13 +5394,23 @@ add_flow_start(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
     }
 
     /* Allocate new rule. */
+    /*
+     * 用 ofproto fm, cr, rule, table-ofproto->tables 初始化 new_rule
+     */
     error = replace_rule_create(ofproto, fm, &cr, table - ofproto->tables,
                                 rule, new_rule);
     if (error) {
         return error;
     }
 
+    /*
+     * conjsp : 指向 fm->ofpacts 中所有 type 为 OFPACT_CONJUNCTION 的 ofpact_conjunction
+     * n_conjsp : fm->ofpacts 中 type 为 OFPACT_CONJUNCTION 的个数
+     *
+     * 用 fm 初始化 conjsp, n_conjsp
+     */
     get_conjunctions(fm, &conjs, &n_conjs);
+    //
     replace_rule_start(ofproto, ofm->version, rule, *new_rule, conjs, n_conjs);
     free(conjs);
 
@@ -5387,6 +5498,7 @@ replace_rule_create(struct ofproto *ofproto, struct ofputil_flow_mod *fm,
 
     /* Initialize base state. */
     *CONST_CAST(struct ofproto **, &rule->ofproto) = ofproto;
+    //用 cr 初始化 rule->cr. rule->cr 与 cr 指向同一内存, 修改 rule->cr, cr 也将被修改
     cls_rule_move(CONST_CAST(struct cls_rule *, &rule->cr), cr);
     ovs_refcount_init(&rule->ref_count);
     rule->flow_cookie = fm->new_cookie;
@@ -5444,8 +5556,11 @@ replace_rule_create(struct ofproto *ofproto, struct ofputil_flow_mod *fm,
     return 0;
 }
 
-//将 old_rule 不可见, 将 new_rule 加入 ofproto->table
-//TODO
+/*
+ * 将 old_rule 在下一版本 version 不可见, 将 new_rule 加入 ofproto 的 expirable,
+ * cookies, eviction_group, meters, TODO
+ *
+ */
 static void
 replace_rule_start(struct ofproto *ofproto, cls_version_t version,
                    struct rule *old_rule, struct rule *new_rule,
@@ -5453,6 +5568,10 @@ replace_rule_start(struct ofproto *ofproto, cls_version_t version,
 {
     struct oftable *table = &ofproto->tables[new_rule->table_id];
 
+    /*
+     * 如果 old_rule 为 NUL, new_rule 对应的 table 的 n_flows 减一
+     * 如果 old_rule 不为 NULL, old_rule->cr->cls_match->remove_version = version
+     */
     /* 'old_rule' may be either an evicted rule or replaced rule. */
     if (old_rule) {
         /* Mark the old rule for removal in the next version. */
@@ -5463,9 +5582,18 @@ replace_rule_start(struct ofproto *ofproto, cls_version_t version,
     /* Insert flow to the classifier, so that later flow_mods may relate
      * to it.  This is reversible, in case later errors require this to
      * be reverted. */
+    /*
+     * 将 new_rule 加入 ofproto 的 expirable, cookies, eviction_group, meters
+     *
+     * 1. 如果 rule 是过期流表, 将 rule->expirable 加入 ofproto->expirable
+     * 2. 将 rule 加入 ofproto->cookies 及其所属的 eviction_group
+     * 3. 如果 rule->actions->has_meter, 将 rule 加入 ofproto->meters
+     * 3. rule->removed 为 false
+     */
     ofproto_rule_insert__(ofproto, new_rule);
     /* Make the new rule visible for classifier lookups only from the next
      * version. */
+    //TODO
     classifier_insert(&table->cls, &new_rule->cr, version, conjs, n_conjs);
 }
 
@@ -5792,7 +5920,7 @@ delete_flows_finish__(struct ofproto *ofproto,
                              req ? req->ofconn : NULL,
                              req ? req->request->xid : 0, NULL);
             /*
-            * 释放 rule 的数据成员分配的内存
+            * 释放 rule 的数据成员分配的内存, 标记 rule 被删除
             */
             ofproto_rule_remove__(ofproto, rule);
             //TODO
@@ -5800,6 +5928,7 @@ delete_flows_finish__(struct ofproto *ofproto,
                                 &dead_cookies);
         }
         /*
+         * TODO
          * 遍历 rules 每一个元素
          *     rule->ofproto->tables[rule->table_id]->cls 删除 rule->cr
          *     rule->ofproto->ofproto_class->rule_delete(rule)
@@ -6073,7 +6202,7 @@ exit:
 }
 
 /*
- * TODO
+ *
  */
 static enum ofperr
 handle_flow_mod__(struct ofproto *ofproto, struct ofproto_flow_mod *ofm,
@@ -6558,6 +6687,9 @@ get_provider_meter_id(const struct ofproto *ofproto, uint32_t of_meter_id)
 
 /* Finds the meter invoked by 'rule''s actions and adds 'rule' to the meter's
  * list of rules. */
+/*
+ * 将 rule 加入其所属的 meter->rules
+ */
 static void
 meter_insert_rule(struct rule *rule)
 {
@@ -7544,6 +7676,7 @@ handle_table_mod(struct ofconn *ofconn, const struct ofp_header *oh)
     return table_mod(ofproto, &tm);
 }
 
+//根据 ofm->fm.command 调用对应的函数
 static enum ofperr
 ofproto_flow_mod_start(struct ofproto *ofproto, struct ofproto_flow_mod *ofm)
     OVS_REQUIRES(ofproto_mutex)
@@ -8185,6 +8318,13 @@ pick_fallback_dpid(void)
  * to NULL if the table is not configured to evict rules or if the table
  * contains no evictable rules.  (Rules with a readlock on their evict rwlock,
  * or with no timeouts are not evictable.) */
+/*
+ * 找出 table->eviction_groups_by_size 中　size 最大的 eviction_group 的第一
+ * 条流表项
+ *
+ * 如果 table 没有配置流表淘汰机制, 返回 false. 如果配置了, 返回 true. rulep
+ * 指向淘汰的流表.
+ */
 static bool
 choose_rule_to_evict(struct oftable *table, struct rule **rulep)
     OVS_REQUIRES(ofproto_mutex)
@@ -8192,6 +8332,8 @@ choose_rule_to_evict(struct oftable *table, struct rule **rulep)
     struct eviction_group *evg;
 
     *rulep = NULL;
+    //如果 table->eviction 为 0, 表面 client 和 openflow controller 都没有打开
+    //流表项淘汰报错的机制, 因此返回 false.
     if (!table->eviction) {
         return false;
     }
@@ -8208,6 +8350,10 @@ choose_rule_to_evict(struct oftable *table, struct rule **rulep)
      *
      *   - The outer loop can exit only if table's 'max_flows' is all filled up
      *     by unevictable rules. */
+    /*
+     * 找出 table->eviction_groups_by_size 中　size 最大的 eviction_group 的第一
+     * 条流表项
+     */
     HEAP_FOR_EACH (evg, size_node, &table->eviction_groups_by_size) {
         struct rule *rule;
 
@@ -8234,6 +8380,7 @@ eviction_group_priority(size_t n_rules)
 
 /* Updates 'evg', an eviction_group within 'table', following a change that
  * adds or removes rules in 'evg'. */
+//TODO
 static void
 eviction_group_resized(struct oftable *table, struct eviction_group *evg)
     OVS_REQUIRES(ofproto_mutex)
@@ -8251,8 +8398,9 @@ eviction_group_resized(struct oftable *table, struct eviction_group *evg)
  *
  *   - Frees 'evg'. */
 /*
- * 经 evg 从 table->eviction_groups_by_id 和 table->eviction_groups_by_size
- * 中删除, 将 evg->rules 所属的 rule->eviction_group = NULL, 释放 evg 的堆
+ * 将 evg->rules 所属的 rule->eviction_group = NULL, 释放 evg 的堆
+ * 将 evg 从 table->eviction_groups_by_id 和 table->eviction_groups_by_size
+ * 中删除
  */
 static void
 eviction_group_destroy(struct oftable *table, struct eviction_group *evg)
@@ -8272,7 +8420,9 @@ eviction_group_destroy(struct oftable *table, struct eviction_group *evg)
 
 /* Removes 'rule' from its eviction group, if any. */
 /*
- * 将 rule->evg_node 从 rule->eviction_group 中删除.
+ * 将 rule->eviction_group 删除 rule->evg_node.
+ * 如果 rule->eviction_group 为空, 从 table->eviction_groups_by_size 和 table->eviction_groups_by_id 中删除 rule->eviction_group
+ * 如果 rule->eviction_group 不为空, 重新分配 table->eviction_groups_by_size
  */
 static void
 eviction_group_remove_rule(struct rule *rule)
@@ -8285,6 +8435,11 @@ eviction_group_remove_rule(struct rule *rule)
         rule->eviction_group = NULL;
         heap_remove(&evg->rules, &rule->evg_node);
         if (heap_is_empty(&evg->rules)) {
+           /*
+            * 将 evg->rules 所属的 rule->eviction_group = NULL, 释放 evg 的堆
+            * 将 evg 从 table->eviction_groups_by_id 和 table->eviction_groups_by_size
+            * 中删除
+            */
             eviction_group_destroy(table, evg);
         } else {
             eviction_group_resized(table, evg);
@@ -8423,7 +8578,7 @@ rule_eviction_priority(struct ofproto *ofproto, struct rule *rule)
  * own).
  *
  * The caller must ensure that 'rule' is not already in an eviction group. */
-//当 rule 所属的 table->eviction 不为 NULL, rule 有过期时间, 就将 rule 加入对应的 eviction_group 中
+//当 rule 所属的 table->eviction 不为 NULL 且 rule 有过期时间, 就将 rule 加入其所属的的 eviction_group 中
 static void
 eviction_group_add_rule(struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -8440,8 +8595,8 @@ eviction_group_add_rule(struct rule *rule)
         struct eviction_group *evg;
 
         /*
-         * 如果 id 对应的 eviction_group 存在, 直接返回
-         * 如果 id 对应的 eviction_group 不存在, 添加之后返回
+         * 如果 eviction_group_hash_rule(rule) 对应的 eviction_group 存在, 直接返回
+         * 如果 eviction_group_hash_rule(rule) 对应的 eviction_group 不存在, 添加之后返回
          */
         evg = eviction_group_find(table, eviction_group_hash_rule(rule));
 
@@ -8576,6 +8731,14 @@ oftable_configure_eviction(struct oftable *table, unsigned int eviction,
 
 /* Inserts 'rule' from the ofproto data structures BEFORE caller has inserted
  * it to the classifier. */
+/*
+ * 将　rule 加入 ofproto 的 expirable, cookies, eviction_group, meters
+ *
+ * 1. 如果 rule 是过期流表, 将 rule->expirable 加入 ofproto->expirable
+ * 2. 将 rule 加入 ofproto->cookies 及其所属的 eviction_group
+ * 3. 如果 rule->actions->has_meter, 将 rule 加入 ofproto->meters
+ * 3. rule->removed 为 false
+ */
 static void
 ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
     OVS_REQUIRES(ofproto_mutex)
@@ -8587,9 +8750,14 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
     if (rule->hard_timeout || rule->idle_timeout) {
         list_insert(&ofproto->expirable, &rule->expirable);
     }
+    // rule 加入 ofproto->cookies
     cookies_insert(ofproto, rule);
+    //当 rule 所属的 table->eviction 为 NULL 且 rule 有过期时间, 就将 rule 加入对应的 eviction_group 中
     eviction_group_add_rule(rule);
     if (actions->has_meter) {
+        /*
+         * 将 rule 加入其所属的 meter->rules
+         */
         meter_insert_rule(rule);
     }
     rule->removed = false;
@@ -8598,7 +8766,7 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
 /* Removes 'rule' from the ofproto data structures.  Caller may have deferred
  * the removal from the classifier. */
 /*
- * 释放 rule 的数据成员分配的内存
+ * 释放 rule 的数据成员分配的内存, 并标记 rule 被删除
  */
 static void
 ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
@@ -8612,9 +8780,13 @@ ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
     cookies_remove(ofproto, rule);
 
     /*
-    * 将 rule->evg_node 从 rule->eviction_group 中删除.
-    */
+     * 1. rule->eviction_group 删除 rule->evg_node.
+     * 2. 如果 rule->eviction_group 为空, 从 table->eviction_groups_by_size 和 table->eviction_groups_by_id 中删除 rule->eviction_group
+     * 3. 如果 rule->eviction_group 不为空, 重新分配 table->eviction_groups_by_size
+     */
     eviction_group_remove_rule(rule);
+    //如果 rule->expirable 为 null, 删除 rule->expirable
+    //如果 rule->meter_list_node 为 null, 删除并重新初始化 rule->meter_list_node
     if (!list_is_empty(&rule->expirable)) {
         list_remove(&rule->expirable);
     }
@@ -8623,6 +8795,7 @@ ofproto_rule_remove__(struct ofproto *ofproto, struct rule *rule)
         list_init(&rule->meter_list_node);
     }
 
+    //标记 rule 被删除
     rule->removed = true;
 }
 

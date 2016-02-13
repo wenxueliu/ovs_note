@@ -2925,6 +2925,8 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
  * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
  * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
  * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+ *
+ * 问题: 更新 flow->batch 具体值什么?
  */
 static bool
 dpif_netdev_run(struct dpif *dpif)
@@ -2943,6 +2945,13 @@ dpif_netdev_run(struct dpif *dpif)
     uint64_t new_tnl_seq;
 
     ovs_mutex_lock(&dp->non_pmd_mutex);
+    /*
+     * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+     * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+     */
     CMAP_FOR_EACH (port, node, &dp->ports) {
         //过滤掉 port->netdev->netdev_class->type 是 dpdk, dpdkr, dpdkvhostuser, dpdkvhostcuse port
         if (!netdev_is_pmd(port->netdev)) {
@@ -2994,7 +3003,7 @@ dpif_netdev_wait(struct dpif *dpif)
             int i;
 
             for (i = 0; i < netdev_n_rxq(port->netdev); i++) {
-                //什么也不做
+                //等待 port->rxq[i] 可读
                 netdev_rxq_wait(port->rxq[i]);
             }
         }

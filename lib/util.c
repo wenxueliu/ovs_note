@@ -1036,12 +1036,14 @@ english_list_delimiter(size_t index, size_t total)
 /* Defined inline in util.h. */
 #else
 /* Returns the number of trailing 0-bits in 'n'.  Undefined if 'n' == 0. */
+//计算 n 二进制表示中 0 结尾的个数
 int
 raw_ctz(uint64_t n)
 {
     uint64_t k;
     int count = 63;
 
+    //计算非常巧妙
 #define CTZ_STEP(X)                             \
     k = n << (X);                               \
     if (k) {                                    \
@@ -1084,6 +1086,21 @@ raw_clz64(uint64_t n)
 }
 #endif
 
+/*
+ *
+ *                                                32
+ *                                                (0)
+ *                        16                                             16
+ *                        (0)                                            (16)
+ *            8                       8                       8                       8
+ *           (0)                     (8)                     (16)                    (24)
+ *      4           4           4           4           4           4           4           4
+ *     (0)         (4)         (8)         (12)        (16)        (20)       (24)         (28)
+ *   2     2     2     2     2     2     2     2     2     2     2     2     2     2     2     2
+ *  (0)   (2)   (4)   (6)   (8)   (10)  (12)  (14)  (16)  (18)  (20)  (22)  (24)  (26)  (28)  (30)
+ * 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1 1   1
+ *(0) (1)(1)(2)(1)(2)(2)(2)(1)(2)(2)(3)(2)(3)(3)(3)(1)(2)(2)(3)(2)(3)(3)(4)(2)(3)(3)....
+ */
 #if NEED_COUNT_1BITS_8
 #define INIT1(X)                                \
     ((((X) & (1 << 0)) != 0) +                  \

@@ -607,6 +607,9 @@ udpif_dump_seq(struct udpif *udpif)
     return udpif->dump_seq;
 }
 
+/*
+ * 获取 handlers, revalidators, udpif keys
+ */
 void
 udpif_get_memory_usage(struct udpif *udpif, struct simap *usage)
 {

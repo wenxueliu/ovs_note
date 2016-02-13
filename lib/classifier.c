@@ -177,25 +177,42 @@ cls_rule_init__(struct cls_rule *rule, unsigned int priority)
  *
  * Clients should not use priority INT_MIN.  (OpenFlow uses priorities between
  * 0 and UINT16_MAX, inclusive.) */
+/*
+ * 用 match, priority 初始化 cls_rule 各个成员
+ */
 void
 cls_rule_init(struct cls_rule *rule, const struct match *match, int priority)
 {
     cls_rule_init__(rule, priority);
+    /*
+     * 用 match->wc.masks 初始化 rule->match->flow dst->mask, 都不包含 values 成员
+     * 用 match->flow 以 uint64_t 为单位初始化 rule->match->flow->values
+     * 用 match->wc->masks 以 uint64_t 为单位初始化 rule->match->mask->values
+     */
     minimatch_init(CONST_CAST(struct minimatch *, &rule->match), match);
 }
 
 /* Same as cls_rule_init() for initialization from a "struct minimatch". */
+/*
+ * 用 match, priority 初始化 cls_rule 各个成员.
+ */
 void
 cls_rule_init_from_minimatch(struct cls_rule *rule,
                              const struct minimatch *match, int priority)
 {
     cls_rule_init__(rule, priority);
+    /*
+     * 为 dst->flows 分配 2 个 tmp(包含 values) 空间, 拷贝 2 个 tmp(不包含 values) 到 dst->flows 中.
+     * src->flow 的 values 拷贝到 dst-flow
+     * src->mask->masks 的 values 拷贝到 dst->mask->masks
+     */
     minimatch_clone(CONST_CAST(struct minimatch *, &rule->match), match);
 }
 
 /* Initializes 'dst' as a copy of 'src'.
  *
  * The caller must eventually destroy 'dst' with cls_rule_destroy(). */
+//用 src->match 初始化 dst. dst 与 src 指向不同的内存
 void
 cls_rule_clone(struct cls_rule *dst, const struct cls_rule *src)
 {
@@ -208,10 +225,12 @@ cls_rule_clone(struct cls_rule *dst, const struct cls_rule *src)
  * 'src' must be a cls_rule NOT in a classifier.
  *
  * The caller must eventually destroy 'dst' with cls_rule_destroy(). */
+//用 src 初始化 dst. dst 与 src 指向同一内存, 修改 src, dst 也将被修改
 void
 cls_rule_move(struct cls_rule *dst, struct cls_rule *src)
 {
     cls_rule_init__(dst, src->priority);
+    //dst->match 指向 src->match
     minimatch_move(CONST_CAST(struct minimatch *, &dst->match),
                    CONST_CAST(struct minimatch *, &src->match));
 }
@@ -220,6 +239,7 @@ cls_rule_move(struct cls_rule *dst, struct cls_rule *src)
  * normally embedded into a larger structure).
  *
  * ('rule' must not currently be in a classifier.) */
+//销毁 rule
 void
 cls_rule_destroy(struct cls_rule *rule)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -1343,6 +1363,12 @@ classifier_lookup(const struct classifier *cls, cls_version_t version,
  * matching criteria as 'target', and that is visible in 'version'.
  * Only one such rule may ever exist.  Returns a null pointer if 'cls' doesn't
  * contain an exact match. */
+/*
+ * 在 cls-subtables_map 中找到 target->match.mask 的 subtable
+ * 在 subtable 中找到 target->match.flow 的 head
+ * 在 head 找到 rule->priority == target->priority 的 head->cls_rule
+ * 返回 head->cls_rule
+ */
 const struct cls_rule *
 classifier_find_rule_exactly(const struct classifier *cls,
                              const struct cls_rule *target,
@@ -1351,17 +1377,28 @@ classifier_find_rule_exactly(const struct classifier *cls,
     const struct cls_match *head, *rule;
     const struct cls_subtable *subtable;
 
+    /*
+     * 遍历 cls->subtables_map 的每个元素 subtable, 找到 subtable->mask 等于 target->match.mask 的 cls_subtable
+     */
     subtable = find_subtable(cls, target->match.mask);
     if (!subtable) {
         return NULL;
     }
 
+    /*
+     * 在 subtable->rules 的每个元素 head 中找到 head->flow 等于 target->match.flow 的 head. 返回该 head
+     */
     head = find_equal(subtable, target->match.flow,
                       miniflow_hash_in_minimask(target->match.flow,
                                                 target->match.mask, 0));
     if (!head) {
         return NULL;
     }
+    /*
+     * 遍历 head, 找到 rule->priority 等于 target->priority 并且
+     * rule->add_version < version < rule->remove_version 则返回
+     * rule->cls_rule
+     */
     CLS_MATCH_FOR_EACH (rule, head) {
         if (rule->priority < target->priority) {
             break; /* Not found. */
@@ -1401,6 +1438,14 @@ classifier_find_match_exactly(const struct classifier *cls,
  * of fields. E.g., if one rule matches only on port number, while another only
  * on dl_type, any packet from that specific port and with that specific
  * dl_type could match both, if the rules also have the same priority. */
+/*
+ * 在 version 约束下, 检查 cls 中是否存在与 target 相同的流表.
+ *
+ * 1. 遍历 cls->subtables 的每个 subtable
+ * 2. 遍历 subtable->rules_list 找到与 target 匹配的 rule. 返回 true
+ *
+ * 如果在 1,2 中没有找到匹配的, 返回 false
+ */
 bool
 classifier_rule_overlaps(const struct classifier *cls,
                          const struct cls_rule *target, cls_version_t version)
@@ -1408,6 +1453,7 @@ classifier_rule_overlaps(const struct classifier *cls,
     struct cls_subtable *subtable;
 
     /* Iterate subtables in the descending max priority order. */
+    //遍历 cls->subtables 找到 priority 大于等于 target->priority 的 subtable
     PVECTOR_FOR_EACH_PRIORITY (subtable, target->priority - 1, 2,
                                sizeof(struct cls_subtable), &cls->subtables) {
         struct {
@@ -1416,13 +1462,31 @@ classifier_rule_overlaps(const struct classifier *cls,
         } m;
         const struct cls_rule *rule;
 
+        /*
+         * m.mask->tnl_map 保存了 target->match.mask->tnl_map 和 subtable->mask->tnl_map 的交集
+         * m.mask->pkt_map 保存了 target->match.mask->pkt_map 和 subtable->mask->pkt_map 的交集
+         * m.storage 保存了 target->match.mask 和 subtable->mask 中 values 的交集
+         */
         minimask_combine(&m.mask, target->match.mask, &subtable->mask,
                          m.storage);
 
+        //遍历 subtable->rules_list 的每个元素 rule, 找到 rule 的 priority 和
+        //math.flow 相同的 rule. 返回 true
         RCULIST_FOR_EACH (rule, node, &subtable->rules_list) {
             if (rule->priority == target->priority
+                /*
+                 * 检查在掩码 mask 下, a 和 b 是否一样.
+                 *
+                 * 遍历 mask->masks 的 tnl_map 和 pkt_map 中非 0 的位.
+                 * 如果 a 对应的 bit 与 b 对应的 bit 不相同, 而且 mask->masks->values 对应的 uint64_t 不为 0
+                 * 返回 false
+                 * 否则返回 true
+                 *
+                 * 注: mask->masks 对应的 bit 为 1 表必须匹配, bit 为 0 表可选匹配.
+                 */
                 && miniflow_equal_in_minimask(target->match.flow,
                                               rule->match.flow, &m.mask)
+                //返回 rule->add_version <= version < rule->remove_version;
                 && cls_match_visible_in_version(rule->cls_match, version)) {
                 return true;
             }
@@ -1593,6 +1657,9 @@ cls_cursor_advance(struct cls_cursor *cursor)
     cursor->rule = cls_cursor_next(cursor);
 }
 
+/*
+ * 遍历 cls->subtables_map 的每个元素 subtable, 找到 subtable->mask 等于 mask 的 cls_subtable
+ */
 static struct cls_subtable *
 find_subtable(const struct classifier *cls, const struct minimask *mask)
 {
@@ -2000,6 +2067,10 @@ find_match_wc(const struct cls_subtable *subtable, cls_version_t version,
     return rule;
 }
 
+/*
+ * 在 subtable->rules 的每个元素 head 中找到 head->flow 等于 flow 的 head.
+ * 返回该 head
+ */
 static struct cls_match *
 find_equal(const struct cls_subtable *subtable, const struct miniflow *flow,
            uint32_t hash)

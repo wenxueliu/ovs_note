@@ -109,6 +109,7 @@ cls_match_set_remove_version(struct cls_match *rule, cls_version_t version)
     atomic_store_relaxed(&rule->remove_version, version);
 }
 
+//返回 rule->add_version <= version < rule->remove_version;
 static inline bool
 cls_match_visible_in_version(const struct cls_match *rule,
                              cls_version_t version)

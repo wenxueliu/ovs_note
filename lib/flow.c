@@ -2247,6 +2247,7 @@ flow_compose(struct dp_packet *p, const struct flow *flow)
  * Normally the significant elements are the ones that are non-zero.  However,
  * when a miniflow is initialized from a (mini)mask, the values can be zeroes,
  * so that the flow and mask always have the same maps. */
+//dst->values 每个元素指向 src 以 uint64_t 为单位的值
 void
 miniflow_init(struct miniflow *dst, const struct flow *src)
 {
@@ -2260,6 +2261,16 @@ miniflow_init(struct miniflow *dst, const struct flow *src)
 }
 
 /* Initialize the maps of 'flow' from 'src'. */
+
+/*
+ * flow->flow_tnl 记录 src 中 flow_tnl 中 uint64_t 为单元的非 0 的 bit
+ * flow->pkt_map 记录 src 中 其余属性中 uint64_t 为单元的非 0 的 bit
+ *
+ * miniflow->tnl_map 记录了 flow->flow_tnl 中 uint64_t 的个数, 如果每个 uint64_t
+ * 对应的值不为 0, tnl_map 对应的位为 1. 最多支持 64 个 bit. 即 flow->flow_tnl
+ * 最长为 64 个 uint64_t.
+ * miniflow->pkt_map 记录了 flow->flow_tnl 之后的以 uint64_t 为单位的值是否为 0.
+ */
 void
 miniflow_map_init(struct miniflow *flow, const struct flow *src)
 {
@@ -2285,6 +2296,8 @@ miniflow_map_init(struct miniflow *flow, const struct flow *src)
 /* Allocates 'n' count of miniflows, consecutive in memory, initializing the
  * map of each from 'src'.
  * Returns the size of the miniflow data. */
+
+//为 dsts 分配 n 个 src(包含 values) 空间, 拷贝 n 个 src(不包含 values) 到 dsts 中. 返回 src 的成员 values 的长度
 size_t
 miniflow_alloc(struct miniflow *dsts[], size_t n, const struct miniflow *src)
 {
@@ -2306,21 +2319,33 @@ miniflow_alloc(struct miniflow *dsts[], size_t n, const struct miniflow *src)
 
 /* Returns a miniflow copy of 'src'.  The caller must eventually free() the
  * returned miniflow. */
+/*
+ * 用 flow 初始化 miniflow
+ *
+ * 问题: 为什么不直接初始化, 也经过 tmp 来初始化
+ */
 struct miniflow *
 miniflow_create(const struct flow *src)
 {
     struct miniflow tmp;
     struct miniflow *dst;
 
+    /*
+     * tmp->flow_tnl 记录 src 中 flow_tnl 中 uint64_t 为单元的非 0 的 bit
+     * tmp->pkt_map 记录 src 中 其余属性中 uint64_t 为单元的非 0 的 bit
+     */
     miniflow_map_init(&tmp, src);
 
+    //拷贝 1 个 tmp 到 dst 中. 返回 tmp 的成员 values 的长度
     miniflow_alloc(&dst, 1, &tmp);
+    //dst->values 每个元素指向 src 以 uint64_t 为单位的值
     miniflow_init(dst, src);
     return dst;
 }
 
 /* Initializes 'dst' as a copy of 'src'.  The caller must have allocated
  * 'dst' to have inline space for 'n_values' data in 'src'. */
+//拷贝 src 到 dst
 void
 miniflow_clone(struct miniflow *dst, const struct miniflow *src,
                size_t n_values)
@@ -2375,6 +2400,16 @@ miniflow_equal(const struct miniflow *a, const struct miniflow *b)
 
 /* Returns false if 'a' and 'b' differ at the places where there are 1-bits
  * in 'mask', true otherwise. */
+/*
+ * 检查在掩码 mask 下, a 和 b 是否一样.
+ *
+ * 遍历 mask->masks 的 tnl_map 和 pkt_map 中非 0 的位.
+ * 如果 a 对应的 bit 与 b 对应的 bit 不相同, 而且 mask->masks->values 对应的 uint64_t 不为 0
+ * 返回 false
+ * 否则返回 true
+ *
+ * 注: mask->masks 对应的 bit 为 1 表必须匹配, bit 为 0 表可选匹配.
+ */
 bool
 miniflow_equal_in_minimask(const struct miniflow *a, const struct miniflow *b,
                            const struct minimask *mask)
@@ -2382,6 +2417,7 @@ miniflow_equal_in_minimask(const struct miniflow *a, const struct miniflow *b,
     const uint64_t *p = miniflow_get_values(&mask->masks);
     size_t idx;
 
+    //遍历 mask->masks 中非 0 的 bit. 如果 a 和 b 有比特不同, 但掩码对应 bit 为 1(必须匹配), 则返回 false.
     MAPS_FOR_EACH_INDEX(idx, mask->masks) {
         if ((miniflow_get(a, idx) ^ miniflow_get(b, idx)) & *p++) {
             return false;
@@ -2411,6 +2447,7 @@ miniflow_equal_flow_in_minimask(const struct miniflow *a, const struct flow *b,
 }
 
 
+//mask->values 每个元素指向 wc->masks 以 uint64_t 为单位的值
 void
 minimask_init(struct minimask *mask, const struct flow_wildcards *wc)
 {
@@ -2430,6 +2467,11 @@ minimask_create(const struct flow_wildcards *wc)
  * The caller must provide room for FLOW_U64S "uint64_t"s in 'storage', which
  * must follow '*dst_' in memory, for use by 'dst_'.  The caller must *not*
  * free 'dst_' free(). */
+/*
+ * dst->tnl_map 保存了 a_->tnl_map 和 b_->tnl_map 的交集
+ * dst->pkt_map 保存了 a_->pkt_map 和 b_->pkt_map 的交集
+ * storage 保存了 a_ 和 b_ values 的交集
+ */
 void
 minimask_combine(struct minimask *dst_,
                  const struct minimask *a_, const struct minimask *b_,
@@ -2444,8 +2486,12 @@ minimask_combine(struct minimask *dst_,
     size_t idx;
 
     dst->tnl_map = 0;
+    /*
+     * a->tnl_map 和 b->tnl_map 的交集中的非 0 bit
+     */
     MAP_FOR_EACH_INDEX(idx, a->tnl_map & b->tnl_map) {
         /* Both 'a' and 'b' have non-zero data at 'idx'. */
+        //mask 
         uint64_t mask = *miniflow_values_get__(ap, a->tnl_map, idx)
             & *miniflow_values_get__(bp, b->tnl_map, idx);
 
@@ -2459,6 +2505,7 @@ minimask_combine(struct minimask *dst_,
     bp += count_1bits(b->tnl_map);   /* Skip tnl_map values. */
     MAP_FOR_EACH_INDEX(idx, a->pkt_map & b->pkt_map) {
         /* Both 'a' and 'b' have non-zero data at 'idx'. */
+        //TODO
         uint64_t mask = *miniflow_values_get__(ap, a->pkt_map, idx)
             & *miniflow_values_get__(bp, b->pkt_map, idx);
 

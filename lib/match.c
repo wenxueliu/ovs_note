@@ -1190,34 +1190,55 @@ match_print(const struct match *match)
 
 /* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
  * with minimatch_destroy(). */
+/*
+ * 用 src->wc.masks 初始化 dst->flow dst->mask, 都不包含 values 成员
+ * 用 src->flow 以 uint64_t 为单位初始化 dst->flow->values
+ * 用 src->wc->masks 以 uint64_t 为单位初始化 dst->mask->values
+ */
 void
 minimatch_init(struct minimatch *dst, const struct match *src)
 {
     struct miniflow tmp;
 
+    /*
+     * tmp->flow_tnl 记录 src->wc.masks 中 flow_tnl 中 uint64_t 为单元的非 0 的 bit
+     * tmp->pkt_map 记录 src->wc.masks 中 其余属性中 uint64_t 为单元的非 0 的 bit
+     */
     miniflow_map_init(&tmp, &src->wc.masks);
     /* Allocate two consecutive miniflows. */
+    //为 dst->flows 分配 2 个 tmp(包含 values) 空间,拷贝 2 个 tmp(不包含 values) 到 dst->flows 中.
     miniflow_alloc(dst->flows, 2, &tmp);
+    //dst->flow->values 每个元素指向 src->flow 以 uint64_t 为单位的值
     miniflow_init(dst->flow, &src->flow);
+    //dst->mask->values 每个元素指向 src->wc->masks 以 uint64_t 为单位的值
     minimask_init(dst->mask, &src->wc);
 }
 
 /* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
  * with minimatch_destroy(). */
+/*
+ * 为 dst->flows 分配 2 个 tmp(包含 values) 空间, 拷贝 2 个 tmp(不包含 values) 到 dst->flows 中.
+ * src->flow 的 values 拷贝到 dst-flow
+ * src->mask->masks 的 values 拷贝到 dst->mask->masks
+ */
 void
 minimatch_clone(struct minimatch *dst, const struct minimatch *src)
 {
     /* Allocate two consecutive miniflows. */
+    //为 dst->flows 分配 2 个 tmp(包含 values) 空间, 拷贝 2 个 tmp(不包含 values) 到 dst->flows 中.
     size_t data_size = miniflow_alloc(dst->flows, 2, &src->mask->masks);
 
+    // src->flow 的 values 拷贝到 dst-flow
     memcpy(miniflow_values(dst->flow),
            miniflow_get_values(src->flow), data_size);
+    // src->mask->masks 的 values 拷贝到 dst->mask->masks
     memcpy(miniflow_values(&dst->mask->masks),
            miniflow_get_values(&src->mask->masks), data_size);
 }
 
 /* Initializes 'dst' with the data in 'src', destroying 'src'.  The caller must
  * eventually free 'dst' with minimatch_destroy(). */
+//dst 指向 src
 void
 minimatch_move(struct minimatch *dst, struct minimatch *src)
 {
@@ -1227,6 +1248,7 @@ minimatch_move(struct minimatch *dst, struct minimatch *src)
 
 /* Frees any memory owned by 'match'.  Does not free the storage in which
  * 'match' itself resides; the caller is responsible for that. */
+//因为 match->flow 和 match->mask 指向相同的内存
 void
 minimatch_destroy(struct minimatch *match)
 {

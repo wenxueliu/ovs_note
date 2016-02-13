@@ -618,6 +618,17 @@ del(const char *type, const char *name)
     return error;
 }
 
+/*
+ * 将 datapath_type 解析后复制给 port_type
+ *
+ * 如果 datapath_type = system, 调用 dpif_netlink_class->port_open_type(dpif_netlink_class, port_type)
+ *     什么也不做
+ *
+ * 如果 datapath_type = netdev, 调用 dpif_netdev_class->port_open_type(dpif_netdev_class, port_type)
+ *     如果 type=internal, class=dpif_netdev_class 返回 dummy
+ *     如果 type=internal, class!=dpif_netdev_class 返回 tap
+ *     如果 type!=internal, 直接返回 type
+ */
 static const char *
 port_open_type(const char *datapath_type, const char *port_type)
 {
@@ -651,7 +662,18 @@ lookup_ofproto_dpif_by_port_name(const char *name)
 }
 
 /*
- * TODO
+ * 如果 type == netdev
+ *
+ * 从 backer->dpif 定位到所属的 dp_netdev 对象 dp
+ * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
+ * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+ * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+ * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+ *
+ * 如果 type == system
+ * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
  */
 static int
 type_run(const char *type)
@@ -666,19 +688,24 @@ type_run(const char *type)
     }
 
     /*
-    * 如果 type == netdev
-    *
-    * 从 backer->dpif 定位到所属的 dp_netdev 对象 dp
-    * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
-    * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
-    * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
-    * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
-    * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
-    * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
-    *
-    * 如果 type == system
-    * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原理一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
-    */
+     * 如果 type == netdev
+     *
+     * 从 dp_netdev 的每个端口的接受队列中取出端口收到的包, 在
+     * dp_netdev->poll_threads 的 dp_netdev_pmd_thread 中查找
+     * 匹配的流表, 如果找到就是执行对应的 action, 如果找不到就
+     * 发送给 upcall(控制器或?)
+     *
+     * 从 backer->dpif 定位到所属的 dp_netdev 对象 dp
+     * 1. 从 dp->poll_threads 中定位到线程 id 为 NON_PMD_CORE_ID 的 dp_netdev_pmd_thread 对象 pmd
+     * 2. 遍历 dp->ports 所有 port, 遍历 port->rxq 所有数据包 packet
+     * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 不为 null, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果在 pmd->flow_cache 中有对应的 flow, 并且 flow->batch 为 null, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果在 pmd->flow_cache 中没有对应的 flow, 如果 pmd->cls 中存在对应的 flow, 将 packet 加入 flow->batch 并更新 flow->batch
+     * 如果 pmd->cls 中不存在对应的 flow, 调用 upcall,  upcall 后重新, 递归查询 pmd->flow_cache 和 pmd->cls
+     *
+     * 如果 type == system
+     * 当 dpif->n_handlers 发生变化,遍历所有 vport 的 upcall_pids 是否与原来一样, 如果不一样, 向内核发送 NETLINK 消息, 更新 vport. 并删除已经不在用的端口对应的 channel
+     */
     if (dpif_run(backer->dpif)) {
         backer->need_revalidate = REV_RECONFIGURE;
     }
@@ -1085,6 +1112,13 @@ process_dpif_port_error(struct dpif_backer *backer, int error)
     }
 }
 
+/*
+ * type=netdev dpif_netdev_wait
+ *    dpif 所属的 dp_netdev 的所有 port 的所有 rxq 如果有数据包准备好, 将数据包加入 rxq
+ *
+ * type=system
+ *    什么也不做
+ */
 static void
 type_wait(const char *type)
 {
@@ -1097,6 +1131,13 @@ type_wait(const char *type)
         return;
     }
 
+    /*
+     * type=netdev dpif_netdev_wait
+     *    dpif 所属的 dp_netdev 的所有 port 的所有 rxq 如果有数据包准备好, 将数据包加入 rxq
+     *
+     * type=system
+     *    什么也不做
+     */
     dpif_wait(backer->dpif);
 }
 
@@ -1923,6 +1964,10 @@ run(struct ofproto *ofproto_)
 
         guarded_list_pop_all(&ofproto->pins, &pins);
         LIST_FOR_EACH_POP (pin, list_node, &pins) {
+            /*
+             * 遍历  mgr->all_conns 每个元素 ofconn, 如果 ofconn 满足发送 PACKET_IN 条件,
+             * 并且 pin.controller_id = ofconn->controller_id, 发送 PACKET_IN 消息
+             */
             connmgr_send_packet_in(ofproto->up.connmgr, pin);
             free(CONST_CAST(void *, pin->up.packet));
             free(pin);
@@ -1945,13 +1990,17 @@ run(struct ofproto *ofproto_)
         struct ofport_dpif *ofport;
 
         HMAP_FOR_EACH (ofport, up.hmap_node, &ofproto->up.ports) {
-            //设置 ofport
-            //TODO
+            /*
+             * 设置 ofport
+             * 1. 检查 bfd, cfm 的支持
+             * 2. bundle 的支持
+             */
             port_run(ofport);
         }
 
         ofproto->change_seq = new_seq;
     }
+    //bundle 运行
     if (ofproto->lacp_enabled || ofproto->has_bonded_bundles) {
         struct ofbundle *bundle;
 
@@ -1986,12 +2035,16 @@ run(struct ofproto *ofproto_)
         ovs_mutex_lock(&ofproto_mutex);
         LIST_FOR_EACH_SAFE (rule, next_rule, expirable,
                             &ofproto->up.expirable) {
+            /*
+             * 先检查 hard_timeout, 再检查 idle_timeout, 如果任一满足条件删除流表
+             */
             rule_expire(rule_dpif_cast(rule));
         }
         ovs_mutex_unlock(&ofproto_mutex);
 
         /* All outstanding data in existing flows has been accounted, so it's a
          * good time to do bond rebalancing. */
+        // 5. boundle 重平衡
         if (ofproto->has_bonded_bundles) {
             struct ofbundle *bundle;
 
@@ -2005,6 +2058,9 @@ run(struct ofproto *ofproto_)
     return 0;
 }
 
+/*
+ * 每个组件要不是超时唤醒, 要不是通过事件唤醒
+ */
 static void
 wait(struct ofproto *ofproto_)
 {
@@ -2045,6 +2101,9 @@ wait(struct ofproto *ofproto_)
     seq_wait(ofproto->pins_seq, ofproto->pins_seqno);
 }
 
+/*
+ * 获取 type 对应的  handlers, revalidators, udpif keys
+ */
 static void
 type_get_memory_usage(const char *type, struct simap *usage)
 {
@@ -2052,6 +2111,9 @@ type_get_memory_usage(const char *type, struct simap *usage)
 
     backer = shash_find_data(&all_dpif_backers, type);
     if (backer) {
+        /*
+         * 获取 handlers, revalidators, udpif keys
+         */
         udpif_get_memory_usage(backer->udpif, usage);
     }
 }
@@ -3518,6 +3580,10 @@ bundle_send_learning_packets(struct ofbundle *bundle)
     }
 }
 
+/*
+ * TODO
+ *
+ */
 static void
 bundle_run(struct ofbundle *bundle)
 {
@@ -3758,7 +3824,8 @@ ofport_update_peer(struct ofport_dpif *ofport)
 
 /*
  * 设置 ofport
- * TODO
+ * 1. 检查 bfd, cfm 的支持
+ * 2. bundle 的支持
  */
 static void
 port_run(struct ofport_dpif *ofport)
@@ -3887,6 +3954,11 @@ port_add(struct ofproto *ofproto_, struct netdev *netdev)
     return 0;
 }
 
+/*
+ * 1. 从 ofproto->ghost_ports 删除 ofp_port 对应的元素
+ * 2. 如果 ofp_port 既不是 patch, 也不是 tunnel, 就从 dpif 删除 ofp_port
+ * TODO ?
+ */
 static int
 port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
 {
@@ -4035,6 +4107,7 @@ port_dump_next(const struct ofproto *ofproto_, void *state_,
     return EOF;
 }
 
+//销毁 dump->state 内存
 static int
 port_dump_done(const struct ofproto *ofproto_ OVS_UNUSED, void *state_)
 {
@@ -4048,6 +4121,8 @@ port_dump_done(const struct ofproto *ofproto_ OVS_UNUSED, void *state_)
 }
 
 /*
+ * 从 ofproto->port_poll_set 中依次取出元素, 更新每个元素对应的 ofport, 直到 ofproto->port_poll_set 为 NULL 或发生错误.
+ *
  * 如果 ofproto->port_poll_errno != 0, 返回 ofproto->port_poll_errno
  * 如果 ofproto->port_poll_set = NULL, 返回 EAGAIN
  * 否则 从 ofproto->port_poll_set 弹出一个元素赋值给 devnamep

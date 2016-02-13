@@ -6185,6 +6185,10 @@ ofpacts_equal(const struct ofpact *a, size_t a_len,
  *
  * This function relies on the order of 'ofpacts' being correct (as checked by
  * ofpacts_verify()). */
+/*
+ * 如果 ofpacts 中每个元素 ofpact 的 type 为 OFPACT_METER, 返回 meter_id
+ * 否则返回 0
+ */
 uint32_t
 ofpacts_get_meter(const struct ofpact ofpacts[], size_t ofpacts_len)
 {

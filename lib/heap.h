@@ -69,6 +69,9 @@ void heap_rebuild(struct heap *);
  * If a heap_raw_*() function has been called without a later call to
  * heap_rebuild(), then the first node visited may not be the maximum
  * element. */
+/*
+ * TODO
+ */
 #define HEAP_FOR_EACH(NODE, MEMBER, HEAP)                           \
     for (((HEAP)->n > 0                                             \
           ? INIT_CONTAINER(NODE, (HEAP)->array[1], MEMBER)          \

@@ -160,6 +160,7 @@ static inline void pvector_cursor_lookahead(const struct pvector_cursor *,
 
 /* Loop while priority is higher than 'PRIORITY' and prefetch objects
  * of size 'SZ' 'N' objects ahead from the current object. */
+//TODO
 #define PVECTOR_FOR_EACH_PRIORITY(PTR, PRIORITY, N, SZ, PVECTOR)        \
     for (struct pvector_cursor cursor__ = pvector_cursor_init(PVECTOR, N, SZ); \
          ((PTR) = pvector_cursor_next(&cursor__, PRIORITY, N, SZ)) != NULL; )

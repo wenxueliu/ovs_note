@@ -149,6 +149,7 @@ static inline void
 rculist_poison__(struct rculist *list)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
+    //list->prev = RCULIST_POISON;
     rculist_poison(list);
     ovsrcu_set_hidden(&list->next, RCULIST_POISON);
 }

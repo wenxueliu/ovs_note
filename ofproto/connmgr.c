@@ -409,6 +409,7 @@ connmgr_run(struct connmgr *mgr,
 }
 
 /* Causes the poll loop to wake up when connmgr_run() needs to run. */
+//TODO
 void
 connmgr_wait(struct connmgr *mgr)
 {
@@ -1573,6 +1574,7 @@ ofconn_run(struct ofconn *ofconn,
     ovs_mutex_unlock(&ofproto_mutex);
 }
 
+//TODO
 static void
 ofconn_wait(struct ofconn *ofconn)
 {
@@ -1580,6 +1582,15 @@ ofconn_wait(struct ofconn *ofconn)
 
     //1. 如果 ofconn->schedulers 每个元素 token_bucket 中的 tocken 没有超过 1000 就休眠
     for (i = 0; i < N_SCHEDULERS; i++) {
+        /*
+         * 如果没有达到速率限制, 退出, 否则, 等待直到达到速率限制
+         *
+         * 如果 ps->token_bucket 超过 1000, 直接返回
+         * 否则 等待 ps->token_bucket->last_fill + (1000 - ps->token_bucket->token)/ps->token_bucket->rate + 1 秒
+         *
+         * NOTE:
+         * 1000 是经验值?
+         */
         pinsched_wait(ofconn->schedulers[i]);
     }
     //目前什么也不做

@@ -422,6 +422,7 @@ static inline uint64_t *miniflow_values(struct miniflow *mf)
     return (uint64_t *)(mf + 1);
 }
 
+//返回 mf->values 的首指针
 static inline const uint64_t *miniflow_get_values(const struct miniflow *mf)
 {
     return (const uint64_t *)(mf + 1);
@@ -454,6 +455,7 @@ static inline uint64_t *flow_u64_lvalue(struct flow *flow, size_t index)
     return &((uint64_t *)flow)[index];
 }
 
+//flow 中 tnl_map 和 pkt_map 中 bit 为 1 的数量
 static inline size_t
 miniflow_n_values(const struct miniflow *flow)
 {
@@ -497,6 +499,14 @@ flow_values_get_next_in_maps(struct flow_for_each_in_maps_aux *aux,
              = { (const uint64_t *)(FLOW), (MAPS) };        \
          flow_values_get_next_in_maps(&aux__, &(VALUE));)
 
+/*
+ * raw_ctz(map__) : map__ 以 0 结尾的位数
+ * zero_rightmost_1bit(x) : x 最右的 1 bit 为 0
+ *
+ * map__ && ((U64IDX) = raw_ctz(map__), true) 什么意思 ?
+ *
+ * 遍历 MAP, U64IDX 为 MAP 以 0 结尾的位数, 下一个 MAP 将其最右的 1 bit 为 0
+ */
 /* Iterate through all struct flow u64 indices specified by 'MAP'. */
 #define MAP_FOR_EACH_INDEX(U64IDX, MAP)                 \
     for (uint64_t map__ = (MAP);                        \
@@ -504,6 +514,14 @@ flow_values_get_next_in_maps(struct flow_for_each_in_maps_aux *aux,
          map__ = zero_rightmost_1bit(map__))
 
 /* Iterate through all struct flow u64 indices specified by 'MAPS'. */
+/*
+ * 如果 MAPS 的 tnl_map 不为 0, U64IDX 为 MAPS.tnl_map 以 0 结尾的位数,
+ * 下一个 MAPS 为之前最右 1 bit 变为 0 之后的值.
+ *
+ * 如果 MAPS 的 tnl_map 为 0, U64IDX 为 MAPS.pkt_map 以 0 结尾的位数 +
+ * FLOW_TNL_U64S, 下一个 MAPS 为之前最右 1 bit 变为 0 之后的值.
+ *
+ */
 #define MAPS_FOR_EACH_INDEX(U64IDX, MAPS)                               \
     for (struct miniflow maps__ = (MAPS);                               \
          maps__.tnl_map                                                 \
@@ -572,6 +590,7 @@ mf_get_next_in_map(struct mf_for_each_in_map_aux *aux,
          mf_get_next_in_map(&aux__, &(VALUE));)
 
 /* This can be used when it is known that 'u64_idx' is set in 'map'. */
+//返回 values 中索引为 u64_idx 的 uint64_t
 static inline const uint64_t *
 miniflow_values_get__(const uint64_t *values, uint64_t map, size_t u64_idx)
 {
@@ -580,6 +599,9 @@ miniflow_values_get__(const uint64_t *values, uint64_t map, size_t u64_idx)
 
 /* This can be used when it is known that 'u64_idx' is set in
  * the map of 'mf'. */
+/*
+ * 返回 mf->values 中索引为 u64_idx 的 uint64_t
+ */
 static inline const uint64_t *
 miniflow_get__(const struct miniflow *mf, size_t u64_idx)
 {
@@ -590,6 +612,10 @@ miniflow_get__(const struct miniflow *mf, size_t u64_idx)
         : miniflow_values_get__(miniflow_get_values(mf), mf->tnl_map, u64_idx);
 }
 
+/*
+ * 如果 U64_IDX 大于 FLOW_TNL_U64S, MF->pkt_map 对应 U64_IDX 的 bit 是否为 1.
+ * 否则 MF->pkt_map 对应 U64_IDX 的 bit 是否为 1.
+ */
 #define MINIFLOW_IN_MAP(MF, U64_IDX)                            \
     (OVS_LIKELY(U64_IDX >= FLOW_TNL_U64S)                           \
      ? (MF)->pkt_map & (UINT64_C(1) << ((U64_IDX) - FLOW_TNL_U64S)) \

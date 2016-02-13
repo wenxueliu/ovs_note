@@ -66,6 +66,10 @@ static struct shash init_ofp_ports = SHASH_INITIALIZER(&init_ofp_ports);
 /* The default value of true waits for flow restore. */
 static bool flow_restore_wait = true;
 
+/* All existing ofproto_backer instances, indexed by ofproto->up.type. */
+static struct shash all_dpif_backers = SHASH_INITIALIZER(&all_dpif_backers);
+
+
 ###核心函数
 
 ofproto_init() :
@@ -98,6 +102,7 @@ enum revalidate_reason {
 };
 
 
+ofproto->backer->need_revalidate = REV_MAC_LEARNING | REV_MCAST_SNOOPING
 
 ##设备管理
 
@@ -511,6 +516,10 @@ enum port_vlan_mode {
  *
  * Bundles only affect the NXAST_AUTOPATH action and output to the OFPP_NORMAL
  * port. */
+
+1. vlan
+2. lacp
+3. bond
 
 
 /* Configuration of bundles. */
@@ -941,63 +950,7 @@ enum nx_flow_monitor_flags {
     NXFMF_OWN = 1 << 5,         /* If set, include own changes in full. */
 };
 
-/* Compressed match. */
 
-/* A sparse representation of a "struct match".
- *
- * 'flows' is used for allocating both 'flow' and 'mask' with one
- * miniflow_alloc() call.
- *
- * There are two invariants:
- *
- *   - The same invariant as "struct match", that is, a 1-bit in the 'flow'
- *     must correspond to a 1-bit in 'mask'.
- *
- *   - 'flow' and 'mask' have the same 'map'.  This implies that 'flow' and
- *     'mask' have the same part of "struct flow" at the same offset into
- *     'values', which makes minimatch_matches_flow() faster.
- */
-struct minimatch {
-    union {
-        struct {
-            struct miniflow *flow;
-            struct minimask *mask;
-        };
-        struct miniflow *flows[2];
-    };
-};
-
-/* A sparse representation of a "struct flow".
- *
- * A "struct flow" is fairly large and tends to be mostly zeros.  Sparse
- * representation has two advantages.  First, it saves memory and, more
- * importantly, minimizes the number of accessed cache lines.  Second, it saves
- * time when the goal is to iterate over only the nonzero parts of the struct.
- *
- * The map members hold one bit for each uint64_t in a "struct flow".  Each
- * 0-bit indicates that the corresponding uint64_t is zero, each 1-bit that it
- * *may* be nonzero (see below how this applies to minimasks).
- *
- * The values indicated by 'tnl_map' and 'pkt_map' always follow the miniflow
- * in memory.  The user of the miniflow is responsible for always having enough
- * storage after the struct miniflow corresponding to the number of 1-bits in
- * maps.
- *
- * Elements in values array are allowed to be zero.  This is useful for "struct
- * minimatch", for which ensuring that the miniflow and minimask members have
- * same maps allows optimization.  This allowance applies only to a miniflow
- * that is not a mask.  That is, a minimask may NOT have zero elements in its
- * values.
- *
- * A miniflow is always dynamically allocated so that the maps are followed by
- * at least as many elements as there are 1-bits in maps. */
-struct miniflow {
-    uint64_t tnl_map;
-    uint64_t pkt_map;
-    /* Followed by:
-     *     uint64_t values[n];
-     * where 'n' is miniflow_n_values(miniflow). */
-};
 
 /* Abstract nx_flow_monitor_request. */
 struct ofputil_flow_monitor_request {
@@ -1443,6 +1396,129 @@ const struct dpif_class dpif_netdev_class = {
 而为了能够更好地映射发送和应答关系, 通过 struct transaction 数据结构 保持, 待发送的 request 和待接受的 reply
 而 struct msghdr 又包含 struct iovecs. 可以包多个 struct transaction 消息放入 iovecs 中, 一次发送多个请求.
 
+
+##flow 流表操作
+
+
+ofproto_add_flow
+    simple_flow_mod
+        handle_flow_mod__
+            ofproto_flow_mod_start
+                OFPFC_ADD           : add_flow_start(ofproto, ofm);
+                OFPFC_MODIFY        : modify_flows_start_loose(ofproto, ofm);
+                OFPFC_MODIFY_STRICT : modify_flow_start_strict(ofproto, ofm);
+                OFPFC_DELETE        : delete_flows_start_loose(ofproto, ofm);
+                OFPFC_DELETE_STRICT : delete_flow_start_strict(ofproto, ofm);
+            ofproto_flow_mod_finish
+
+ofproto_delete_flow
+    simple_flow_mod
+        handle_flow_mod__
+            ofproto_flow_mod_start
+            ofproto_flow_mod_finish
+
+/* A sparse representation of a "struct flow".
+ *
+ * A "struct flow" is fairly large and tends to be mostly zeros.  Sparse
+ * representation has two advantages.  First, it saves memory and, more
+ * importantly, minimizes the number of accessed cache lines.  Second, it saves
+ * time when the goal is to iterate over only the nonzero parts of the struct.
+ *
+ * The map members hold one bit for each uint64_t in a "struct flow".  Each
+ * 0-bit indicates that the corresponding uint64_t is zero, each 1-bit that it
+ * *may* be nonzero (see below how this applies to minimasks).
+ *
+ * The values indicated by 'tnl_map' and 'pkt_map' always follow the miniflow
+ * in memory.  The user of the miniflow is responsible for always having enough
+ * storage after the struct miniflow corresponding to the number of 1-bits in
+ * maps.
+ *
+ * Elements in values array are allowed to be zero.  This is useful for "struct
+ * minimatch", for which ensuring that the miniflow and minimask members have
+ * same maps allows optimization.  This allowance applies only to a miniflow
+ * that is not a mask.  That is, a minimask may NOT have zero elements in its
+ * values.
+ *
+ * A miniflow is always dynamically allocated so that the maps are followed by
+ * at least as many elements as there are 1-bits in maps. */
+/* miniflow->tnl_map 记录了 flow->flow_tnl 中 uint64_t 的个数, 如果每个 uint64_t
+ * 对应的值不为 0, tnl_map 对应的位为 1. 最多支持 64 个 bit. 即 flow->flow_tnl
+ * 最长为 64 个 uint64_t.
+ * miniflow->pkt_map 记录了 flow->flow_tnl 之后的以 uint64_t 为单位的值是否为 0.
+ * miniflow->values 记录了 flow 以 uint64_t 为单位的 uint64_t 的值
+ */
+struct miniflow {
+    uint64_t tnl_map;
+    uint64_t pkt_map;
+    /* Followed by:
+     *     uint64_t values[n];
+     * where 'n' is miniflow_n_values(miniflow). */
+};
+
+struct minimask {
+    struct miniflow masks;
+};
+
+struct flow_wildcards {
+    struct flow masks;
+};
+
+struct match {
+    struct flow flow;
+    struct flow_wildcards wc;
+    struct tun_metadata_allocation tun_md;
+};
+
+/* Compressed match. */
+
+/* A sparse representation of a "struct match".
+ *
+ * 'flows' is used for allocating both 'flow' and 'mask' with one
+ * miniflow_alloc() call.
+ *
+ * There are two invariants:
+ *
+ *   - The same invariant as "struct match", that is, a 1-bit in the 'flow'
+ *     must correspond to a 1-bit in 'mask'.
+ *
+ *   - 'flow' and 'mask' have the same 'map'.  This implies that 'flow' and
+ *     'mask' have the same part of "struct flow" at the same offset into
+ *     'values', which makes minimatch_matches_flow() faster.
+ */
+struct minimatch {
+    union {
+        struct {
+            struct miniflow *flow;
+            struct minimask *mask;
+        };
+        struct miniflow *flows[2];
+    };
+};
+
+用 match, minimatch 初始化 miniflow, minimask
+
+classifier->subtables_map : cls_subtable
+cls_subtable->rules       : cls_match
+cls_match->cls_rule       : flow
+
+miniflow 的 tnl_map 保持了 flow->tnl_map 中以 uint64_t 为单位对应的值是否为 1
+miniflow 的 pkt_map 保持了 flow->pkt_map 中以 uint64_t 为单位对应的值是否为 1
+miniflow 的 values 保持了 flow 中以 uint64_t 为单位的值中非 1 的 bit
+
+比如 minflow->tnl_map = 0x0000000000000005 那么表明 flow->tnl_map 的第一个
+uint64_t 和第三个 uint64_t 都是 1. 将 flow 分为 uint64_t 为单位的字节, 
+miniflow->values[0] 为 flow->tnl_map 第一个 uint64_t 的值, miniflow->values[1]
+为 flow->tnl_map 第三个 uint64_t 的值.
+
+classifier->subtables 保持具有相同 mask 的流表的集合
+cls_subtable 的 cls_rule 保持流表
+
+table->eviction_groups_by_size 保存 eviction_group 成员
+eviction_group 保存具有相同 eviction_fields 的 rule.
+一张 oftable 可以有任意数量 eviction_group, 每个 eviction_group 可以有任意条 rule
+
+eviction_group 基于 oftable->eviction_fields 的 hash. 因此, 两条 rule
+可能属于不同 eviction_fields 可能在相同 eviction_group
 
 ##附录
 
@@ -2109,4 +2185,758 @@ actions 可以将一个端口绑定到多个 PID, 但需要确保特定的包始
  client's responsibility not to install flow entries whose flow and mask
  combinations overlap.
 
+4. vswitchd 收到包就立即查匹配流表么, 立即进行 action ? 具体实现细节
+1) 与流表项相关的结构, 查询, 存储
+2) 与 action 相关的结构
+3) 与 流表过期相关的机制
+4) 流表项超出配置, 流表淘汰机制, eviction_groups_by_size, eviction_groups_by_id
+5) 流表项版本 remove_version add_version
 
+packet_in
+
+ofproto->pins_seq
+ofproto->pins_seqno
+ofproto->pins
+ofproto->up.connmgr
+
+ofproto->rule_executes
+
+port
+
+ofport
+ofproto->port_poll_set
+ofproto->change_seq
+ofproto->ofp_requests
+
+过期流表
+ofproto->dump_seq
+ofproto->up.expirable
+
+ofproto->eviction_group_timer
+
+每张表, 流表项多于 100000 会发送警告
+
+ofproto->eviction_group_timer
+ofproto->eviction_group
+
+oftable->eviction_group
+oftable->eviction
+oftable->eviction_groups_by_size
+
+5. flow_restore_wait 的意义?
+
+6. 非核心组件
+
+sflow, netflow, ipfix, bundle(lacp, bond), mac learning, mcast snoop, stp, rstp
+
+7 监控相关
+ofproto_get_memory_usage : 获取流表对内存的消耗
+ofproto_get_ofproto_controller_info : 获取控制器信息
+
+
+
+##多线程概要设计
+
+
+###原子操作
+
+###线程同步
+
+
+###线程操作
+/* Convenient once-only execution.
+ *
+ *
+ * Problem
+ * =======
+ *
+ * POSIX provides pthread_once_t and pthread_once() as primitives for running a
+ * set of code only once per process execution.  They are used like this:
+ *
+ *     static void run_once(void) { ...initialization... }
+ *     static pthread_once_t once = PTHREAD_ONCE_INIT;
+ * ...
+ *     pthread_once(&once, run_once);
+ *
+ * pthread_once() does not allow passing any parameters to the initialization
+ * function, which is often inconvenient, because it means that the function
+ * can only access data declared at file scope.
+ *
+ *
+ * Solution
+ * ========
+ *
+ * Use ovsthread_once, like this, instead:
+ *
+ *     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+ *
+ *     if (ovsthread_once_start(&once)) {
+ *         ...initialization...
+ *         ovsthread_once_done(&once);
+ *     }
+ */
+
+
+###数据结构
+
+/* A flow table within a "struct ofproto".
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * Adding or removing rules requires holding ofproto_mutex.
+ *
+ * Rules in 'cls' are RCU protected.  For extended access to a rule, try
+ * incrementing its ref_count with ofproto_rule_try_ref(), or
+ * ofproto_rule_ref(), if the rule is still known to be in 'cls'.  A rule
+ * will be freed using ovsrcu_postpone() once its 'ref_count' reaches zero.
+ *
+ * Modifying a rule requires the rule's own mutex.
+ *
+ * Freeing a rule requires ofproto_mutex.  After removing the rule from the
+ * classifier, release a ref_count from the rule ('cls''s reference to the
+ * rule).
+ *
+ * Refer to the thread-safety notes on struct rule for more information.*/
+struct oftable {
+    enum oftable_flags flags;
+    struct classifier cls;      /* Contains "struct rule"s. */
+    char *name;                 /* Table name exposed via OpenFlow, or NULL. */
+
+    /* Maximum number of flows or UINT_MAX if there is no limit besides any
+     * limit imposed by resource limitations. */
+    unsigned int max_flows;
+    /* Current number of flows, not counting temporary duplicates nor deferred
+     * deletions. */
+    unsigned int n_flows;
+
+    /* These members determine the handling of an attempt to add a flow that
+     * would cause the table to have more than 'max_flows' flows.
+     *
+     * If 'eviction_fields' is NULL, overflows will be rejected with an error.
+     *
+     * If 'eviction_fields' is nonnull (regardless of whether n_eviction_fields
+     * is nonzero), an overflow will cause a flow to be removed.  The flow to
+     * be removed is chosen to give fairness among groups distinguished by
+     * different values for the subfields within 'groups'. */
+    struct mf_subfield *eviction_fields;
+    size_t n_eviction_fields;
+
+    /* Eviction groups.
+     *
+     * When a flow is added that would cause the table to have more than
+     * 'max_flows' flows, and 'eviction_fields' is nonnull, these groups are
+     * used to decide which rule to evict: the rule is chosen from the eviction
+     * group that contains the greatest number of rules.*/
+    uint32_t eviction_group_id_basis;
+    struct hmap eviction_groups_by_id;
+    struct heap eviction_groups_by_size;
+
+    /* Flow table miss handling configuration. */
+    ATOMIC(enum ofputil_table_miss) miss_config;
+
+    /* Eviction is enabled if either the client (vswitchd) enables it or an
+     * OpenFlow controller enables it; thus, a nonzero value indicates that
+     * eviction is enabled.  */
+#define EVICTION_CLIENT  (1 << 0)  /* Set to 1 if client enables eviction. */
+#define EVICTION_OPENFLOW (1 << 1) /* Set to 1 if OpenFlow enables eviction. */
+    unsigned int eviction;
+
+    atomic_ulong n_matched;
+    atomic_ulong n_missed;
+};
+
+/* Flow classifier.
+ *
+ *
+ * What?
+ * =====
+ *
+ * A flow classifier holds any number of "rules", each of which specifies
+ * values to match for some fields or subfields and a priority.  Each OpenFlow
+ * table is implemented as a flow classifier.
+ *
+ * The classifier has two primary design goals.  The first is obvious: given a
+ * set of packet headers, as quickly as possible find the highest-priority rule
+ * that matches those headers.  The following section describes the second
+ * goal.
+ *
+ *
+ * "Un-wildcarding"
+ * ================
+ *
+ * A primary goal of the flow classifier is to produce, as a side effect of a
+ * packet lookup, a wildcard mask that indicates which bits of the packet
+ * headers were essential to the classification result.  Ideally, a 1-bit in
+ * any position of this mask means that, if the corresponding bit in the packet
+ * header were flipped, then the classification result might change.  A 0-bit
+ * means that changing the packet header bit would have no effect.  Thus, the
+ * wildcarded bits are the ones that played no role in the classification
+ * decision.
+ *
+ * Such a wildcard mask is useful with datapaths that support installing flows
+ * that wildcard fields or subfields.  If an OpenFlow lookup for a TCP flow
+ * does not actually look at the TCP source or destination ports, for example,
+ * then the switch may install into the datapath a flow that wildcards the port
+ * numbers, which in turn allows the datapath to handle packets that arrive for
+ * other TCP source or destination ports without additional help from
+ * ovs-vswitchd.  This is useful for the Open vSwitch software and,
+ * potentially, for ASIC-based switches as well.
+ *
+ * Some properties of the wildcard mask:
+ *
+ *     - "False 1-bits" are acceptable, that is, setting a bit in the wildcard
+ *       mask to 1 will never cause a packet to be forwarded the wrong way.
+ *       As a corollary, a wildcard mask composed of all 1-bits will always
+ *       yield correct (but often needlessly inefficient) behavior.
+ *
+ *     - "False 0-bits" can cause problems, so they must be avoided.  In the
+ *       extreme case, a mask of all 0-bits is only correct if the classifier
+ *       contains only a single flow that matches all packets.
+ *
+ *     - 0-bits are desirable because they allow the datapath to act more
+ *       autonomously, relying less on ovs-vswitchd to process flow setups,
+ *       thereby improving performance.
+ *
+ *     - We don't know a good way to generate wildcard masks with the maximum
+ *       (correct) number of 0-bits.  We use various approximations, described
+ *       in later sections.
+ *
+ *     - Wildcard masks for lookups in a given classifier yield a
+ *       non-overlapping set of rules.  More specifically:
+ *
+ *       Consider an classifier C1 filled with an arbitrary collection of rules
+ *       and an empty classifier C2.  Now take a set of packet headers H and
+ *       look it up in C1, yielding a highest-priority matching rule R1 and
+ *       wildcard mask M.  Form a new classifier rule R2 out of packet headers
+ *       H and mask M, and add R2 to C2 with a fixed priority.  If one were to
+ *       do this for every possible set of packet headers H, then this
+ *       process would not attempt to add any overlapping rules to C2, that is,
+ *       any packet lookup using the rules generated by this process matches at
+ *       most one rule in C2.
+ *
+ * During the lookup process, the classifier starts out with a wildcard mask
+ * that is all 0-bits, that is, fully wildcarded.  As lookup proceeds, each
+ * step tends to add constraints to the wildcard mask, that is, change
+ * wildcarded 0-bits into exact-match 1-bits.  We call this "un-wildcarding".
+ * A lookup step that examines a particular field must un-wildcard that field.
+ * In general, un-wildcarding is necessary for correctness but undesirable for
+ * performance.
+ *
+ *
+ * Basic Classifier Design
+ * =======================
+ *
+ * Suppose that all the rules in a classifier had the same form.  For example,
+ * suppose that they all matched on the source and destination Ethernet address
+ * and wildcarded all the other fields.  Then the obvious way to implement a
+ * classifier would be a hash table on the source and destination Ethernet
+ * addresses.  If new classification rules came along with a different form,
+ * you could add a second hash table that hashed on the fields matched in those
+ * rules.  With two hash tables, you look up a given flow in each hash table.
+ * If there are no matches, the classifier didn't contain a match; if you find
+ * a match in one of them, that's the result; if you find a match in both of
+ * them, then the result is the rule with the higher priority.
+ *
+ * This is how the classifier works.  In a "struct classifier", each form of
+ * "struct cls_rule" present (based on its ->match.mask) goes into a separate
+ * "struct cls_subtable".  A lookup does a hash lookup in every "struct
+ * cls_subtable" in the classifier and tracks the highest-priority match that
+ * it finds.  The subtables are kept in a descending priority order according
+ * to the highest priority rule in each subtable, which allows lookup to skip
+ * over subtables that can't possibly have a higher-priority match than already
+ * found.  Eliminating lookups through priority ordering aids both classifier
+ * primary design goals: skipping lookups saves time and avoids un-wildcarding
+ * fields that those lookups would have examined.
+ *
+ * One detail: a classifier can contain multiple rules that are identical other
+ * than their priority.  When this happens, only the highest priority rule out
+ * of a group of otherwise identical rules is stored directly in the "struct
+ * cls_subtable", with the other almost-identical rules chained off a linked
+ * list inside that highest-priority rule.
+ *
+ * The following sub-sections describe various optimizations over this simple
+ * approach.
+ *
+ *
+ * Staged Lookup (Wildcard Optimization)
+ * -------------------------------------
+ *
+ * Subtable lookup is performed in ranges defined for struct flow, starting
+ * from metadata (registers, in_port, etc.), then L2 header, L3, and finally
+ * L4 ports.  Whenever it is found that there are no matches in the current
+ * subtable, the rest of the subtable can be skipped.
+ *
+ * Staged lookup does not reduce lookup time, and it may increase it, because
+ * it changes a single hash table lookup into multiple hash table lookups.
+ * It reduces un-wildcarding significantly in important use cases.
+ *
+ *
+ * Prefix Tracking (Wildcard Optimization)
+ * ---------------------------------------
+ *
+ * Classifier uses prefix trees ("tries") for tracking the used
+ * address space, enabling skipping classifier tables containing
+ * longer masks than necessary for the given address.  This reduces
+ * un-wildcarding for datapath flows in parts of the address space
+ * without host routes, but consulting extra data structures (the
+ * tries) may slightly increase lookup time.
+ *
+ * Trie lookup is interwoven with staged lookup, so that a trie is
+ * searched only when the configured trie field becomes relevant for
+ * the lookup.  The trie lookup results are retained so that each trie
+ * is checked at most once for each classifier lookup.
+ *
+ * This implementation tracks the number of rules at each address
+ * prefix for the whole classifier.  More aggressive table skipping
+ * would be possible by maintaining lists of tables that have prefixes
+ * at the lengths encountered on tree traversal, or by maintaining
+ * separate tries for subsets of rules separated by metadata fields.
+ *
+ * Prefix tracking is configured via OVSDB "Flow_Table" table,
+ * "fieldspec" column.  "fieldspec" is a string map where a "prefix"
+ * key tells which fields should be used for prefix tracking.  The
+ * value of the "prefix" key is a comma separated list of field names.
+ *
+ * There is a maximum number of fields that can be enabled for any one
+ * flow table.  Currently this limit is 3.
+ *
+ *
+ * Partitioning (Lookup Time and Wildcard Optimization)
+ * ----------------------------------------------------
+ *
+ * Suppose that a given classifier is being used to handle multiple stages in a
+ * pipeline using "resubmit", with metadata (that is, the OpenFlow 1.1+ field
+ * named "metadata") distinguishing between the different stages.  For example,
+ * metadata value 1 might identify ingress rules, metadata value 2 might
+ * identify ACLs, and metadata value 3 might identify egress rules.  Such a
+ * classifier is essentially partitioned into multiple sub-classifiers on the
+ * basis of the metadata value.
+ *
+ * The classifier has a special optimization to speed up matching in this
+ * scenario:
+ *
+ *     - Each cls_subtable that matches on metadata gets a tag derived from the
+ *       subtable's mask, so that it is likely that each subtable has a unique
+ *       tag.  (Duplicate tags have a performance cost but do not affect
+ *       correctness.)
+ *
+ *     - For each metadata value matched by any cls_rule, the classifier
+ *       constructs a "struct cls_partition" indexed by the metadata value.
+ *       The cls_partition has a 'tags' member whose value is the bitwise-OR of
+ *       the tags of each cls_subtable that contains any rule that matches on
+ *       the cls_partition's metadata value.  In other words, struct
+ *       cls_partition associates metadata values with subtables that need to
+ *       be checked with flows with that specific metadata value.
+ *
+ * Thus, a flow lookup can start by looking up the partition associated with
+ * the flow's metadata, and then skip over any cls_subtable whose 'tag' does
+ * not intersect the partition's 'tags'.  (The flow must also be looked up in
+ * any cls_subtable that doesn't match on metadata.  We handle that by giving
+ * any such cls_subtable TAG_ALL as its 'tags' so that it matches any tag.)
+ *
+ * Partitioning saves lookup time by reducing the number of subtable lookups.
+ * Each eliminated subtable lookup also reduces the amount of un-wildcarding.
+ *
+ *
+ * Classifier Versioning
+ * =====================
+ *
+ * Classifier lookups are always done in a specific classifier version, where
+ * a version is defined to be a natural number.
+ *
+ * When a new rule is added to a classifier, it is set to become visible in a
+ * specific version.  If the version number used at insert time is larger than
+ * any version number currently used in lookups, the new rule is said to be
+ * invisible to lookups.  This means that lookups won't find the rule, but the
+ * rule is immediately available to classifier iterations.
+ *
+ * Similarly, a rule can be marked as to be deleted in a future version.  To
+ * delete a rule in a way to not remove the rule before all ongoing lookups are
+ * finished, the rule should be made invisible in a specific version number.
+ * Then, when all the lookups use a later version number, the rule can be
+ * actually removed from the classifier.
+ *
+ * Classifiers can hold duplicate rules (rules with the same match criteria and
+ * priority) when at most one of these duplicates is visible in any given
+ * lookup version.  The caller responsible for classifier modifications must
+ * maintain this invariant.
+ *
+ * The classifier supports versioning for two reasons:
+ *
+ *     1. Support for versioned modifications makes it possible to perform an
+ *        arbitraty series of classifier changes as one atomic transaction,
+ *        where intermediate versions of the classifier are not visible to any
+ *        lookups.  Also, when a rule is added for a future version, or marked
+ *        for removal after the current version, such modifications can be
+ *        reverted without any visible effects to any of the current lookups.
+ *
+ *     2. Performance: Adding (or deleting) a large set of rules can, in
+ *        pathological cases, have a cost proportional to the number of rules
+ *        already in the classifier.  When multiple rules are being added (or
+ *        deleted) in one go, though, this pathological case cost can be
+ *        typically avoided, as long as it is OK for any new rules to be
+ *        invisible until the batch change is complete.
+ *
+ * Note that the classifier_replace() function replaces a rule immediately, and
+ * is therefore not safe to use with versioning.  It is still available for the
+ * users that do not use versioning.
+ *
+ *
+ * Deferred Publication
+ * ====================
+ *
+ * Removing large number of rules from classifier can be costly, as the
+ * supporting data structures are teared down, in many cases just to be
+ * re-instantiated right after.  In the worst case, as when each rule has a
+ * different match pattern (mask), the maintenance of the match patterns can
+ * have cost O(N^2), where N is the number of different match patterns.  To
+ * alleviate this, the classifier supports a "deferred mode", in which changes
+ * in internal data structures needed for future version lookups may not be
+ * fully computed yet.  The computation is finalized when the deferred mode is
+ * turned off.
+ *
+ * This feature can be used with versioning such that all changes to future
+ * versions are made in the deferred mode.  Then, right before making the new
+ * version visible to lookups, the deferred mode is turned off so that all the
+ * data structures are ready for lookups with the new version number.
+ *
+ * To use deferred publication, first call classifier_defer().  Then, modify
+ * the classifier via additions (classifier_insert() with a specific, future
+ * version number) and deletions (use cls_rule_make_removable_after_version()).
+ * Then call classifier_publish(), and after that, announce the new version
+ * number to be used in lookups.
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * The classifier may safely be accessed by many reader threads concurrently
+ * and by a single writer, or by multiple writers when they guarantee mutually
+ * exlucive access to classifier modifications.
+ *
+ * Since the classifier rules are RCU protected, the rule destruction after
+ * removal from the classifier must be RCU postponed.  Also, when versioning is
+ * used, the rule removal itself needs to be typically RCU postponed.  In this
+ * case the rule destruction is doubly RCU postponed, i.e., the second
+ * ovsrcu_postpone() call to destruct the rule is called from the first RCU
+ * callback that removes the rule.
+ *
+ * Rules that have never been visible to lookups are an exeption to the above
+ * rule.  Such rules can be removed immediately, but their destruction must
+ * still be RCU postponed, as the rule's visibility attribute may be examined
+ * parallel to the rule's removal. */
+
+struct flow {
+    /* Metadata */
+    struct flow_tnl tunnel;     /* Encapsulating tunnel parameters. */
+    ovs_be64 metadata;          /* OpenFlow Metadata. */
+    uint32_t regs[FLOW_N_REGS]; /* Registers. */
+    uint32_t skb_priority;      /* Packet priority for QoS. */
+    uint32_t pkt_mark;          /* Packet mark. */
+    uint32_t dp_hash;           /* Datapath computed hash value. The exact
+                                 * computation is opaque to the user space. */
+    union flow_in_port in_port; /* Input port.*/
+    uint32_t recirc_id;         /* Must be exact match. */
+    uint32_t conj_id;           /* Conjunction ID. */
+    ofp_port_t actset_output;   /* Output port in action set. */
+    uint8_t pad1[6];            /* Pad to 64 bits. */
+
+    /* L2, Order the same as in the Ethernet header! (64-bit aligned) */
+    uint8_t dl_dst[ETH_ADDR_LEN]; /* Ethernet destination address. */
+    uint8_t dl_src[ETH_ADDR_LEN]; /* Ethernet source address. */
+    ovs_be16 dl_type;           /* Ethernet frame type. */
+    ovs_be16 vlan_tci;          /* If 802.1Q, TCI | VLAN_CFI; otherwise 0. */
+    ovs_be32 mpls_lse[ROUND_UP(FLOW_MAX_MPLS_LABELS, 2)]; /* MPLS label stack
+                                                             (with padding). */
+    /* L3 (64-bit aligned) */
+    ovs_be32 nw_src;            /* IPv4 source address. */
+    ovs_be32 nw_dst;            /* IPv4 destination address. */
+    struct in6_addr ipv6_src;   /* IPv6 source address. */
+    struct in6_addr ipv6_dst;   /* IPv6 destination address. */
+    ovs_be32 ipv6_label;        /* IPv6 flow label. */
+    uint8_t nw_frag;            /* FLOW_FRAG_* flags. */
+    uint8_t nw_tos;             /* IP ToS (including DSCP and ECN). */
+    uint8_t nw_ttl;             /* IP TTL/Hop Limit. */
+    uint8_t nw_proto;           /* IP protocol or low 8 bits of ARP opcode. */
+    struct in6_addr nd_target;  /* IPv6 neighbor discovery (ND) target. */
+    uint8_t arp_sha[ETH_ADDR_LEN]; /* ARP/ND source hardware address. */
+    uint8_t arp_tha[ETH_ADDR_LEN]; /* ARP/ND target hardware address. */
+    ovs_be16 tcp_flags;         /* TCP flags. With L3 to avoid matching L4. */
+    ovs_be16 pad2;              /* Pad to 64 bits. */
+
+    /* L4 (64-bit aligned) */
+    ovs_be16 tp_src;            /* TCP/UDP/SCTP source port. */
+    ovs_be16 tp_dst;            /* TCP/UDP/SCTP destination port. */
+    ovs_be32 igmp_group_ip4;    /* IGMP group IPv4 address.
+                                 * Keep last for BUILD_ASSERT_DECL below. */
+};
+
+struct cls_trie {
+    const struct mf_field *field; /* Trie field, or NULL. */
+    rcu_trie_ptr root;            /* NULL if none. */
+};
+
+/* A flow classifier. */
+struct classifier {
+    int n_rules;                    /* Total number of rules. */
+    uint8_t n_flow_segments;
+    uint8_t flow_segments[CLS_MAX_INDICES]; /* Flow segment boundaries to use
+                                             * for staged lookup. */
+    //包含 cls_subtable 元素
+    struct cmap subtables_map;      /* Contains "struct cls_subtable"s.  */
+    struct pvector subtables;
+    struct cmap partitions;         /* Contains "struct cls_partition"s. */
+    struct cls_trie tries[CLS_MAX_TRIES]; /* Prefix tries. */
+    unsigned int n_tries;
+    bool publish;                   /* Make changes visible to lookups? */
+};
+
+/* Classifier internal definitions, subject to change at any time. */
+
+/* A set of rules that all have the same fields wildcarded. */
+struct cls_subtable {
+    struct cmap_node cmap_node;    /* Within classifier's 'subtables_map'. */
+
+    /* These fields are only used by writers. */
+    int max_priority;              /* Max priority of any rule in subtable. */
+    unsigned int max_count;        /* Count of max_priority rules. */
+
+    /* Accessed by iterators. */
+    struct rculist rules_list;              /* Unordered. */
+
+    /* Identical, but lower priority rules are not inserted to any of the
+     * following data structures. */
+
+    /* These fields are accessed by readers who care about wildcarding. */
+    const tag_type tag;       /* Tag generated from mask for partitioning. */
+    const uint8_t n_indices;                   /* How many indices to use. */
+    const uint8_t index_ofs[CLS_MAX_INDICES];  /* u64 segment boundaries. */
+    unsigned int trie_plen[CLS_MAX_TRIES];  /* Trie prefix length in 'mask'
+                                             * (runtime configurable). */
+    const int ports_mask_len;
+    struct cmap indices[CLS_MAX_INDICES];   /* Staged lookup indices. */
+    rcu_trie_ptr ports_trie;                /* NULL if none. */
+
+    /* These fields are accessed by all readers. */
+    struct cmap rules;                      /* Contains 'cls_match'es. */
+    const struct minimask mask;             /* Wildcards for fields. */
+    /* 'mask' must be the last field. */
+};
+
+/* Internal representation of a rule in a "struct cls_subtable".
+ *
+ * The 'next' member is an element in a singly linked, null-terminated list.
+ * This list links together identical "cls_match"es in order of decreasing
+ * priority.  The classifier code maintains the invariant that at most one rule
+ * of a given priority is visible for any given lookup version.
+ */
+struct cls_match {
+    /* Accessed by everybody. */
+    OVSRCU_TYPE(struct cls_match *) next; /* Equal, lower-priority matches. */
+    OVSRCU_TYPE(struct cls_conjunction_set *) conj_set;
+
+    /* Accessed only by writers. */
+    struct cls_partition *partition;
+
+    /* Accessed by readers interested in wildcarding. */
+    const int priority;         /* Larger numbers are higher priorities. */
+    struct cmap_node index_nodes[CLS_MAX_INDICES]; /* Within subtable's
+                                                    * 'indices'. */
+    /* Accessed by all readers. */
+    struct cmap_node cmap_node; /* Within struct cls_subtable 'rules'. */
+
+    /* Rule versioning.
+     *
+     * CLS_NOT_REMOVED_VERSION has a special meaning for 'remove_version',
+     * meaningthat the rule has been added but not yet removed.
+     */
+    const cls_version_t add_version;        /* Version rule was added in. */
+    ATOMIC(cls_version_t) remove_version;   /* Version rule is removed in. */
+
+    const struct cls_rule *cls_rule;
+    const struct miniflow flow; /* Matching rule. Mask is in the subtable. */
+    /* 'flow' must be the last field. */
+};
+
+struct cls_conjunction {
+    uint32_t id;
+    uint8_t clause;
+    uint8_t n_clauses;
+};
+
+/* Doubly linked list head or element. */
+struct rculist {
+    /* Previous list element. */
+    struct rculist *prev OVS_GUARDED_BY(rculist_fake_mutex);
+
+    /* Next list element. */
+    OVSRCU_TYPE(struct rculist *) next;
+};
+
+/* A rule to be inserted to the classifier. */
+struct cls_rule {
+    struct rculist node;          /* In struct cls_subtable 'rules_list'. */
+    const int priority;           /* Larger numbers are higher priorities. */
+    struct cls_match *cls_match;  /* NULL if not in a classifier. */
+    const struct minimatch match; /* Matching rule. */
+};
+
+/* An OpenFlow flow within a "struct ofproto".
+ *
+ * With few exceptions, ofproto implementations may look at these fields but
+ * should not modify them.
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * Except near the beginning or ending of its lifespan, rule 'rule' belongs to
+ * the classifier rule->ofproto->tables[rule->table_id].cls.  The text below
+ * calls this classifier 'cls'.
+ *
+ * Motivation
+ * ----------
+ *
+ * The thread safety rules described here for "struct rule" are motivated by
+ * two goals:
+ *
+ *    - Prevent threads that read members of "struct rule" from reading bad
+ *      data due to changes by some thread concurrently modifying those
+ *      members.
+ *
+ *    - Prevent two threads making changes to members of a given "struct rule"
+ *      from interfering with each other.
+ *
+ *
+ * Rules
+ * -----
+ *
+ * A rule 'rule' may be accessed without a risk of being freed by a thread
+ * until the thread quiesces (i.e., rules are RCU protected and destructed
+ * using ovsrcu_postpone()).  Code that needs to hold onto a rule for a
+ * while should increment 'rule->ref_count' either with ofproto_rule_ref()
+ * (if 'ofproto_mutex' is held), or with ofproto_rule_try_ref() (when some
+ * other thread might remove the rule from 'cls').  ofproto_rule_try_ref()
+ * will fail if the rule has already been scheduled for destruction.
+ *
+ * 'rule->ref_count' protects 'rule' from being freed.  It doesn't protect the
+ * rule from being deleted from 'cls' (that's 'ofproto_mutex') and it doesn't
+ * protect members of 'rule' from modification (that's 'rule->mutex').
+ *
+ * 'rule->mutex' protects the members of 'rule' from modification.  It doesn't
+ * protect the rule from being deleted from 'cls' (that's 'ofproto_mutex') and
+ * it doesn't prevent the rule from being freed (that's 'rule->ref_count').
+ *
+ * Regarding thread safety, the members of a rule fall into the following
+ * categories:
+ *
+ *    - Immutable.  These members are marked 'const'.
+ *
+ *    - Members that may be safely read or written only by code holding
+ *      ofproto_mutex.  These are marked OVS_GUARDED_BY(ofproto_mutex).
+ *
+ *    - Members that may be safely read only by code holding ofproto_mutex or
+ *      'rule->mutex', and safely written only by coding holding ofproto_mutex
+ *      AND 'rule->mutex'.  These are marked OVS_GUARDED.
+ */
+struct rule {
+    /* Where this rule resides in an OpenFlow switch.
+     *
+     * These are immutable once the rule is constructed, hence 'const'. */
+    struct ofproto *const ofproto; /* The ofproto that contains this rule. */
+    const struct cls_rule cr;      /* In owning ofproto's classifier. */
+    const uint8_t table_id;        /* Index in ofproto's 'tables' array. */
+    bool removed;                  /* Rule has been removed from the ofproto
+                                    * data structures. */
+
+    /* Protects members marked OVS_GUARDED.
+     * Readers only need to hold this mutex.
+     * Writers must hold both this mutex AND ofproto_mutex.
+     * By implication writers can read *without* taking this mutex while they
+     * hold ofproto_mutex. */
+    struct ovs_mutex mutex OVS_ACQ_AFTER(ofproto_mutex);
+
+    /* Number of references.
+     * The classifier owns one reference.
+     * Any thread trying to keep a rule from being freed should hold its own
+     * reference. */
+    struct ovs_refcount ref_count;
+
+    /* A "flow cookie" is the OpenFlow name for a 64-bit value associated with
+     * a flow.. */
+    ovs_be64 flow_cookie OVS_GUARDED;
+    struct hindex_node cookie_node OVS_GUARDED_BY(ofproto_mutex);
+
+    enum ofputil_flow_mod_flags flags OVS_GUARDED;
+
+    /* Timeouts. */
+    uint16_t hard_timeout OVS_GUARDED; /* In seconds from ->modified. */
+    uint16_t idle_timeout OVS_GUARDED; /* In seconds from ->used. */
+
+    /* Eviction precedence. */
+    const uint16_t importance;
+
+    /* Removal reason for sending flow removed message.
+     * Used only if 'flags' has OFPUTIL_FF_SEND_FLOW_REM set and if the
+     * value is not OVS_OFPRR_NONE. */
+    uint8_t removed_reason;
+
+    /* Eviction groups (see comment on struct eviction_group for explanation) .
+     *
+     * 'eviction_group' is this rule's eviction group, or NULL if it is not in
+     * any eviction group.  When 'eviction_group' is nonnull, 'evg_node' is in
+     * the ->eviction_group->rules hmap. */
+    struct eviction_group *eviction_group OVS_GUARDED_BY(ofproto_mutex);
+    struct heap_node evg_node OVS_GUARDED_BY(ofproto_mutex);
+
+    /* OpenFlow actions.  See struct rule_actions for more thread-safety
+     * notes. */
+    const struct rule_actions * const actions;
+
+    /* In owning meter's 'rules' list.  An empty list if there is no meter. */
+    struct ovs_list meter_list_node OVS_GUARDED_BY(ofproto_mutex);
+
+    /* Flow monitors (e.g. for NXST_FLOW_MONITOR, related to struct ofmonitor).
+     *
+     * 'add_seqno' is the sequence number when this rule was created.
+     * 'modify_seqno' is the sequence number when this rule was last modified.
+     * See 'monitor_seqno' in connmgr.c for more information. */
+    enum nx_flow_monitor_flags monitor_flags OVS_GUARDED_BY(ofproto_mutex);
+    uint64_t add_seqno OVS_GUARDED_BY(ofproto_mutex);
+    uint64_t modify_seqno OVS_GUARDED_BY(ofproto_mutex);
+
+    /* Optimisation for flow expiry.  In ofproto's 'expirable' list if this
+     * rule is expirable, otherwise empty. */
+    struct ovs_list expirable OVS_GUARDED_BY(ofproto_mutex);
+
+    /* Times.  Last so that they are more likely close to the stats managed
+     * by the provider. */
+    long long int created OVS_GUARDED; /* Creation time. */
+
+    /* Must hold 'mutex' for both read/write, 'ofproto_mutex' not needed. */
+    long long int modified OVS_GUARDED; /* Time of last modification. */
+};
+
+/* A set of rules within a single OpenFlow table (oftable) that have the same
+ * values for the oftable's eviction_fields.  A rule to be evicted, when one is
+ * needed, is taken from the eviction group that contains the greatest number
+ * of rules.
+ *
+ * An oftable owns any number of eviction groups, each of which contains any
+ * number of rules.
+ *
+ * Membership in an eviction group is imprecise, based on the hash of the
+ * oftable's eviction_fields (in the eviction_group's id_node.hash member).
+ * That is, if two rules have different eviction_fields, but those
+ * eviction_fields hash to the same value, then they will belong to the same
+ * eviction_group anyway.
+ *
+ * (When eviction is not enabled on an oftable, we don't track any eviction
+ * groups, to save time and space.) */
+struct eviction_group {
+    struct hmap_node id_node;   /* In oftable's "eviction_groups_by_id". */
+    struct heap_node size_node; /* In oftable's "eviction_groups_by_size". */
+    struct heap rules;          /* Contains "struct rule"s. */
+};
