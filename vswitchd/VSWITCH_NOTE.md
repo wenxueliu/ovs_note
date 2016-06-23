@@ -27,6 +27,28 @@ ovs-appctl bond/show bond0
 ovs-appctl lacp/show bond0
 ovs-vsctl list port bond0
 
+ovs-vsctl set Port bond0 bond_mode=balance-slb
+ovs-vsctl set Port bond0 bond_mode=balance-tcp
+
+
+###OVS Bond
+
+OVS(2.3.1)支持模式
+
+* active-backup
+* balance-slb : source MAC + vlan tag
+* balance-tcp : L2/L3/L4 header 不同 connection 走不同链路. 注: 绑定的交换机必须配置 LACP
+
+ovs-vsctl add-br my_test
+ovs-vsctl add-bond my_test bond0 eth0 eth1 eth2
+ovs-vsctl add-bond my_test bond0 eth0 eth1 eth2 bond_mode=balance-slb
+ovs-vsctl set port my_test bond_mode=balance-slb
+ovs-appctl bond/show bond0
+ovs-appctl bond/list bond0
+ovs-appctl bond/hash bond0
+ovs-appctl bond/migrate
+
+
 ###ofport 端口
 
 ovs-ofctl dump-ports ovs0
@@ -62,6 +84,14 @@ ovs-ofctl mod-ports ovs0 eth0
     -- --id=@q0 create queue other-config:min-rate=100000000 other-config:max-rate=100000000 \
     -- --id=@q1 create queue other-config:min-rate=500000000 \
 
+
+    vs-vsctl -- set port s1-eth1 qos=@newqos -- --id=@newqos create qos type=linux-htb \
+    queues=0=@q0,1=@q1 -- --id=@q0 create queue other-config:min-rate=200000000 \
+    other-config:max-rate=800000000 -- --id=@q1 create queue other-config:min-rate=50000 \
+    other-config:max-rate=50000000
+
+
+
 ovs-vsctl set interface eth0 ingress_policing_rate=1000
 ovs-vsctl set interface eth0 ingress_policing_burst=1000
 
@@ -72,6 +102,16 @@ ovs-vsctl list queue
 ovs-vsctl -- destroy QoS tap0 -- clear Port tap0 qos
 ovs-vsctl -- destroy queue
 ovs-vsctl -- destroy qos
+
+
+ovs-vsctl --set bridge br0 mirrors=@m-- --id=@m create mirror name=mymirror \
+    select-dst-port=id_1 \
+    select-src-port=id_2 \
+    output-port=id_3
+
+
+
+
 
 Open vSwitch uses the Linux "traffic-control" capability for rate-limiting. If you are not seeing
 the configured rate-limit have any effect, make sure that your kernel is built with "ingress qdisc"
@@ -103,6 +143,58 @@ ovs-ofctl add-flow br0 "table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, act
 ovs-ofctl add-flow br0 "table=0, dl_dst=01:80:c2:00:00:00/ff:ff:ff:ff:ff:f0, actions=drop"
 
 ###ofgroup
+
+sudo ovs-ofctl add-group s11 group_id=1,type=select,bucket=output:1,bucket=output:2,bucket=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s11 ip,nw_src=10.1.1.10,nw_dst=10.1.2.10,priority=2,actions=group:1 -O OpenFlow13
+
+sudo ovs-ofctl add-group s31 group_id=2,type=select,bucket=output:1,bucket=output:2,bucket=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s31 ip,nw_src=10.1.2.10,nw_dst=10.1.1.10,priority=2,actions=group:2 -O OpenFlow13
+
+
+sudo ovs-ofctl add-flow s11 ip,nw_dst=10.1.2.10,priority=2,actions=group:1  -O OpenFlow13
+sudo ovs-ofctl add-flow s11 ip,nw_dst=10.1.1.10,priority=2,actions=output:4  -O OpenFlow13
+
+sudo ovs-ofctl add-flow s21 ip,nw_dst=10.1.2.11,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s21 ip,nw_dst=10.1.2.10,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s21 ip,nw_dst=10.1.1.10,priority=2,actions=output:1 -O OpenFlow13
+
+sudo ovs-ofctl add-flow s22 ip,nw_dst=10.1.2.11,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s22 ip,nw_dst=10.1.2.10,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s22 ip,nw_dst=10.1.1.10,priority=2,actions=output:1 -O OpenFlow13
+
+sudo ovs-ofctl add-flow s23 ip,nw_dst=10.1.2.11,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s23 ip,nw_dst=10.1.2.10,priority=2,actions=output:3 -O OpenFlow13
+sudo ovs-ofctl add-flow s23 ip,nw_dst=10.1.1.10,priority=2,actions=output:1 -O OpenFlow13
+
+sudo ovs-ofctl add-flow s31 "priority=2,ip,nw_dst=10.1.1.10,actions=group:2" -O OpenFlow13
+sudo ovs-ofctl add-flow s31 "priority=2,ip,nw_dst=10.1.2.10,actions=output:4" -O OpenFlow13
+sudo ovs-ofctl add-flow s31 "priority=2,ip,nw_dst=10.1.2.11,actions=output:5" -O OpenFlow13
+
+
+
+
+
+$sudo ovs-ofctl --protocols=OpenFlow13 add-group s1 group_id=1,type=select,\
+bucket=mod_dl_dst:00:00:00:00:00:02,mod_nw_dst:10.0.0.2,output:2,\
+bucket=mod_dl_dst:00:00:00:00:00:03,mod_nw_dst:10.0.0.3,output:3,\
+bucket=mod_dl_dst:00:00:00:00:00:04,mod_nw_dst:10.0.0.4,output:4
+
+sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+ip,nw_dst=10.0.0.5,priority=32769,actions=group:1
+$ sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+ip,actions=mod_dl_src:00:00:00:00:00:05,mod_nw_src:10.0.0.5,goto_table:1
+
+$ sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+table=1,dl_type=0x800,nw_dst=10.0.0.1,actions=output:1
+$ sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+table=1,dl_type=0x800,nw_dst=10.0.0.2,actions=output:2
+$ sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+table=1,dl_type=0x800,nw_dst=10.0.0.3,actions=output:3
+$ sudo ovs-ofctl --protocols=OpenFlow13 add-flow s1
+table=1,dl_type=0x800,nw_dst=10.0.0.4,actions=output:4
+
+
+
 
 
 配置
@@ -151,6 +243,10 @@ ovs-vsctl set Bridge br0 flow_tables:1=@N1 -- \
 
 ovs-vsctl set Flow_Table table0 prefixes=ip_dst,ip_src
 ovs-vsctl set Flow_Table table1 prefixes=[]
+
+ovs-vsctl  -- --id=@t0 create Flow_Table name=main  flow-limit=10   --
+--id=@t1 create Flow_Table flow-limit=5 overflow-policy=refuse  -- set
+bridge br0 flow_tables={1=@t1,0=@t0}
 
 ovs-vsctl add-port ovs-switch p0 -- set Interface p0 ofport_request=100
 
@@ -443,3 +539,121 @@ static void process_command(struct unixctl_conn *conn, struct jsonrpc_msg *reque
     unixctl_command_register("exit", "", 0, 0, ovs_vswitchd_exit, &exiting);
 
     unixctl_command_register("memory/show", "", 0, 0, memory_unixctl_show, NULL);
+
+
+#加载模块：
+insmod xt_IPID
+insmod cls_u32                                                                                         
+insmod cls_fw  
+insmod sch_htb
+insmod sch_sfq
+insmod sch_prio
+#启用IMQ虚拟网卡
+ip link set imq0 up
+ip link set imq1 up
+#删除旧队列
+tc qdisc del dev imq0 root
+tc qdisc del dev imq1 root
+#上传设置
+#增加根队列，未标记数据默认走26
+tc qdisc add dev imq0 root handle 1: htb default 26
+#增加总流量规则
+tc class add dev imq0 parent 1: classid 1:1 htb rate 350kbit
+#增加子类
+tc class add dev imq0 parent 1:1 classid 1:20 htb rate 80kbit ceil 250kbit prio 0
+tc class add dev imq0 parent 1:1 classid 1:21 htb rate 80kbit ceil 250kbit prio 1
+tc class add dev imq0 parent 1:1 classid 1:22 htb rate 80kbit ceil 250kbit prio 2
+tc class add dev imq0 parent 1:1 classid 1:23 htb rate 80kbit ceil 250kbit prio 3
+tc class add dev imq0 parent 1:1 classid 1:24 htb rate 80kbit ceil 250kbit prio 4
+tc class add dev imq0 parent 1:1 classid 1:25 htb rate 50kbit ceil 250kbit prio 5
+tc class add dev imq0 parent 1:1 classid 1:26 htb rate 50kbit ceil 150kbit prio 6
+tc class add dev imq0 parent 1:1 classid 1:27 htb rate 50kbit ceil 100kbit prio 7
+#为子类添加SFQ公平队列,每10秒重置
+tc qdisc add dev imq0 parent 1:20 handle 20: sfq perturb 10
+tc qdisc add dev imq0 parent 1:21 handle 21: sfq perturb 10
+tc qdisc add dev imq0 parent 1:22 handle 22: sfq perturb 10
+tc qdisc add dev imq0 parent 1:23 handle 23: sfq perturb 10
+tc qdisc add dev imq0 parent 1:24 handle 24: sfq perturb 10
+tc qdisc add dev imq0 parent 1:25 handle 25: sfq perturb 10
+tc qdisc add dev imq0 parent 1:26 handle 26: sfq perturb 10
+tc qdisc add dev imq0 parent 1:27 handle 27: sfq perturb 10
+#添加过滤规则配合Iptables Mark标记
+#tc filter add dev imq0 parent 1:0 protocol ip u32 match ip sport 22 0xffff flowid 1:10
+#使用U32标记数据，下面使用Iptables mark，容易。
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 20 fw flowid 1:20
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 21 fw flowid 1:21
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 22 fw flowid 1:22
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 23 fw flowid 1:23
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 24 fw flowid 1:24
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 25 fw flowid 1:25
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 26 fw flowid 1:26
+tc filter add dev imq0 parent 1:0 prio 0 protocol ip handle 27 fw flowid 1:27
+#上传数据转入特定链
+iptables -t mangle -N MYSHAPER-OUT
+iptables -t mangle -A POSTROUTING -o pppoe-wan -j MYSHAPER-OUT
+iptables -t mangle -A MYSHAPER-OUT -j IMQ --todev 0
+#为特定数据打上标记配合之前过滤规则
+#iptables -t mangle -I MYSHAPER-OUT -s 192.168.1.16 -j MARK --set-mark 27 #限制特定IP上传速度
+#iptables -t mangle -I MYSHAPER-OUT -s 192.168.1.16 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p tcp --tcp-flags SYN,RST,ACK SYN -j MARK --set-mark 20 #提高HTTP连接速度
+iptables -t mangle -A MYSHAPER-OUT -p tcp --tcp-flags SYN,RST,ACK SYN -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p udp --dport 53 -j MARK --set-mark 20 #DNS查询
+iptables -t mangle -A MYSHAPER-OUT -p udp --dport 53 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p icmp -j MARK --set-mark 21 #ICMP数据
+iptables -t mangle -A MYSHAPER-OUT -p icmp -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p tcp -m length --length :64 -j MARK --set-mark 21 #小数据包
+iptables -t mangle -A MYSHAPER-OUT -p tcp -m length --length :64 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 22 -j MARK --set-mark 22 #SSH连接
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 22 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p udp --dport 1194 -j MARK --set-mark 22 #VPN连接
+iptables -t mangle -A MYSHAPER-OUT -p udp --dport 1194 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 80 -j MARK --set-mark 23 #HTTP连接
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 80 -j RETURN
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 443 -j MARK --set-mark 24 #HTTPS连接
+iptables -t mangle -A MYSHAPER-OUT -p tcp --dport 443 -j RETURN
+#上传设置完成
+  
+#下载设置
+#增加根队列，未标记数据默认走24
+tc qdisc add dev imq1 handle 1: root htb default 24
+tc class add dev imq1 parent 1: classid 1:1 htb rate 3500kbit
+#添加子类
+tc class add dev imq1 parent 1:1 classid 1:20 htb rate 1000kbit ceil 1500kbit prio 0
+tc class add dev imq1 parent 1:1 classid 1:21 htb rate 1500kbit ceil 2500kbit prio 1
+tc class add dev imq1 parent 1:1 classid 1:22 htb rate 2000kbit ceil 3500kbit prio 2
+tc class add dev imq1 parent 1:1 classid 1:23 htb rate 1000kbit ceil 1500kbit prio 3
+tc class add dev imq1 parent 1:1 classid 1:24 htb rate 1000kbit ceil 1500kbit prio 4
+#为子类添加SFQ公平队列
+tc qdisc add dev imq1 parent 1:20 handle 20: sfq perturb 10
+tc qdisc add dev imq1 parent 1:21 handle 21: sfq perturb 10
+tc qdisc add dev imq1 parent 1:22 handle 22: sfq perturb 10
+tc qdisc add dev imq1 parent 1:23 handle 23: sfq perturb 10
+tc qdisc add dev imq1 parent 1:24 handle 24: sfq perturb 10
+#过滤规则
+tc filter add dev imq1 parent 1:0 prio 0 protocol ip handle 20 fw flowid 1:20
+tc filter add dev imq1 parent 1:0 prio 0 protocol ip handle 21 fw flowid 1:21
+tc filter add dev imq1 parent 1:0 prio 0 protocol ip handle 22 fw flowid 1:22
+tc filter add dev imq1 parent 1:0 prio 0 protocol ip handle 23 fw flowid 1:23
+tc filter add dev imq1 parent 1:0 prio 0 protocol ip handle 24 fw flowid 1:24
+#下载数据转入特定链
+iptables -t mangle -N MYSHAPER-IN
+iptables -t mangle -A PREROUTING -i pppoe-wan -j MYSHAPER-IN
+iptables -t mangle -A MYSHAPER-IN -j IMQ --todev 1
+#分类标记数据
+#iptables -t mangle -A MYSHAPER-IN -d 192.168.1.16 -j MARK --set-mark 23 #限制特定IP下载速度
+#iptables -t mangle -A MYSHAPER-IN -d 192.168.1.16 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p tcp -m length --length :64 -j MARK --set-mark 20 #小数据优先
+iptables -t mangle -A MYSHAPER-IN -p tcp -m length --length :64 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p icmp -j MARK --set-mark 20 #ICMP数据
+iptables -t mangle -A MYSHAPER-IN -p icmp -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 22 -j MARK --set-mark 21 #SSH连接
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 22 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p udp --sport 1194 -j MARK --set-mark 21 #VPN连接
+iptables -t mangle -A MYSHAPER-IN -p udp --sport 1194 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 443 -j MARK --set-mark 22 #HTTPS连接
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 443 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 80 -j MARK --set-mark 22 #HTTP连接
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 80 -j RETURN
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 0:1024 -j MARK --set-mark 23 #系统服务端口连接
+iptables -t mangle -A MYSHAPER-IN -p tcp --sport 0:1024 -j RETURN
+#下载设置完成
