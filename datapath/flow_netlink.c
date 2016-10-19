@@ -362,11 +362,11 @@ static bool is_all_zero(const u8 *fp, size_t size)
 /*
  * 解析 attr 写入 a, ovs_key_attr 保持在 attrsp
  *
- * @attr   : 待解析的内嵌属性
- * @a      : 保持解析 attr 后的 type:value
- * @attrsp : 保持所有已经解析的 ovs_key_attr
- * @log    : 是否记日志
- * @nz     : 应该为 false, 否则不解析
+ * @attr        : 待解析的内嵌属性
+ * @a           : 保持解析 attr 后的 type:value
+ * @attrsp      : 保持所有已经解析的 type, 如果 type 被解析, 对应的位置位, 通过该变量可以知道哪些类型被解析
+ * @log         : 是否记日志
+ * @nz(no_zero) : a 中记录全 0 属性.
  */
 static int __parse_flow_nlattrs(const struct nlattr *attr,
 				const struct nlattr *a[],
@@ -443,7 +443,15 @@ static int __parse_flow_nlattrs(const struct nlattr *attr,
 	return 0;
 }
 
-//解析 attr 写入 a, ovs_key_attr 保持在 attrsp
+/*
+ * 解析 attr 保存在 a 中
+ *
+ * @attr   : 待解析的内嵌属性
+ * @a      : 保持解析 attr 后的 type:value
+ * @attrsp : 保持所有已经解析的 type
+ * @log    : 是否记日志
+ * 对于 mask 保留全 0 属性
+ */
 static int parse_flow_mask_nlattrs(const struct nlattr *attr,
 				   const struct nlattr *a[], u64 *attrsp,
 				   bool log)
@@ -452,12 +460,14 @@ static int parse_flow_mask_nlattrs(const struct nlattr *attr,
 }
 
 /*
- * 解析 attr 保持在 a 中
+ * 解析 attr 保存在 a 中
  *
  * @attr   : 待解析的内嵌属性
  * @a      : 保持解析 attr 后的 type:value
- * @attrsp : 保持所有已经解析的 type
+ * @attrsp : 保持所有已经解析的 type, 具体类型参考 @ovs_key_attr
  * @log    : 是否记日志
+ * 对于 key 不保存全 0 属性
+ *
  */
 static int parse_flow_nlattrs(const struct nlattr *attr,
 			      const struct nlattr *a[], u64 *attrsp,
@@ -810,8 +820,6 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 				 const struct nlattr **a, bool is_mask,
 				 bool log)
 {
-    //match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
-    //match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_DP_HASH)) {
 		u32 hash_val = nla_get_u32(a[OVS_KEY_ATTR_DP_HASH]);
 
@@ -819,8 +827,6 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_DP_HASH);
 	}
 
-    //match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
-    //match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_RECIRC_ID)) {
 		u32 recirc_id = nla_get_u32(a[OVS_KEY_ATTR_RECIRC_ID]);
 
@@ -828,16 +834,12 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_RECIRC_ID);
 	}
 
-    //match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
-    //match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_PRIORITY)) {
 		SW_FLOW_KEY_PUT(match, phy.priority,
 			  nla_get_u32(a[OVS_KEY_ATTR_PRIORITY]), is_mask);
 		*attrs &= ~(1ULL << OVS_KEY_ATTR_PRIORITY);
 	}
 
-    //match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
-    //match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_IN_PORT)) {
 		u32 in_port = nla_get_u32(a[OVS_KEY_ATTR_IN_PORT]);
 
@@ -855,8 +857,6 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
 		SW_FLOW_KEY_PUT(match, phy.in_port, DP_MAX_PORTS, is_mask);
 	}
 
-    //match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
-    //match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
 	if (*attrs & (1ULL << OVS_KEY_ATTR_SKB_MARK)) {
 		uint32_t mark = nla_get_u32(a[OVS_KEY_ATTR_SKB_MARK]);
 
@@ -1265,7 +1265,7 @@ int ovs_nla_get_match(struct sw_flow_match *match,
 	if (err)
 		return err;
 
-    //如果解析后的 a 中 eth_src, eth_dst, eth_type = 8021.Q, 即包含 vlan
+    //如果解析后的 a 中 eth_src, eth_dst, eth_type = 8021.Q, 即包含 vlan, 解析 encap 字段
 	if ((key_attrs & (1ULL << OVS_KEY_ATTR_ETHERNET)) &&
 	    (key_attrs & (1ULL << OVS_KEY_ATTR_ETHERTYPE)) &&
 	    (nla_get_be16(a[OVS_KEY_ATTR_ETHERTYPE]) == htons(ETH_P_8021Q))) {
