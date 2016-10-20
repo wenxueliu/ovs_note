@@ -378,7 +378,13 @@ skb->dev->rx_handler
                         key_extract(skb, key)
                     ovs_dp_process_packet_with_key(skb, &key, false)
                         flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, skb_get_hash(skb), &n_mask_hit)
-
+		                    skb_get_hash(skb) == true:
+                                flow_lookup(tbl, ti, ma, key, n_mask_hit, &mask_index);
+		                            flow = masked_flow_lookup(ti, key, mask, n_mask_hit);
+	                                    ovs_flow_mask_key(&masked_key, unmasked, mask);
+	                                    hash = flow_hash(&masked_key, key_start, key_end);
+	                                    head = find_bucket(ti, hash);
+		                                flow_cmp_masked_key(flow, &masked_key, key_start, key_end))
                         flow == null:
                             ovs_dp_upcall(dp, skb, &upcall)
                                 queue_userspace_packet(dp, skb, upcall_info)
@@ -426,6 +432,7 @@ skb->dev->rx_handler
 1. 从 packet 提取 flow 保存 skb->cb 中
 2. 流表中 actions 解析过程中, 一旦遇到 output action 立即执行
 3. 如果 recirc 不是最后一个 action, 拷贝 skb 之后执行. recirc 即将包回炉
+4. 流表查询算法: skb->hash 每 8 位依次在 dp->tbl->mask_cache[skb->hash]->mask_index 中查找
 
 ##修改端口属性
 
