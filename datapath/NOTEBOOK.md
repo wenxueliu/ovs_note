@@ -278,11 +278,20 @@ ovs_vport_cmd_new
         ovs_vport_add : 增加给定类型的 vport
             ovs_internal_vport_ops : 类型 OVS_VPORT_TYPE_INTERNAL
                 internal_dev_create
-                    ovs_vport_alloc
+	                vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_internal_vport_ops, parms);
                     alloc_netdev
                     register_netdevice
                     dev_set_promiscuity
                     netif_start_queue
+            ovs_netdev_vport_ops
+                netdev_create
+	                vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_netdev_vport_ops, parms);
+                    dev_get_by_name(ovs_dp_get_net(vport->dp), parms->name);
+	                netdev_master_upper_dev_link(netdev_vport->dev, get_dpdev(vport->dp));
+	                netdev_rx_handler_register(netdev_vport->dev, netdev_frame_hook, vport);
+	                dev_set_promiscuity(netdev_vport->dev, 1);
+	                netdev_vport->dev->priv_flags |= IFF_OVS_DATAPATH;
+
 			bucket = hash_bucket(ovs_dp_get_net(vport->dp), vport->ops->get_name(vport));
 			hlist_add_head_rcu(&vport->hash_node, bucket);
 		struct hlist_head *head = vport_hash_bucket(dp, vport->port_no);
@@ -297,6 +306,126 @@ ovs_vport_cmd_new
 5. 发送应答信息, 并通知给多播组
 
 创建端口必须指定 name, type, upcall_id, 可选指定 port_no
+
+###增加 internal 端口
+
+internal_dev_create
+    vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_internal_vport_ops, parms);
+    alloc_netdev
+    register_netdevice
+    dev_set_promiscuity
+    netif_start_queue
+
+1. 分配一个 vport 对象, 并初始化部分数据成员, 其中私有数据为 struct netdev_vport
+2. 为 vport 关联的内核设备分配一个 net_device 对象, 其中的私有数据为 struct internal_dev
+3. 将端口注册到内核
+4. 设置混杂模式
+5. 允许上层设备调用 netdev_vport 的 hard_start_xmit routine(dev->tx[0]->state 的 __QUEUE_STATE_DRV_XOFF 清零)
+
+###增加 netdev 端口
+
+netdev_create
+    vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_netdev_vport_ops, parms);
+    dev_get_by_name(ovs_dp_get_net(vport->dp), parms->name);
+    netdev_master_upper_dev_link(netdev_vport->dev, get_dpdev(vport->dp));
+    netdev_rx_handler_register(netdev_vport->dev, netdev_frame_hook, vport);
+    dev_set_promiscuity(netdev_vport->dev, 1);
+    netdev_vport->dev->priv_flags |= IFF_OVS_DATAPATH;
+
+1. 分配 vport 内存
+2. 校验网卡(只支持非 loopback, 并且网卡类型为 ARPHRD_ETHER)
+3. 设置端口的 upper Linke 为 internal 端口
+4. 注册该端口的 rx_handler 为 netdev_frame_hook
+5. 设置端口私有标志 IFF_OVS_DATAPATH.(加入 bridage 的 port 所特有, 但当收到的包所属的设备包加入 bridge 时, 包才会接受)
+
+由内核代码可知, 当收到包时, 内核调用 __netif_receive_skb_core, 而
+__netif_receive_skb_core 会调用 rx_hander(vport) 即 netdev_frame_hook.
+
+```
+位于 /net/core/dev.c
+
+    rx_handler = rcu_dereference(skb->dev->rx_handler);
+    if (rx_handler) {
+            if (pt_prev) {
+                    ret = deliver_skb(skb, pt_prev, orig_dev);
+                    pt_prev = NULL;
+            }
+            switch (rx_handler(&skb)) {
+            case RX_HANDLER_CONSUMED:
+                    ret = NET_RX_SUCCESS;
+                    goto unlock;
+            case RX_HANDLER_ANOTHER:
+                    goto another_round;
+            case RX_HANDLER_EXACT:
+                    deliver_exact = true;
+            case RX_HANDLER_PASS:
+                    break;
+            default:
+                    BUG();
+            }
+    }
+```
+
+收到包后的处理逻辑:
+
+skb->dev->rx_handler
+    netdev_frame_hook
+        ovs_netdev_get_vport
+        netdev_port_receive(vport, skb)
+            ovs_vport_receive(vport, skb, NULL)
+                ovs_dp_process_received_packet(vport, skb)
+                    ovs_flow_key_extract(skb, &key)
+                        key_extract(skb, key)
+                    ovs_dp_process_packet_with_key(skb, &key, false)
+                        flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, skb_get_hash(skb), &n_mask_hit)
+
+                        flow == null:
+                            ovs_dp_upcall(dp, skb, &upcall)
+                                queue_userspace_packet(dp, skb, upcall_info)
+	                                user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
+	                                upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
+	                                genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
+                                queue_gso_packets(dp, skb, upcall_info)
+	                                queue_userspace_packet(dp, skb, upcall_info)
+	                                    user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
+	                                    upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
+	                                    genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
+                        if flow != null:
+                            ovs_execute_actions(dp, skb, recirc)
+	                            do_execute_actions(dp, skb, acts->actions, acts->actions_len)
+			                        do_output(dp, skb_clone(skb, GFP_ATOMIC), prev_port)
+	                                    vport = ovs_vport_rcu(dp, out_port)
+	                                    ovs_vport_send(vport, skb)
+	                                        int sent = vport->ops->send(vport, skb)
+			                        output_userspace(dp, skb, a)
+                                        ovs_dp_upcall(dp, skb, &upcall)
+                                            queue_userspace_packet(dp, skb, upcall_info)
+	                                            user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
+	                                            upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
+	                                            genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
+                                            queue_gso_packets(dp, skb, upcall_info)
+	                                            queue_userspace_packet(dp, skb, upcall_info)
+	                                                user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
+	                                                upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
+	                                                genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
+			                        execute_hash(skb, a)
+	                                    OVS_CB(skb)->pkt_key->ovs_flow_hash = hash
+				                    execute_recirc(dp, skb, a)
+	                                    ovs_flow_key_extract_recirc(nla_get_u32(a), OVS_CB(skb)->pkt_key, skb, &recirc_key)
+	                                        recirc_key->recirc_id = recirc_id
+                                            key_extract(skb, recirc_key)
+	                                    ovs_dp_process_packet_with_key(skb, &recirc_key, true) : 参考前述
+			                        push_vlan(skb, nla_data(a))
+			                        pop_vlan(skb)
+			                        execute_set_action(skb, nla_data(a)) : 修改 skb 各个属性
+			                        sample(dp, skb, a)
+		                                output_userspace(dp, skb, a)
+	                                    do_execute_actions(dp, skb, a, rem) : 参考前述
+
+要点:
+1. 从 packet 提取 flow 保存 skb->cb 中
+2. 流表中 actions 解析过程中, 一旦遇到 output action 立即执行
+3. 如果 recirc 不是最后一个 action, 拷贝 skb 之后执行. recirc 即将包回炉
 
 ##修改端口属性
 
@@ -1686,8 +1815,7 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
                    n_lost++
                 -->false:
                    ovs_execute_actions(dp, skb, acts, key)
-                   --> do_execute_actions(dp, skb, key, flow->sf_acts->actions,
-                           flow->sf_acts->actions_len)
+                   --> do_execute_actions(dp, skb, key, flow->sf_acts->actions, flow->sf_acts->actions_len)
 
 ###流表动作执行
 
