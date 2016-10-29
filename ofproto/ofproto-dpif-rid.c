@@ -233,7 +233,10 @@ recirc_state_clone(struct recirc_state *new, const struct recirc_state *old)
  * the IDs are used up.  We loop until we find a free one.
  * hash is recomputed if it is passed in as 0. */
 /*
- * 分配一个 struct recirc_state 对象 node, 用 state 初始化, 将该节点加入 id_map, metadata_map
+ * 分配一个 struct recirc_state 对象 node,
+ * 用 state 初始化 node->state,
+ * 从 next_id 找到一个没有用的值初始化 node->id
+ * 将node->id_map 加入 id_map,  node->metadata_map 加入 metadata_map
  */
 static struct recirc_id_node *
 recirc_alloc_id__(const struct recirc_state *state, uint32_t hash)
@@ -347,7 +350,7 @@ recirc_id_node_unref(const struct recirc_id_node *node_)
 }
 
 /*
- * 从 id_map 找到 id　对应的 recirc_id_node 对象 node:
+ * 从 id_map 找到 id 对应的 recirc_id_node 对象 node:
  * 如果找不到, 打印错误日志.
  * 如果找到, node 的引用计数减一, 如果引用计数减到 1, 从 metadata_map 中删除
  * node, 并将其加入 expiring 列表 中
