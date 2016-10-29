@@ -135,6 +135,10 @@ causing poor performance).
 
 ###rule 流表
 
+ovs-ofctl add-flow a5 "priority=65535, nw_dst=10.1.4.100, tcp_dst=8080, tcp,tcp_flags=+syn, actions=controller" -O OpenFlow13
+sudo ovs-ofctl add-flow ovs0 "tcp,tcp_flags=+rst, actions=controller" -O OpenFlow13
+sudo ovs-ofctl add-flow ovs0 "tcp,tcp_flags=+syn, actions=controller" -O OpenFlow13
+sudo ovs-ofctl add-flow ovs0 "priority=65535, tcp,tcp_flags=+fin, actions=controller" -O OpenFlow13
 
 //packets with a multicast source address are not valid, so we can add a flow to drop them at ingress to the switch with:
 ovs-ofctl add-flow br0 "table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, actions=drop"
