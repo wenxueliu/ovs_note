@@ -368,6 +368,9 @@ __netif_receive_skb_core 会调用 rx_hander(vport) 即 netdev_frame_hook.
 
 收到包后的处理逻辑:
 
+netif_receive_skb
+__netif_receive_skb
+__netif_receive_skb_core
 skb->dev->rx_handler
     netdev_frame_hook
         ovs_netdev_get_vport
@@ -545,6 +548,70 @@ ovs_flow_cmd_new
 每个 bridge 都会加入其所属的命名空间的 ovs_net, 因此可以通过 ovs_net 中查找对应的 bridage
 每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
 每个 vport 的命名空间与其所属的 bridge 在同一命名空间
+
+##修改一条流表项
+
+ovs_flow_cmd_set(skb, info)
+	ovs_match_init(&match, &key, &mask);
+	ovs_nla_get_match(&match, info->attr[OVS_FLOW_ATTR_KEY], info->attr[OVS_FLOW_ATTR_MASK]);
+	if (info->attr[OVS_FLOW_ATTR_ACTIONS])
+		acts = ovs_nla_alloc_flow_actions(nla_len(a[OVS_FLOW_ATTR_ACTIONS]));
+		ovs_flow_mask_key(&masked_key, &key, &mask);
+		ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS], &masked_key, 0, &acts);
+		reply = ovs_flow_cmd_alloc_info(acts, info, false);
+	    dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	    flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
+		    flow = masked_flow_lookup(ti, match->key, mask, &n_mask_hit);
+            acts != null:
+			    ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+            acts == null:
+		        reply = ovs_flow_cmd_build_info(flow, ovs_header->dp_ifindex, info, OVS_FLOW_CMD_NEW, false);
+	                skb = ovs_flow_cmd_alloc_info(ovsl_dereference(flow->sf_acts), info, false);
+	                    skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
+	                ovs_flow_cmd_fill_info(flow, dp_ifindex, skb, info->snd_portid, info->snd_seq, 0, cmd);
+		ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
+
+1. 用输入参数初始化流表 match
+2. 从 tbl->mask_array 中查找 match 对应的 flow
+3. 用新的 action 代替旧的 action
+
+
+##删除一条流表
+
+ovs_flow_cmd_del(skb, info)
+    info->[OVS_FLOW_ATTR_KEY] != null :
+        ovs_match_init(&match, &key, NULL);
+        ovs_nla_get_match(&match, a[OVS_FLOW_ATTR_KEY], NULL);
+        ovs_flow_tbl_flush(&dp->table);
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+    info->[OVS_FLOW_ATTR_KEY] == null :
+		err = ovs_flow_tbl_flush(&dp->table);
+	flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
+	ovs_flow_tbl_remove(&dp->table, flow);
+	reply = ovs_flow_cmd_alloc_info((const struct sw_flow_actions __force *)flow->sf_acts, info, false);
+	    skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
+	ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_DEL);
+	ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
+
+1. 如果没有给定匹配字段，默认删除所有流表
+2. 如果给定匹配字段, 从流表中查询对应的流表项, 从流表中删除
+
+##对给定的包执行一个 action
+
+ovs_packet_cmd_execute(skb, info)
+	len = nla_len(a[OVS_PACKET_ATTR_PACKET]);
+	packet = __dev_alloc_skb(NET_IP_ALIGN + len, GFP_KERNEL);
+	nla_memcpy(__skb_put(packet, len), a[OVS_PACKET_ATTR_PACKET], len);
+	flow = ovs_flow_alloc();
+	ovs_flow_key_extract_userspace(a[OVS_PACKET_ATTR_KEY], packet, &flow->key);
+	acts = ovs_nla_alloc_flow_actions(nla_len(a[OVS_PACKET_ATTR_ACTIONS]));
+
+1. 初始化 packet 内存
+2. 将传入 packet 参数保存到 packet
+3. 为 flow 分配内存
+4. 用传入 key 参数
+4. 为 action 分配内存
+
 
 ###各个内存布局
 
