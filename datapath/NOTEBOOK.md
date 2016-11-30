@@ -1,50 +1,167 @@
 
-##systemtap 监控点
+## systemtap 监控点
 
 1. 流表是否均衡均衡分布在各个 bucket 中
+2. dp 的 dp_stats_percpu 数据, ovs_dp_stats 保存了所有 cpu 的 dp_stats_percpu; 通过 get_dp_stats 获取. 命令 ovs-dpctl show 可以获取信息, 但不要频繁获取, 因为需要加锁.
+3. sw_flow->stats 每条流的统计信息
 
-###net 与 net_device 通过 ifindex 关联, 通过 net,ifindex 定位 net_device
+###各个关键数据结构的内存布局
 
-net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 下保持了
-ifindex = ifindex+N*NETDEV_HASHENTRIES  的 net_device
+struct dp_upcall_info
+	u8 cmd;
+	const struct sw_flow_key *key;
+	const struct nlattr *userdata;
+	u32 portid;
 
-###net_device 与 vport关联通过私有数据关联, 通过 net_device 定位 vport
+datapath
+    table
+        mask_cache : 256
+        mask_array
+            mask_array   : 1
+            sw_flow_mask : 16
+        ti: 1
+            buckets: 1024 hlist_head
+    ports
+        head_list : 1024
+
+vport
+    vport : ALIGN(sizeof(vport), VPORT_ALIGN)
+        upcall_portids: sizeof *vport_portids + nla_len(ids)
+    netdev_vport : 1
+        dev : sizeof(internal_dev) 该设备注册到内核中. 并通知内核可以传输数据
+
+
+flow_table
+
+    mask_cache : 每个 cpu MC_HASH_ENTRIES(256) 条 mask_cache_entry
+    mask_array : sizeof(struct mask_array) + sizeof(struct sw_flow_mask *) * max(MASK_ARRAY_SIZE_MIN, MASK_ARRAY_SIZE_MIN);
+    table_instance :
+        buckets : flex_array_alloc(sizeof(struct hlist_head), TBL_MIN_BUCKETS, GFP_KERNEL);
+
+其中:
+
+    MASK_ARRAY_SIZE_MIN = 16
+    MC_HASH_ENTRIES = 256
+    TBL_MIN_BUCKETS = 1024
+
+flow : 在全局 flow_cache 中
+    stats[0] : sizeof(flow_stats_cache)
+    sw_flow_actions *sfa
+    a[OVS_FLOW_ATTR_ACTIONS] : 最大 32*1024
+
+## 各个关键数据结构关系
+
+### net 与 ovs_net
+
+	struct ovs_net *ovs_net = net_generic(dnet, ovs_net_id);
+
+### net 与 net_device
+
+通过 ifindex 关联, 通过 net, ifindex 定位 net_device
+
+net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 下保持了 net_device
+列表, 找到 dev->ifindex == ifindex 对应的 net_device
+
+### net_device 与 vport
+
+通过 net_device 的私有数据关联
 
 netdev_priv(netdev)->vport = vport
 
 net_device 的私有数据可以参考内核接口 alloc_netdev_mqs()
 
-###vprot 与 datapath 直接关联, 通过 vport 定位 dp
+注: net_device 之于 datapath 的 OVSP_LOCAL vport 关联
+
+### vport 与 netdev_vport
+
+通过私有数据关联, 通过 vport 定位 netdev_vport
+
+	(u8 *)(uintptr_t)vport + ALIGN(sizeof(struct vport), VPORT_ALIGN);
+
+### vport 与 net_device
+
+通过 vport 的私有数据关联, vport 通过 netdev_vport 间接定位 net_device
+
+	vport_priv(vport) = (u8 *)(uintptr_t)vport + ALIGN(sizeof(struct vport), VPORT_ALIGN);
+    net_device = vport_priv(vport)->dev
+
+注: net_device 之于 datapath 的 OVSP_LOCAL vport 关联
+
+### vport 与 datapath
+
+直接关联, 通过 vport 定位 dp
 
 vport->dp = datapath
 
 通常在创建 vport 的时候直接指定 dp, 因为 vport 必须属于一个 datapath
 
-###datapath 与 vprot 直接关联, 通过 dp 定位 vport
+### datapath 与 vprot
+
+直接关联, 通过 dp 定位 vport
 
 datapath->ports[port_no % DP_VPORT_HASH_BUCKETS] = vport (vport 在 datapath 中的 port_no 的端口号)
 
 通常在创建 vport 的时候将 vport->dp_hash_node 加入 datapath->ports[vport->port_no % DP_VPORT_HASH_BUCKETS] 中
 
-###dev_table 与 vport 关联
+### dev_table 与 vport
 
-dev_table[jhash(name,net)] 找到 vport, name = net = vport->dp->net, name = vport->ops->get_name(vport)
+链表 dev_table[jhash(name,strlen(name), net) & (VPORT_HASH_BUCKETS - 1)] 保持 vport
+
+其中:
+
+    net = vport->dp->net
+    name = vport->ops->get_name(vport)
 
 NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 
-因此, 既可以通过 net, ifindex 就可以找到 vport, datapath, 也可以通过 dev_table 可以找到 vport, datapath
-事实上, 在创建 vport 的时候用 net,ifindex, 在查询两种均可
+因此, 既可以通过 net, name 就可以找到 vport, datapath, 也可以通过 dev_table 可以找到 vport, datapath
+
+### skb 与 vport
+
+OVS_CB(skb)->input_vport
+OVS_CB(skb)->pkt_key
+OVS_CB(skb)->flow
+
+    struct ovs_skb_cb {
+    	struct sw_flow		*flow;
+    	struct sw_flow_key	*pkt_key;
+    	struct ovs_key_ipv4_tunnel  *tun_key;
+    	struct vport	*input_vport;
+    };
+    #define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
+
+### dp 的 name 就是 OVSP_LOCAL 对应 vport 的 name
+
+### dp 的 ifindex 就是 dp 中 OVSP_LOCAL(vport)对应的 net_device 的 ifindex
+
+### 总结
+
+* net->dev_index_head 通过 ifindex 找到 net_device
+* netdev_priv(net_device) 找到 vport
+* vport 找到 datapath
+* vport_priv(vport) 找到 net_device
+* datapath->ports 找到 vport
+
+注: 其中 hash 表是整个内核数据结构最为关键的
+
+每个 bridge 有一张 table, 每张 table 有 1024 个 bucket 哈希桶
+每个 bridge 有 1024 个哈希桶存储 vport. 以 vport 的端口号为索引, 每个 vport 都会注册到内核, 开启混杂模式,
+每个 bridge 都会加入其所属的命名空间的 ovs_net, 因此可以通过 ovs_net 中查找对应的 bridage
+每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
+每个 vport 的命名空间与其所属的 bridge 在同一命名空间
+
+##用到的锁
+
+* seqlock : 统计信息
+* rcu :
+* mutex :
 
 
-###OVS 中创建一个新的 vport 的过程
+## OVS 中创建一个新的 vport 的过程
 
 通过 skb->sk->net, ovs_header->dp_ifindex 找到已经存在的 vport, 然后在 vport->dp
 找到 datapath, 然后将 datapath 赋值给新创建的 vport, 因此, 我们可以认为将一个 vport
 加入一个已经存在的 vport 所属的 datapath 中
-
-
-
-
 
 
 
@@ -186,18 +303,80 @@ vport(bridge 中 port 的 CRUD), flow(流表的 CRUD), packet(对给定的 packe
 直接执行对应的 actions 对包进行处理, 如果没有对应的流表匹配, 根据配置是发送
 到用户态还是丢弃.
 
+## 内核初始化
 
-##创建一个 bridge 流程
+static struct pernet_operations ovs_net_ops = {
+	.init = ovs_init_net,
+	.exit = ovs_exit_net,
+	.id   = &ovs_net_id,
+	.size = sizeof(struct ovs_net),
+};
 
-###流程
+### 初始化
 
-ovs_dp_cmd_new
+dp_init(void)
+
+	ovs_flow_init();
+	ovs_vport_init();
+	register_pernet_device(&ovs_net_ops);
+	register_netdevice_notifier(&ovs_dp_device_notifier);
+	dp_register_genl();
+
+### 退出
+
+dp_cleanup(void)
+
+    dp_unregister_genl(ARRAY_SIZE(dp_genl_families));
+	unregister_netdevice_notifier(&ovs_dp_device_notifier);
+	unregister_pernet_device(&ovs_net_ops);
+	rcu_barrier();
+	ovs_vport_exit();
+	ovs_flow_exit();
+
+
+module_init(dp_init);
+module_exit(dp_cleanup);
+
+MODULE_DESCRIPTION("Open vSwitch switching datapath");
+MODULE_LICENSE("GPL");
+MODULE_VERSION(VERSION);
+
+
+## 网络初始化
+
+ovs_init_net(struct net *net)
+
+	struct ovs_net *ovs_net = net_generic(net, ovs_net_id);
+	INIT_LIST_HEAD(&ovs_net->dps);
+	INIT_WORK(&ovs_net->dp_notify_work, ovs_dp_notify_wq);
+
+ovs_exit_net(struct net *dnet)
+
+	struct ovs_net *ovs_net = net_generic(dnet, ovs_net_id);
+	list_for_each_entry_safe(dp, dp_next, &ovs_net->dps, list_node)
+		__dp_destroy(dp);
+	for_each_net(net)
+		list_vports_from_net(net, dnet, &head);
+
+
+1. 遍历所有的 net, 将每个 net 所有 datapath 删除
+2. 每个 net 的 所有为 dp 中 vport 类型为 OVS_VPORT_TYPE_INTERNAL 加入 vport->detach_list 中
+3. 删除 detach_list 中端口
+
+## 创建一个网桥
+
+### 流程
+
+ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+	reply = ovs_dp_cmd_alloc_info(info);
+	    genlmsg_new_unicast(ovs_dp_cmd_msg_size(), info, GFP_KERNEL);
     kzalloc(sizeof(dp), GFP_KERNEL)
 	ovs_dp_set_net(dp, hold_net(sock_net(skb->sk)));
     ovs_flow_tbl_init(dp->table)
 	dp->stats_percpu = alloc_percpu(struct dp_stats_percpu);
 	dp->ports = kmalloc(DP_VPORT_HASH_BUCKETS * sizeof(struct hlist_head), GFP_KERNEL);
-    new_vport
+    vport = new_vport
         ovs_vport_add : 增加给定类型的 vport
             ovs_internal_vport_ops : 类型 OVS_VPORT_TYPE_INTERNAL
                 internal_dev_create
@@ -206,10 +385,10 @@ ovs_dp_cmd_new
                     register_netdevice
                     dev_set_promiscuity
                     netif_start_queue
-            hash_bucket : 
+            hash_bucket :
+	ovs_dp_cmd_fill_info(dp, reply, info->snd_portid, info->snd_seq, 0, OVS_DP_CMD_NEW);
 	ovs_net = net_generic(ovs_dp_get_net(dp), ovs_net_id);
 	list_add_tail_rcu(&dp->list_node, &ovs_net->dps);
-    ovs_dp_cmd_fill_info(dp, reply, info->snd_portid, info->snd_seq, 0, OVS_DP_CMD_NEW);
 	ovs_notify(&dp_datapath_genl_family, &ovs_dp_datapath_multicast_group, reply, info);
 
 1. kzalloc 分配一个 struct datapath* 内存空间;
@@ -223,15 +402,19 @@ ovs_dp_cmd_new
 7. 发送应答给请求者并通知多播组
 
 
-##删除一个网桥
+## 删除一个网桥
 
-###流程
+### 流程
 
-ovs_dp_cmd_del
+ovs_dp_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
     lookup_datapath(sock_net(skb->sk), info->userhdr, info->attrs)
     ovs_dp_cmd_fill_info(dp, reply, info->snd_portid, info->snd_seq, 0, OVS_DP_CMD_DEL)
     __dp_destroy(dp)
-    	ovs_dp_detach_port(vport)
+	    for (i = 0; i < DP_VPORT_HASH_BUCKETS; i++)
+		    hlist_for_each_entry_safe(vport, n, &dp->ports[i], dp_hash_node)
+		    	if (vport->port_no != OVSP_LOCAL)
+		    		ovs_dp_detach_port(vport);
     	list_del_rcu(&dp->list_node);
     	ovs_dp_detach_port(ovs_vport_ovsl(dp, OVSP_LOCAL));
     	    hlist_del_rcu(&p->dp_hash_node);
@@ -243,16 +426,18 @@ ovs_dp_cmd_del
 
 1. 从 dev_table 查找 bridge 对应的 vport, 由 vport 找到 bridge
 2. 生成应答信息
-3. 删除网桥, 先删除非 OVSP_LOCAL port, 再删除 OVSP_LOCAL port
+3. 删除网桥, 先删除非 OVSP_LOCAL 的所有 port, 再删除 OVSP_LOCAL port
 4. 释放内存
 5. 发送应答信息, 并通知给多播组
 
 
-##配置一个网桥
+## 配置一个网桥
 
-###流程
+### 流程
 
-ovs_dp_cmd_set
+ovs_dp_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+	reply = ovs_dp_cmd_alloc_info(info);
     lookup_datapath(sock_net(skb->sk), info->userhdr, info->attrs);
     ovs_dp_change(dp, info->attrs);
     	dp->user_features = nla_get_u32(a[OVS_DP_ATTR_USER_FEATURES]);
@@ -266,14 +451,51 @@ ovs_dp_cmd_set
 
 修改网桥只是修改 user_features 字段
 
+## 获取一个网桥
+
+### 流程
+
+ovs_dp_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+	reply = ovs_dp_cmd_alloc_info(info);
+	dp = lookup_datapath(sock_net(skb->sk), info->userhdr, info->attrs);
+	err = ovs_dp_cmd_fill_info(dp, reply, info->snd_portid, info->snd_seq, 0, OVS_DP_CMD_NEW);
+	return genlmsg_reply(reply, info);
+
+1. 从 net 查找 info->attrs[OVS_DP_ATTR_NAME] 对应的 dp
+4. 发送应答信息
+
+## 输出一个网桥
+
+ovs_dp_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+	struct ovs_net *ovs_net = net_generic(sock_net(skb->sk), ovs_net_id);
+	int skip = cb->args[0];
+	list_for_each_entry(dp, &ovs_net->dps, list_node)
+		if (i >= skip &&
+		    ovs_dp_cmd_fill_info(dp, skb, NETLINK_CB(cb->skb).portid,
+					 cb->nlh->nlmsg_seq, NLM_F_MULTI,
+					 OVS_DP_CMD_NEW) < 0)
+			break;
+		i++;
+
 
 ##给网桥增加一个端口
 
 ###流程
 
-ovs_vport_cmd_new
+ovs_vport_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+	port_no = a[OVS_VPORT_ATTR_PORT_NO] ? nla_get_u32(a[OVS_VPORT_ATTR_PORT_NO]) : 0;
+	reply = ovs_vport_cmd_alloc_info();
     dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex)
     ovs_vport_ovsl(dp, port_no)
+	parms.name = nla_data(a[OVS_VPORT_ATTR_NAME]);
+	parms.type = nla_get_u32(a[OVS_VPORT_ATTR_TYPE]);
+	parms.options = a[OVS_VPORT_ATTR_OPTIONS];
+	parms.dp = dp;
+	parms.port_no = port_no;
+	parms.upcall_portids = a[OVS_VPORT_ATTR_UPCALL_PID];
     new_vport(&parms)
         ovs_vport_add : 增加给定类型的 vport
             ovs_internal_vport_ops : 类型 OVS_VPORT_TYPE_INTERNAL
@@ -294,13 +516,16 @@ ovs_vport_cmd_new
 
 			bucket = hash_bucket(ovs_dp_get_net(vport->dp), vport->ops->get_name(vport));
 			hlist_add_head_rcu(&vport->hash_node, bucket);
+	        request_module("vport-type-%d", parms->type);
 		struct hlist_head *head = vport_hash_bucket(dp, vport->port_no);
 		hlist_add_head_rcu(&vport->dp_hash_node, head);
+	if (a[OVS_VPORT_ATTR_STATS])
+		ovs_vport_set_stats(vport, nla_data(a[OVS_VPORT_ATTR_STATS]));
     ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_NEW)
     ovs_notify(&dp_vport_genl_family, &ovs_dp_vport_multicast_group, reply, info)
 
 1. 获取端口要增加的网桥
-2. 如果指定端口号, 如果端口已经存在，返回错误; 如果没有指定端口号, 从 1 开始找到没有使用的端口号
+2. 如果指定端口号, 如果端口已经存在，返回错误; 如果没有指定端口号, 从 1 开始找到没有使用的端口号(0 预留给 OVSP_LOCAL)
 3. 根据端口类型创建指定端口类型的端口, 并将 port 加入 dp->ports 和 dev_table 两个哈希表中，方便后续查找
 4. 生成应答信息
 5. 发送应答信息, 并通知给多播组
@@ -310,6 +535,7 @@ ovs_vport_cmd_new
 ###增加 internal 端口
 
 internal_dev_create
+
     vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_internal_vport_ops, parms);
     alloc_netdev
     register_netdevice
@@ -325,6 +551,7 @@ internal_dev_create
 ###增加 netdev 端口
 
 netdev_create
+
     vport = ovs_vport_alloc(sizeof(struct netdev_vport), &ovs_netdev_vport_ops, parms);
     dev_get_by_name(ovs_dp_get_net(vport->dp), parms->name);
     netdev_master_upper_dev_link(netdev_vport->dev, get_dpdev(vport->dp));
@@ -366,7 +593,85 @@ __netif_receive_skb_core 会调用 rx_hander(vport) 即 netdev_frame_hook.
     }
 ```
 
-收到包后的处理逻辑:
+## 修改端口属性
+
+### 流程
+
+ovs_vport_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    vport = lookup_vport(sock_net(skb->sk), info->userhdr, a);
+	if (a[OVS_VPORT_ATTR_OPTIONS])
+        ovs_vport_set_options(vport, a[OVS_VPORT_ATTR_OPTIONS]);
+	        vport->ops->set_options(vport, options);
+	if (a[OVS_VPORT_ATTR_STATS])
+	    ovs_vport_set_stats(vport, nla_data(a[OVS_VPORT_ATTR_STATS]));
+	        vport->offset_stats = *stats;
+	if (a[OVS_VPORT_ATTR_UPCALL_PID])
+	    ovs_vport_set_upcall_portids(vport, a[OVS_VPORT_ATTR_UPCALL_PID]);
+	ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_NEW);
+	ovs_notify(&dp_vport_genl_family, &ovs_dp_vport_multicast_group, reply, info);
+
+1. 根据端口名或端口号在 ovs_net 中查找对应的 port
+2. 设置端口选项
+3. 设置端口状态
+4. 设置端口 upcall_pid
+5. 生成应答信息
+6. 发送应答信息, 并通知给多播组
+
+## 从网桥删除一个端口
+
+### 流程
+
+ovs_vport_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+	reply = ovs_vport_cmd_alloc_info();
+	vport = lookup_vport(sock_net(skb->sk), info->userhdr, a)
+	ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_DEL)
+	ovs_dp_detach_port(vport)
+	    hlist_del_rcu(&p->dp_hash_node);
+	    ovs_vport_del(p)
+	        hlist_del_rcu(&vport->hash_node);
+	        vport->ops->destroy(vport);
+	ovs_notify(&dp_vport_genl_family, &ovs_dp_vport_multicast_group, reply, info);
+
+1. 根据端口名或端口号在 ovs_net 中查找对应的 port
+2. 生成应答信息
+3. 从网桥删除端口, 从 dp->ports 中删除当前端口, 从 dev_table 中删除当前端口, 调用端口的 destory 函数
+4. 发送应答信息, 并通知给多播组
+
+OVSP_LOCAL 端口不可删除, 与网桥同生同灭
+
+
+## 获取一个端口
+
+### 流程
+
+ovs_vport_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+	reply = ovs_vport_cmd_alloc_info();
+	vport = lookup_vport(sock_net(skb->sk), ovs_header, a);
+	ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_NEW);
+	genlmsg_reply(reply, info);
+
+## 输出端口
+
+ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	for (i = bucket; i < DP_VPORT_HASH_BUCKETS; i++)
+		hlist_for_each_entry_rcu(vport, &dp->ports[i], dp_hash_node)
+			if (j >= skip &&
+			    ovs_vport_cmd_fill_info(vport, skb,
+						    NETLINK_CB(cb->skb).portid,
+						    cb->nlh->nlmsg_seq,
+						    NLM_F_MULTI,
+						    OVS_VPORT_CMD_NEW) < 0)
+				goto out;
+
+			j++;
+
+
+## 收到包后的处理逻辑:
 
 netif_receive_skb
 __netif_receive_skb
@@ -379,7 +684,7 @@ skb->dev->rx_handler
                 ovs_dp_process_received_packet(vport, skb)
                     ovs_flow_key_extract(skb, &key)
                         key_extract(skb, key)
-                    ovs_dp_process_packet_with_key(skb, &key, false)
+                    ovs_dp_process_packet_with_key(skb, &key, false) : 3.5 变为 ovs_dp_process_packet
                         flow = ovs_flow_tbl_lookup_stats(&dp->table, pkt_key, skb_get_hash(skb), &n_mask_hit)
 		                    skb_get_hash(skb) == true:
                                 flow_lookup(tbl, ti, ma, key, n_mask_hit, &mask_index);
@@ -390,16 +695,21 @@ skb->dev->rx_handler
 		                                flow_cmp_masked_key(flow, &masked_key, key_start, key_end))
                         flow == null:
                             ovs_dp_upcall(dp, skb, &upcall)
-                                queue_userspace_packet(dp, skb, upcall_info)
-	                                user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
-	                                upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
-	                                genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
-                                queue_gso_packets(dp, skb, upcall_info)
-	                                queue_userspace_packet(dp, skb, upcall_info)
+                                skb_is_gso(skb) == false:
+                                    queue_userspace_packet(dp, skb, upcall_info)
 	                                    user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
 	                                    upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
 	                                    genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
+                                skb_is_gso(skb) == true:
+                                    queue_gso_packets(dp, skb, upcall_info)
+	                                    segs = __skb_gso_segment(skb, NETIF_F_SG, false);
+                                        for skb in segs:
+	                                        queue_userspace_packet(dp, skb, upcall_info)
+	                                            user_skb = genlmsg_new_unicast(len, &info, GFP_ATOMIC)
+	                                            upcall = genlmsg_put(user_skb, 0, 0, &dp_packet_genl_family, 0, upcall_info->cmd)
+	                                            genlmsg_unicast(ovs_dp_get_net(dp), user_skb, upcall_info->portid)
                         if flow != null:
+	                        ovs_flow_stats_update(OVS_CB(skb)->flow, pkt_key->tp.flags, skb);
                             ovs_execute_actions(dp, skb, recirc)
 	                            do_execute_actions(dp, skb, acts->actions, acts->actions_len)
 			                        do_output(dp, skb_clone(skb, GFP_ATOMIC), prev_port)
@@ -431,58 +741,27 @@ skb->dev->rx_handler
 		                                output_userspace(dp, skb, a)
 	                                    do_execute_actions(dp, skb, a, rem) : 参考前述
 
+
+1. skb 携带了 vport 和 flow key. 从 vport 所属 datapath 的 table 中查找 key 对应的流表
+2. 如果找到, 执行对应的 action
+3. 如果没有找到, 发送 upcall
+
+
 要点:
+
 1. 从 packet 提取 flow 保存 skb->cb 中
 2. 流表中 actions 解析过程中, 一旦遇到 output action 立即执行
 3. 如果 recirc 不是最后一个 action, 拷贝 skb 之后执行. recirc 即将包回炉
 4. 流表查询算法: skb->hash 每 8 位依次在 dp->tbl->mask_cache[skb->hash]->mask_index 中查找
 
-##修改端口属性
-
-###流程
-
-ovs_vport_cmd_set
-    vport = lookup_vport(sock_net(skb->sk), info->userhdr, a);
-    ovs_vport_set_options(vport, a[OVS_VPORT_ATTR_OPTIONS]);
-	    vport->ops->set_options(vport, options);
-	ovs_vport_set_stats(vport, nla_data(a[OVS_VPORT_ATTR_STATS]));
-	    vport->offset_stats = *stats;
-	ovs_vport_set_upcall_portids(vport, a[OVS_VPORT_ATTR_UPCALL_PID]);
-	ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_NEW);
-	ovs_notify(&dp_vport_genl_family, &ovs_dp_vport_multicast_group, reply, info);
-
-1. 根据端口名或端口号在 ovs_net 中查找对应的 port
-2. 设置端口选项
-3. 设置端口状态
-4. 设置端口 upcall_pid
-5. 生成应答信息
-6. 发送应答信息, 并通知给多播组
-
-##从网桥删除一个端口
-
-ovs_vport_cmd_del
-	lookup_vport(sock_net(skb->sk), info->userhdr, a)
-	ovs_vport_cmd_fill_info(vport, reply, info->snd_portid, info->snd_seq, 0, OVS_VPORT_CMD_DEL)
-	ovs_dp_detach_port(vport)
-	    hlist_del_rcu(&p->dp_hash_node);
-	    ovs_vport_del(p)
-	        hlist_del_rcu(&vport->hash_node);
-	        vport->ops->destroy(vport);
-	ovs_notify(&dp_vport_genl_family, &ovs_dp_vport_multicast_group, reply, info);
-
-1. 根据端口名或端口号在 ovs_net 中查找对应的 port
-2. 生成应答信息
-3. 从网桥删除端口, 从 dp->ports 中删除当前端口, 从 dev_table 中删除当前端口, 调用端口的 destory 函数
-
-OVSP_LOCAL 端口不可删除, 与网桥同生同灭
 
 ##创建一条流表
 
 ###流程
 
-ovs_flow_cmd_new
+ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 
-    ovs_flow_alloc
+    new_flow = ovs_flow_alloc
     	flow = kmem_cache_alloc(flow_cache, GFP_KERNEL);
     	stats = kmem_cache_alloc_node(flow_stats_cache, GFP_KERNEL | __GFP_ZERO, 0);
     	RCU_INIT_POINTER(flow->stats[0], stats);
@@ -505,28 +784,55 @@ ovs_flow_cmd_new
 	flow = ovs_flow_tbl_lookup(&dp->table, &new_flow->unmasked_key);
         flow_lookup(tbl, ti, ma, key, &n_mask_hit, &index);
 		    flow = masked_flow_lookup(ti, key, mask, n_mask_hit);
-	匹配的流不存在 ovs_flow_tbl_insert(&dp->table, new_flow, &mask);
-	                    flow_mask_insert(table, flow, mask);
-	                        mask = flow_mask_find(tbl, new);
-	                    table_instance_insert(ti, flow);
+	    flow == null:
+            ovs_flow_tbl_insert(&dp->table, new_flow, &mask);
+	            flow_mask_insert(table, flow, mask);
+	                mask = flow_mask_find(tbl, new);
+	            table_instance_insert(ti, flow);
+			ovs_flow_cmd_fill_info(new_flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+        flow != null:
+            ovs_flow_cmp_unmasked_key(flow, &match) == false:
+                flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
+		    rcu_assign_pointer(flow->sf_acts, acts);
+			ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+	ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
 
-1. 为流表分配内存, 并初始化.
-2. 用传入参数初始化 match
-3. 用 flow->unmasked_key 和 mask 与之后初始化 flow->key
-4. 为流表 actions 分配空间
-5. 解析传入参数, 初始化 flow->sf_acts
-6. 从网桥的 table 中查找与 flow->unmasked_key 对应的 flow.
+1. 为流表分配内存, 并初始化 new_flow.
+2. 用 info->attrs[OVS_FLOW_ATTR_KEY] 初始化 match->key, 用 info->attrs[OVS_FLOW_ATTR_MASK] 初始化 match->mask
+3. 用 new_flow->unmasked_key 和 mask 进行数学操作"与", 用结果初始化 new_flow->key
+4. 为流表 actions 分配空间, 用 info->attrs[OVS_FLOW_ATTR_ACTIONS] 初始化 flow->sf_acts
+5. 从网桥的 table 中查找与 flow->unmasked_key 对应的 flow.
 7. 如果不存在, 发送对应的信息
-8. 如果存在, 新的流的 key 与旧的流的 key 不同, 返回错误; 相同用新 flow 的 actions 代替旧的 actions
+8. 如果存在, 如果新的流的 key 与旧的流的 key 不同, 返回错误; 如果相同, 用新 flow 的 actions 代替旧的 actions.
 7. 发送应答给请求者并通知多播组
 
-###流表查询
+## 查询一条流表
+
+### 流程
+
+ovs_flow_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+	ovs_match_init(&match, &key, NULL);
+	ovs_nla_get_match(&match, a[OVS_FLOW_ATTR_KEY], NULL);
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
+	reply = ovs_flow_cmd_build_info(flow, ovs_header->dp_ifindex, info, OVS_FLOW_CMD_NEW, true);
+	return genlmsg_reply(reply, info);
+
+1. 初始化流表的 match
+2. 从 dp->table 查找 match 对应的流表
+3. 如果找到, 返回找到的 flow. 没有找到返回错误
+
+
+### 流表查询
+
+struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl, const struct sw_flow_key *key, u32 skb_hash, u32 *n_mask_hit)
 
 1. 将 key 与 dp->table->mask_array 中的每一个元素掩码之后, 计算 hash 值
 2. 从 dp->table->ti->buckets 中查找 hash 对应的列表的头指针
 3. 遍历 2 的列表, 找到 mask, hash, 掩码之后 key 都相同的流
 
-###流表插入
+### 流表插入
 
 1. 流的 mask 是否存在与 dp->table->mask_array 中
 2. 如果不存在, 创建一个 mask 并插入 dp->table->mask_array(如果 mask 已经满了会进行重分配)
@@ -538,51 +844,53 @@ ovs_flow_cmd_new
     如果 flow 数量超过 bucket, 将 bucket 扩展 2 倍并进行重哈希
     如果超过 600 Hz 也会进行重新哈希
 
-
 由于很多流共享 mask 因此, 通过 mask 可以减少存储消耗
 
 流表重哈希间隔 600 Hz
 
-每个 bridge 有一张 table, 每张 table 有 1024 个 bucket 哈希桶
-每个 bridge 有 1024 个哈希桶存储 vport. 以 vport 的端口号为索引, 每个 vport 都会注册到内核, 开启混杂模式,
-每个 bridge 都会加入其所属的命名空间的 ovs_net, 因此可以通过 ovs_net 中查找对应的 bridage
-每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
-每个 vport 的命名空间与其所属的 bridge 在同一命名空间
+## 修改一条流表项
 
-##修改一条流表项
+### 流程
 
 ovs_flow_cmd_set(skb, info)
-	ovs_match_init(&match, &key, &mask);
-	ovs_nla_get_match(&match, info->attr[OVS_FLOW_ATTR_KEY], info->attr[OVS_FLOW_ATTR_MASK]);
-	if (info->attr[OVS_FLOW_ATTR_ACTIONS])
-		acts = ovs_nla_alloc_flow_actions(nla_len(a[OVS_FLOW_ATTR_ACTIONS]));
-		ovs_flow_mask_key(&masked_key, &key, &mask);
-		ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS], &masked_key, 0, &acts);
-		reply = ovs_flow_cmd_alloc_info(acts, info, false);
-	    dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
-	    flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
-		    flow = masked_flow_lookup(ti, match->key, mask, &n_mask_hit);
-            acts != null:
-			    ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
-            acts == null:
-		        reply = ovs_flow_cmd_build_info(flow, ovs_header->dp_ifindex, info, OVS_FLOW_CMD_NEW, false);
-	                skb = ovs_flow_cmd_alloc_info(ovsl_dereference(flow->sf_acts), info, false);
-	                    skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
-	                ovs_flow_cmd_fill_info(flow, dp_ifindex, skb, info->snd_portid, info->snd_seq, 0, cmd);
-		ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
 
-1. 用输入参数初始化流表 match
+    ovs_match_init(&match, &key, &mask);
+    ovs_nla_get_match(&match, info->attr[OVS_FLOW_ATTR_KEY], info->attr[OVS_FLOW_ATTR_MASK]);
+    if (info->attrs[OVS_FLOW_ATTR_ACTIONS])
+        acts = ovs_nla_alloc_flow_actions(nla_len(a[OVS_FLOW_ATTR_ACTIONS]));
+        ovs_flow_mask_key(&masked_key, &key, &mask);
+        ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS], &masked_key, 0, &acts);
+    reply = ovs_flow_cmd_alloc_info(acts, info, false);
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
+	    flow = masked_flow_lookup(ti, match->key, mask, &n_mask_hit);
+    acts != null:
+		rcu_assign_pointer(flow->sf_acts, acts);
+        ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+    acts == null:
+    	reply = ovs_flow_cmd_build_info(flow, ovs_header->dp_ifindex, info, OVS_FLOW_CMD_NEW, false);
+            skb = ovs_flow_cmd_alloc_info(ovsl_dereference(flow->sf_acts), info, false);
+                skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
+            ovs_flow_cmd_fill_info(flow, dp_ifindex, skb, info->snd_portid, info->snd_seq, 0, cmd);
+	if (info->attrs[OVS_FLOW_ATTR_CLEAR]):
+		ovs_flow_stats_clear(flow);
+    ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
+
+1. 用 info->attrs[OVS_FLOW_ATTR_KEY] 初始化流表 match
 2. 从 tbl->mask_array 中查找 match 对应的 flow
-3. 用新的 action 代替旧的 action
+3. 如果 actions 不为 null, 新的 action 代替旧的 action
+7. 发送应答给请求者并通知多播组
 
 
-##删除一条流表
+## 删除一条流表
 
-ovs_flow_cmd_del(skb, info)
+### 流程
+
+ovs_flow_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
     info->[OVS_FLOW_ATTR_KEY] != null :
         ovs_match_init(&match, &key, NULL);
         ovs_nla_get_match(&match, a[OVS_FLOW_ATTR_KEY], NULL);
-        ovs_flow_tbl_flush(&dp->table);
 	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
     info->[OVS_FLOW_ATTR_KEY] == null :
 		err = ovs_flow_tbl_flush(&dp->table);
@@ -590,13 +898,36 @@ ovs_flow_cmd_del(skb, info)
 	ovs_flow_tbl_remove(&dp->table, flow);
 	reply = ovs_flow_cmd_alloc_info((const struct sw_flow_actions __force *)flow->sf_acts, info, false);
 	    skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
-	ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_DEL);
-	ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
+    if (replay && !IS_ERR(replay)):
+	    ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_DEL);
+	    ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
 
 1. 如果没有给定匹配字段，默认删除所有流表
 2. 如果给定匹配字段, 从流表中查询对应的流表项, 从流表中删除
+3. 发送应答给请求者并通知多播组
 
-##对给定的包执行一个 action
+## 输出匹配流表
+
+### 流程
+
+ovs_flow_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	ti = rcu_dereference(dp->table.ti);
+	for (;;)
+		bucket = cb->args[0];
+		obj = cb->args[1];
+		flow = ovs_flow_tbl_dump_next(ti, &bucket, &obj);
+		if (!flow)
+			break;
+		if (ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, skb,
+					   NETLINK_CB(cb->skb).portid,
+					   cb->nlh->nlmsg_seq, NLM_F_MULTI,
+					   OVS_FLOW_CMD_NEW) < 0)
+           break
+
+
+## 对给定的包执行一个 action
 
 ovs_packet_cmd_execute(skb, info)
 	len = nla_len(a[OVS_PACKET_ATTR_PACKET]);
@@ -605,40 +936,25 @@ ovs_packet_cmd_execute(skb, info)
 	flow = ovs_flow_alloc();
 	ovs_flow_key_extract_userspace(a[OVS_PACKET_ATTR_KEY], packet, &flow->key);
 	acts = ovs_nla_alloc_flow_actions(nla_len(a[OVS_PACKET_ATTR_ACTIONS]));
+	OVS_CB(packet)->flow = flow;
+	OVS_CB(packet)->pkt_key = &flow->key;
+	packet->priority = flow->key.phy.priority;
+	packet->mark = flow->key.phy.skb_mark;
+	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
+	input_vport = ovs_vport_rcu(dp, flow->key.phy.in_port);
+	OVS_CB(packet)->input_vport = input_vport;
+	ovs_execute_actions(dp, packet, false);
 
 1. 初始化 packet 内存
-2. 将传入 packet 参数保存到 packet
-3. 为 flow 分配内存
-4. 用传入 key 参数
-4. 为 action 分配内存
+2. 将传入 info->attrs[OVS_PACKET_ATTR_PACKET] 参数保存到 packet
+3. 为 flow 分配内存, 用 info->attrs[OVS_PACKET_ATTR_KEY] 和 packet 初始化 flow->key
+4. 为 action 分配内存, 用 info->attrs[OVS_PACKET_ATTR_ACTIONS] 初始化 flow->sf_acts
+6. 调用 ovs_execute_actions(dp, packet, false) 执行 packet 对应的 action
 
+### 从数据包中提取 key
 
-###各个内存布局
+    ovs_flow_key_extract(skb, &key)
 
-datapath
-    table
-        mask_cache : 256
-        mask_array
-            mask_array   : 1
-            sw_flow_mask : 16
-        ti: 1
-            buckets: 1024 hlist_head
-    ports
-        head_list : 1024
-
-vport
-    vport : ALIGN(sizeof(vport), VPORT_ALIGN)
-    netdev_vport : 1
-        dev : sizeof(internal_dev) 该设备注册到内核中. 并通知内核可以传输数据
-    upcall_portids :
-        vport_portids
-        nla_len(ids)
-
-
-flow : 在全局 flow_cache 中
-    stats[0] : sizeof(flow_stats_cache)
-    sw_flow_actions *sfa
-    a[OVS_FLOW_ATTR_ACTIONS] : 最大 32*1024
 
 
 
@@ -1134,13 +1450,6 @@ static int ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
 
 --------------------------------------------------------
 
-static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
-
-
-
-
-
---------------------------------------------------------
 
 
 
