@@ -1,11 +1,56 @@
 
+## 内核预备知识
+
+* 模块编译
+* seqlock : 统计信息
+* rcu :
+* mutex :
+* percpu
+* netlink
+* flex_array
+* 常用宏 offsetof, CONTAINER_OF, FIELD_SIZEOF
+* skb, net_device
+
 ## systemtap 监控点
 
 1. 流表是否均衡均衡分布在各个 bucket 中
 2. dp 的 dp_stats_percpu 数据, ovs_dp_stats 保存了所有 cpu 的 dp_stats_percpu; 通过 get_dp_stats 获取. 命令 ovs-dpctl show 可以获取信息, 但不要频繁获取, 因为需要加锁.
 3. sw_flow->stats 每条流的统计信息
 
-###各个关键数据结构的内存布局
+
+## datapath 需要解决的问题
+
+* 内核模块的构建过程
+* datapath 如何收到包
+* key 的生成
+* 流表的匹配
+* actions 的执行
+* 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么? 会
+* 如何与用户空间的 vswitchd 交互, 支持哪些交换操作
+* 如何保证 upcall 的包的顺序, 有哪些实现方式? 目前的实现方式是什么?
+* 如果端口宕掉, 会发生什么? 对 vswitch 和 controller 有什么影响
+
+## vswitch 需要解决的问题
+
+* 如何接受 datapath 的消息
+* 如何与 controller 交互, 发送什么, 接受什么
+* 如何向 datapath 发送消息, 包括被动应答, 主动发送
+* 如何与 ovsdb 交互
+* 当 table_miss 后, vswitch 是如何决断的
+* 当 table_miss 后, 是否可以直接将包发送出去还是, 必须通过 datapath 发送, 如果发送, 方式是怎么样的 ?
+
+
+## 执行流程
+
+datapath.c : dp_init()
+
+1. 内核模块 openvswitch 初始化
+2. bridge 的每个端口监听收到的数据, 对每个收到的包查找对应的流表，如果没有匹配的流表, 发送到用户态的 vswitchd.
+3. 通过 netlink 接受用户态的命令, 创建网桥, 流表等等
+
+
+
+## 各个关键数据结构的内存布局
 
 struct dp_upcall_info
 	u8 cmd;
@@ -48,6 +93,17 @@ flow : 在全局 flow_cache 中
     stats[0] : sizeof(flow_stats_cache)
     sw_flow_actions *sfa
     a[OVS_FLOW_ATTR_ACTIONS] : 最大 32*1024
+
+skb
+
+    OVS_CB(skb)->tun_key
+    OVS_CB(skb)->input_vport
+
+
+
+
+
+
 
 ## 各个关键数据结构关系
 
@@ -118,9 +174,9 @@ NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 
 ### skb 与 vport
 
-OVS_CB(skb)->input_vport
-OVS_CB(skb)->pkt_key
-OVS_CB(skb)->flow
+    OVS_CB(skb)->input_vport
+    OVS_CB(skb)->pkt_key
+    OVS_CB(skb)->flow
 
     struct ovs_skb_cb {
     	struct sw_flow		*flow;
@@ -150,45 +206,9 @@ OVS_CB(skb)->flow
 每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
 每个 vport 的命名空间与其所属的 bridge 在同一命名空间
 
-##用到的锁
+每个 bridge 的多个 eth 可以属于不同的 namespace
 
-* seqlock : 统计信息
-* rcu :
-* mutex :
-
-
-## OVS 中创建一个新的 vport 的过程
-
-通过 skb->sk->net, ovs_header->dp_ifindex 找到已经存在的 vport, 然后在 vport->dp
-找到 datapath, 然后将 datapath 赋值给新创建的 vport, 因此, 我们可以认为将一个 vport
-加入一个已经存在的 vport 所属的 datapath 中
-
-
-
-##datapath 需要解决的问题
-
-* 内核模块的构建过程
-* datapath 如何收到包
-* key 的生成
-* 流表的匹配
-* actions 的执行
-* 流表不匹配的时候, upcall 的具体实现, 会将包数据完整发送给 vswitchd 么? 会
-* 如何与用户空间的 vswitchd 交互, 支持哪些交换操作
-* 如何保证 upcall 的包的顺序, 有哪些实现方式? 目前的实现方式是什么?
-* 如果端口宕掉, 会发生什么? 对 vswitch 和 controller 有什么影响
-
-##vswitch 需要解决的问题
-
-* 如何接受 datapath 的消息
-* 如何与 controller 交互, 发送什么, 接受什么
-* 如何向 datapath 发送消息, 包括被动应答, 主动发送
-* 如何与 ovsdb 交互
-* 当 table_miss 后, vswitch 是如何决断的
-* 当 table_miss 后, 是否可以直接将包发送出去还是, 必须通过 datapath 发送, 如果发送, 方式是怎么样的 ?
-
-
-
-##预备知识
+## 预备知识
 
 基本的 makefile 语法见[跟我一起写 Makefile](http://blog.csdn.net/haoel/article/details/2886/)
 
@@ -252,15 +272,9 @@ ccflags-y：$(CC)的编译选项添加这里，宏开关也在这里添加
 
     CONFIG_NET_NS : 网桥支持命名空间
 
-##执行流程
+## 核心实现
 
-datapath.c : dp_init()
-
-1. 内核模块 openvswitch 初始化
-2. bridge 的每个端口监听收到的数据, 对每个收到的包查找对应的流表，如果没有匹配的流表, 发送到用户态的 vswitchd.
-3. 通过 netlink 接受用户态的命令, 创建网桥, 流表等等
-
-###内核模块初始化
+## 内核模块初始化
 
 1. 初始化 flow_cache, flow_stats_cache, dev_table
 
@@ -269,10 +283,6 @@ datapath.c : dp_init()
 
 为 dev_table 分配 VPORT_HASH_BUCKETS 个 struct hlist_head 大小的对象.
 
-http://blog.csdn.net/shallnet/article/details/47682383
-http://blog.csdn.net/shallnet/article/details/47682593
-http://blog.csdn.net/yuzhihui_no1/article/details/47284329
-http://blog.csdn.net/yuzhihui_no1/article/details/47305361
 
 2. 注册网络命名空间
 
@@ -349,6 +359,10 @@ ovs_init_net(struct net *net)
 	struct ovs_net *ovs_net = net_generic(net, ovs_net_id);
 	INIT_LIST_HEAD(&ovs_net->dps);
 	INIT_WORK(&ovs_net->dp_notify_work, ovs_dp_notify_wq);
+
+    其中 ovs_dp_notify_wq 所做的工作是遍历当前网络命名空间
+    所有的 datapath, 将类型为 OVS_VPORT_TYPE_NETDEV 的端口
+    的删除操作, 多播给用户态
 
 ovs_exit_net(struct net *dnet)
 
@@ -770,7 +784,7 @@ ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 
 	ovs_match_init(&match, &new_flow->unmasked_key, &mask);
 	ovs_nla_get_match(&match, a[OVS_FLOW_ATTR_KEY], a[OVS_FLOW_ATTR_MASK]);
-	    parse_flow_nlattrs(key, a, &key_attrs);
+	    parse_flow_nlattrs(key, a, &key_attrs); //提取 key 属性到 a
 	    ovs_key_from_nlattrs(match, key_attrs, a, false);
 		parse_flow_mask_nlattrs(mask, a, &mask_attrs);
 		ovs_key_from_nlattrs(match, mask_attrs, a, true);
@@ -1450,13 +1464,6 @@ static int ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
 
 --------------------------------------------------------
 
-
-
-
-
-
-
-
 u32 ovs_vport_find_upcall_portid(const struct vport *vport, struct sk_buff *skb)
 
 如果 vport->upcall_portids 为只有一个, 且 id 为 0, 返回 0
@@ -1532,9 +1539,9 @@ static size_t upcall_msg_size(const struct dp_upcall_info *upcall_info,
     + nla_total_size(ovs_tun_key_attr_size())
 -------------------------------------
 
-##Netlink
+## Netlink
 
-###数据结构
+### 数据结构
 
 来源 /datapath/linux/compat/include/linux/openvswitch.h
 
@@ -2179,6 +2186,226 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
 
 -------------------------------------------------------------
 
+### flow netlink
+
+static bool match_validate(const struct sw_flow_match *match, u64 key_attrs, u64 mask_attrs)
+
+其中:
+    key_expected : 记录 match->key 出现的 ovs_key_attr
+    mask_allowed : 如果 match->mask 对应 ovs_key_attr 全为 1, 设置对应的 mask_allowed 为 1
+
+之后, 比较
+
+	if ((key_attrs & key_expected) != key_expected) || ((mask_attrs & mask_allowed) != mask_attrs)
+        return false
+    else
+        return true
+
+static int __parse_flow_nlattrs(const struct nlattr *attr, const struct nlattr *a[], u64 *attrsp, bool nz)
+
+    遍历 attr 所有 nla, 初始化 a
+
+    其中 attrsp 记录出现的所有属性 ovs_key_attr, 如果出现属性 ovs_key_attr 重复出现, 返回错误
+
+static int parse_flow_mask_nlattrs(const struct nlattr *attr, const struct nlattr *a[], u64 *attrsp)
+
+    遍历 attr 所有 nla, 初始化 a(排除全部为 0 的属性)
+
+    其中 attrsp 记录出现的所有属性 ovs_key_attr, 如果出现属性 ovs_key_attr 重复出现, 返回错误
+
+static int parse_flow_nlattrs(const struct nlattr *attr, const struct nlattr *a[], u64 *attrsp)
+
+    遍历 attr 所有 nla, 初始化 a(包括全部为 0 的属性)
+
+    其中 attrsp 记录出现的所有属性, 如果出现属性重复出现, 返回错误
+
+static int ipv4_tun_from_nlattr(const struct nlattr *attr, struct sw_flow_match *match, bool is_mask)
+
+    遍历 attr 所有 nla
+    如果 is_mask 为 true, 初始化 match->mask->key.tun_key;
+    如果 is_mask 为 false, 初始化 match->key->tun_key;
+
+static int ipv4_tun_to_nlattr(struct sk_buff *skb, const struct ovs_key_ipv4_tunnel *tun_key, const struct ovs_key_ipv4_tunnel *output)
+
+    将 output 成员加入 netlink 消息 skb 的 nested attribute 中
+
+static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs, const struct nlattr **a, bool is_mask)
+
+    如果 attrs 相关 ovs_key_attr 属性位不为 0, 从 a 中获取对应属性初始化 match, 并将 attrs 相关位清零, 表明该属性已经被解析
+    如果 is_mask 为 true, 初始化 match->mask-key 相关属性
+    如果 is_mask 为 false, 初始化 match->key 相关属性
+
+static int ovs_key_from_nlattrs(struct sw_flow_match *match, u64 attrs, const struct nlattr **a, bool is_mask)
+
+    用 a 初始化 match;
+    其中:
+    1. attrs 记录要初始化哪些属性
+    2. 如果 is_mask 为 true, 初始化 match->mask->key
+    3. 如果 is_mask 为 false, 初始化 match->key
+
+static void sw_flow_mask_set(struct sw_flow_mask *mask, struct sw_flow_key_range *range, u8 val)
+
+    用 val 初始化 mask->range->start 到 mask->range->end
+
+int ovs_nla_get_match(struct sw_flow_match *match, const struct nlattr *key, const struct nlattr *mask)
+
+    1. 遍历 key 所有 nla, 保存到临时数组 a (包括全部为 0 的属性)中, 之后用 a 初始化 match->key
+    2. 如果 mask 不为 NULL, 遍历 mask 所有 nla, 保存到临时数组 a (包括全部为 0 的属性)中, 之后用 a 初始化 match->mask->key
+    3. 如果 mask 为 NULL, 设置 match->mask 从 match->range->start 到 match->range->end 每个字节为 ff
+    4. 校验 match
+
+int ovs_nla_get_flow_metadata(const struct nlattr *attr, struct sw_flow_key *key)
+
+    1. 遍历 attr 所有 nla, 保存到临时数组 a(包括全部为 0 的属性)中.
+    2. 用 a 初始化 key
+
+int ovs_nla_put_flow(const struct sw_flow_key *swkey, const struct sw_flow_key *output, struct sk_buff *skb)
+
+    将 output 属性依次加入 netlink 消息体 skb 中
+
+struct sw_flow_actions *ovs_nla_alloc_flow_actions(int size)
+
+    给 sw_flow_actions 分配内存
+
+static void rcu_free_acts_callback(struct rcu_head *rcu)
+
+    由 rcu 定位到 sw_flow_actions, 并是否内存
+
+void ovs_nla_free_flow_actions(struct sw_flow_actions *sf_acts)
+
+    调用 sw_flow_actions 的 rcu 回调函数 rcu_free_acts_callback 释放 sw_flow_actions 内存
+
+static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa, int attr_len)
+
+    sfa 的内存空间扩展 NLA_ALIGN(attr_len) byte, (如果 sfa 不够, 重新分配) 返回新的扩展空间首地址
+
+static int add_action(struct sw_flow_actions **sfa, int attrtype, void *data, int len)
+
+    sfa 增加新的 action. 类型为 attrtype, 数据为 data(长度为 len)
+
+static inline int add_nested_action_start(struct sw_flow_actions **sfa, int attrtype)
+
+    给 sfa 增加 attrtype 的内置 action
+
+static inline void add_nested_action_end(struct sw_flow_actions *sfa, int st_offset)
+
+
+
+static int validate_and_copy_sample(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa)
+
+    遍历 attr 所有元素, 初始化临时数组 attrs, 将 attrs[OVS_ACTION_ATTR_SAMPLE] 加入 sfa
+
+    其中 depth 为了防止递归属性
+
+
+static int copy_action(const struct nlattr *from, struct sw_flow_actions **sfa)
+
+    将 from 属性加入 sfa
+
+void ovs_match_init(struct sw_flow_match *match, struct sw_flow_key *key, struct sw_flow_mask *mask)
+
+    初始化 sw_flow_match
+
+static int validate_and_copy_set_tun(const struct nlattr *attr, struct sw_flow_actions **sfa)
+
+    遍历 attr 所有 nla, 初始化临时变量 match->key->tun_key
+    给 sfa 内置属性 OVS_ACTION_ATTR_SET 增加 OVS_KEY_ATTR_IPV4_TUNNEL 属性
+
+static int validate_set(const struct nlattr *a, const struct sw_flow_key *flow_key, struct sw_flow_actions **sfa, bool *set_tun)
+
+    对于 OVS_KEY_ATTR_TUNNEL 设置 set_tun 为 true, 并设置 sfa 的 OVS_ACTION_ATTR_SET 属性
+    对于其他属性, 仅校验属性
+
+static int validate_userspace(const struct nlattr *attr)
+
+    解析 attr 到临时数组 a 来校验解析 attr 的 ovs_userspace_attr 属性是否有问题
+
+int ovs_nla_copy_actions(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa)
+
+    遍历 attr 所有属性, 加入 sfa
+
+static int validate_tp_port(const struct sw_flow_key *flow_key)
+
+    略
+
+static int sample_action_to_attr(const struct nlattr *attr, struct sk_buff *skb)
+
+    解析 attr 的 OVS_ACTION_ATTR_SAMPLE 加入 netlink 消息体 skb
+
+
+static int set_action_to_attr(const struct nlattr *a, struct sk_buff *skb)
+
+    解析 attr 的 OVS_ACTION_ATTR_SET 加入 netlink 消息体 skb
+
+int ovs_nla_put_actions(const struct nlattr *attr, int len, struct sk_buff *skb)
+
+    遍历 attr 所有属性, 加入 netlink 消息体 skb
+
+
+调用关系
+
+    ovs_nla_put_actions
+        set_action_to_attr
+        sample_action_to_attr
+            ovs_nla_put_actions
+
+ovs_nla_copy_actions
+
+    validate_userspace
+    validate_set
+        validate_and_copy_set_tun
+            ovs_match_init
+        validate_tp_port
+    validate_and_copy_sample
+        ovs_nla_copy_actions
+            copy_action
+                reserve_sfa_size
+                    ovs_nla_alloc_flow_actions
+        validate_and_copy_sample
+            add_action
+                reserve_sfa_size
+                    ovs_nla_alloc_flow_actions
+
+ovs_nla_get_match
+    parse_flow_nlattrs
+        __parse_flow_nlattrs
+    parse_flow_mask_nlattrs
+        __parse_flow_nlattrs
+    ovs_key_from_nlattrs
+        metadata_from_nlattrs
+            ipv4_tun_from_nlattr
+    match_validate
+
+set_action_to_attr
+    ipv4_tun_to_nlattr
+
+ovs_nla_put_flow
+    ipv4_tun_to_nlattr
+
+add_action
+
+add_nested_action_start
+    add_action
+
+
+ovs_nla_get_flow_metadata
+    metadata_from_nlattrs
+        ipv4_tun_from_nlattr
+
+
+
+actions 的 netlink 消息属性结构
+
+
+    OVS_ACTION_ATTR_SET
+    OVS_ACTION_ATTR_SAMPLE
+        OVS_SAMPLE_ATTR_PROBABILITY : nla_data(actions)
+        OVS_SAMPLE_ATTR_ACTIONS     :
+             递归了
+
+
+-------------------------------------------------------------
+
 ##核心处理逻辑
 
     创建 netdev_create(const struct vport_parms *parms) 的注册的 rx_handler_result_t netdev_frame_hook( pskb)
@@ -2200,13 +2427,13 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
                    ovs_execute_actions(dp, skb, acts, key)
                    --> do_execute_actions(dp, skb, key, flow->sf_acts->actions, flow->sf_acts->actions_len)
 
-###流表动作执行
+### 流表动作执行
 
 	核心函数: ovs_execute_actions(dp, skb, flow->sf_acts, key);
 
 
 
-###vswitchd 通信 -- netlink upcall
+### vswitchd 通信 -- netlink upcall
 
     核心函数: ovs_dp_upcall(dp, skb, key, &upcall);
 
@@ -3279,3 +3506,12 @@ static inline int genl_register_family(struct genl_family *family)
 int __genl_register_family(struct genl_family *family)
 
         genl_family_find_byname(family->name))
+
+
+## 参考
+
+http://blog.csdn.net/shallnet/article/details/47682383
+http://blog.csdn.net/shallnet/article/details/47682593
+http://blog.csdn.net/yuzhihui_no1/article/details/47284329
+http://blog.csdn.net/yuzhihui_no1/article/details/47305361
+
