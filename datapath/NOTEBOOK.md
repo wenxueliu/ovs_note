@@ -10,6 +10,8 @@
 * flex_array
 * 常用宏 offsetof, CONTAINER_OF, FIELD_SIZEOF
 * skb, net_device
+* 内核内存模型
+* hlist
 
 ## systemtap 监控点
 
@@ -79,8 +81,8 @@ vport
 flow_table
 
     mask_cache : 每个 cpu MC_HASH_ENTRIES(256) 条 mask_cache_entry
-    mask_array : sizeof(struct mask_array) + sizeof(struct sw_flow_mask *) * max(MASK_ARRAY_SIZE_MIN, MASK_ARRAY_SIZE_MIN);
-    table_instance :
+    mask_array : sizeof(struct mask_array) + sizeof(struct sw_flow_mask *) * max(MASK_ARRAY_SIZE_MIN, size);
+    table_instance : kmalloc(sizeof(*ti), GFP_KERNEL)
         buckets : flex_array_alloc(sizeof(struct hlist_head), TBL_MIN_BUCKETS, GFP_KERNEL);
 
 其中:
@@ -99,9 +101,24 @@ skb
     OVS_CB(skb)->tun_key
     OVS_CB(skb)->input_vport
 
+每个 bridge 有一张 table, 每张 table 有 1024 个 bucket 哈希桶
+每个 bridge 有 1024 个哈希桶存储 vport. 以 vport 的端口号为索引, 每个 vport 都会注册到内核, 开启混杂模式,
+每个 bridge 都会加入其所属的命名空间的 ovs_net, 因此可以通过 ovs_net 中查找对应的 bridage
+每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
+每个 vport 的命名空间与其所属的 bridge 在同一命名空间
 
+每个 bridge 的多个 eth 可以属于不同的 namespace
 
+流表的设计思路:
 
+1. flow_table->ti->buckets 中分配 TBL_MIN_BUCKETS(1024) 个 bucket, 每个 bucket 是一个 rcu 链表. 该链表中保持 sw_flow
+2. flow_table->mask_array->masks 数组中分配 MASK_ARRAY_SIZE_MIN(16) 个 sw_flow_mask 保持所有的 mask
+3. buckets 和 .
+4. buckets 中每次元素翻一番.
+5. mask_array 支持动态扩容和压缩.
+6. mask_array 中元素每次增加 MASK_ARRAY_SIZE_MIN(16), 新增加的元素, 遍历 mask_array->marks, 找到第一个没有使用的空间
+7. mask_array 中元素
+8. TODO mask_cache 的用处
 
 
 
@@ -200,13 +217,6 @@ NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 
 注: 其中 hash 表是整个内核数据结构最为关键的
 
-每个 bridge 有一张 table, 每张 table 有 1024 个 bucket 哈希桶
-每个 bridge 有 1024 个哈希桶存储 vport. 以 vport 的端口号为索引, 每个 vport 都会注册到内核, 开启混杂模式,
-每个 bridge 都会加入其所属的命名空间的 ovs_net, 因此可以通过 ovs_net 中查找对应的 bridage
-每个 vport 都加入 dev_table 和 dp->ports 的索引中, 因此, 可以通过 dev_table 或 bridge 以 O(1) 查询端口
-每个 vport 的命名空间与其所属的 bridge 在同一命名空间
-
-每个 bridge 的多个 eth 可以属于不同的 namespace
 
 ## 预备知识
 
@@ -1124,7 +1134,7 @@ struct flow_table {
     //内核流表项缓存
 	struct mask_array __rcu *mask_array;
 	unsigned long last_rehash;
-	unsigned int count;
+	unsigned int count;  // table 中的 flow 数量
 	unsigned int ufid_count;
 };
 
@@ -1133,7 +1143,7 @@ struct table_instance {
 	struct flex_array *buckets;
 	unsigned int n_buckets;
 	struct rcu_head rcu;
-	int node_ver;
+	int node_ver;           //flow->hash_node 的索引
 	u32 hash_seed;
 	bool keep_flows;
 };
@@ -1162,8 +1172,8 @@ struct mask_cache_entry {
 
 struct mask_array {
 	struct rcu_head rcu;
-	int count;
-    int max; //最大索引
+	int count;              //
+    int max;                //最大索引
 	struct sw_flow_mask __rcu *masks[];
 };
 
@@ -1190,7 +1200,7 @@ struct sw_flow {
 	struct rcu_head rcu;
 	struct {
 		struct hlist_node node[2];
-		u32 hash;
+		u32 hash;               /* 查找所属 table_instance->buckets 的 hash */
 	} flow_table, ufid_table;
 	int stats_last_writer;		/* NUMA-node id of the last writer on
 					 * 'stats[0]'.
@@ -2186,7 +2196,9 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
 
 -------------------------------------------------------------
 
-### flow netlink
+## 各个文件的源码解析
+
+### flow_netlink.c
 
 static bool match_validate(const struct sw_flow_match *match, u64 key_attrs, u64 mask_attrs)
 
@@ -2289,7 +2301,7 @@ static inline int add_nested_action_start(struct sw_flow_actions **sfa, int attr
 
 static inline void add_nested_action_end(struct sw_flow_actions *sfa, int st_offset)
 
-
+　　略
 
 static int validate_and_copy_sample(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa)
 
@@ -2350,7 +2362,6 @@ int ovs_nla_put_actions(const struct nlattr *attr, int len, struct sk_buff *skb)
             ovs_nla_put_actions
 
 ovs_nla_copy_actions
-
     validate_userspace
     validate_set
         validate_and_copy_set_tun
@@ -2382,12 +2393,6 @@ set_action_to_attr
 ovs_nla_put_flow
     ipv4_tun_to_nlattr
 
-add_action
-
-add_nested_action_start
-    add_action
-
-
 ovs_nla_get_flow_metadata
     metadata_from_nlattrs
         ipv4_tun_from_nlattr
@@ -2403,8 +2408,295 @@ actions 的 netlink 消息属性结构
         OVS_SAMPLE_ATTR_ACTIONS     :
              递归了
 
+-------------------------------------------------------------
+
+## flow_table.c
+
+static u16 range_n_bytes(const struct sw_flow_key_range *range)
+
+    略
+
+void ovs_flow_mask_key(struct sw_flow_key *dst, const struct sw_flow_key *src, const struct sw_flow_mask *mask)
+
+    将 mask->key 与 src 从 mask->ranger.start 开始进行与操作
+
+struct sw_flow *ovs_flow_alloc(void)
+
+    从 flow_cache 中分配一个 sw_flow, 并初始化 sw_flow
+
+int ovs_flow_tbl_count(struct flow_table *table)
+
+    返回当前流表的流表项数量
+
+static struct flex_array *alloc_buckets(unsigned int n_buckets)
+
+    分配 n_buckets 个 hlist_head, 初始化每个 hlist_head. 返回 flex_array
+    数组首指针
+
+static void flow_free(struct sw_flow *flow)
+
+    释放 sw_flow 内存
+
+static void rcu_free_flow_callback(struct rcu_head *rcu)
+
+    释放 sw_flow 空间
+
+static void rcu_free_sw_flow_mask_cb(struct rcu_head *rcu)
+
+    释放 sw_flow_mask 空间
+
+void ovs_flow_free(struct sw_flow *flow, bool deferred)
+
+    如果 deferred 为 true, 调用 rcu_free_flow_callback 是否 flow
+    如果 deferred 为 false, 调用 flow_free 直接释放
+
+static void free_buckets(struct flex_array *buckets)
+
+    是否 buckets 内存
+
+static void __table_instance_destroy(struct table_instance *ti)
+
+    是否 ti->buckets 和 ti 内存
+
+static struct table_instance *table_instance_alloc(int new_size)
+
+    为 table_instance 分配内存并初始化, 其中 buckets 有 new_size 个
+
+static void mask_array_rcu_cb(struct rcu_head *rcu)
+
+    从 rcu 定位到所属 mask_array, 并释放 mask_array
+
+static struct mask_array *tbl_mask_array_alloc(int size)
+
+    为 mask_array 分配内存并初始化, 其中 sw_flow_mask 有 size 个
+
+static int tbl_mask_array_realloc(struct flow_table *tbl, int size)
+
+    重新分配并初始化 mask_array, 新的 mask_array 包含 size 个 sw_flow_mask,
+    并将旧的 sw_flow_mask 拷贝到新的 mask_array
+
+int ovs_flow_tbl_init(struct flow_table *table)
+
+    flow_table 分配内存并初始化
+
+static void flow_tbl_destroy_rcu_cb(struct rcu_head *rcu)
+
+    从 rcu 定位 table_instance, 销毁 table_instance
+
+static void table_instance_destroy(struct table_instance *ti, bool deferred)
+
+    遍历 table_instance 所有 buckets 的所有 sw_flow 并释放内存.
+
+void ovs_flow_tbl_destroy(struct flow_table *table)
+
+    是否 flow_table 的内存
+
+struct sw_flow *ovs_flow_tbl_dump_next(struct table_instance *ti, u32 *bucket, u32 *last)
+
+    找到当前所属 bucket 的第 last 个元素
+
+static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
+
+    找到 ti->buckets[jhash_1word(hash, ti->hash_seed) & & (ti->n_buckets - 1)]
+    的 bucket 的首元素
+
+static void table_instance_insert(struct table_instance *ti, struct sw_flow *flow)
+
+    将 flow->hash_node[ti->node_ver] 加入 ti->buckets[jhash_1word(flow->hash, ti->hash_seed) & & (ti->n_buckets - 1)] 的链表头
+
+static void flow_table_copy_flows(struct table_instance *old, struct table_instance *new)
+
+    将 old 的所有 flow 插入 new
+
+static struct table_instance *table_instance_rehash(struct table_instance *ti, int n_buckets)
+
+    创建新的 table_instance new_ti, 并将 ti->buckets 的所有元素 插入 new_ti,
+    返回 new_ti
+
+int ovs_flow_tbl_flush(struct flow_table *flow_table)
+
+    重新初始化 flow_table 的所有元素(删除旧的 flow_table->ti)
+
+static u32 flow_hash(const struct sw_flow_key *key, int key_start, int key_end)
+
+    对 key + key_start 与 (key_end - key_start) >> 2 进行哈希
+    TODO: hash 算法
+
+static int flow_key_start(const struct sw_flow_key *key)
+
+    TODO
+
+static bool cmp_key(const struct sw_flow_key *key1, const struct sw_flow_key *key2, int key_start, int key_end)
+
+    比较 key1 和 key2 偏移从 key_start 到 key_end 的值是否相同
+
+static bool flow_cmp_masked_key(const struct sw_flow *flow, const struct sw_flow_key *key, int key_start, int key_end)
+
+    比较 flow->key 与 key 从 key_start 到 key_end 的值是否相同
+
+bool ovs_flow_cmp_unmasked_key(const struct sw_flow *flow, struct sw_flow_match *match)
+
+    比较 flow->unmasked_key 与 match->key 从 key_start 到 key_end 的值是否相同
+
+static struct sw_flow *masked_flow_lookup(struct table_instance *ti, const struct sw_flow_key *unmasked, struct sw_flow_mask *mask, u32 *n_mask_hit)
+
+    对 unmasked 用 mask 进行掩码之后存储在临时变量 masked_key,
+    遍历 bucket = find_bucket(ti, flow_hash(&masked_key, key_start, key_end)]) 的所有元素
+    找到 mask, hash, 与 masked_key 全都相等的 sw_flow.
+
+    注: 将 flow 查找范围缩小到 bucket. 如果流表非常多, 遍历该 bucket 仍然是不小的负担.
+
+
+static struct sw_flow *flow_lookup(struct flow_table *tbl, struct table_instance *ti, struct mask_array *ma, const struct sw_flow_key *key, u32 *n_mask_hit, u32 *index)
+
+    优先在 ma->masks[index] 为 mask, 哈希之后对应的 ti 的 bucket 中查找,
+    如果找不到遍历所有的 ma->masks, 查找对应的 flow
+
+    其中:
+
+    index : 保持 key 所在的 mask_array 的索引.
+    n_mask_hit : 貌似有点问题, 应该找到之后更新, 而不是每查找一次 bucket 就更新
+
+    要点:
+    1. mask_array 保持所有的 mask
+    2. mask 与 key 掩码之后的 masked_key
+    3. 从 ti->buckets 中 masked_key 对应的 hash 中查找 与 key 的 hash, mask及内容 完全相同的 flow.
+    TODO : 结合 flow 的插入分析
+
+
+struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl, const struct sw_flow_key *key, u32 skb_hash, u32 *n_mask_hit)
+
+    1. 如果 skb_hash == 0, 直接全表查询
+    2. 如果 skb_hash 不为 0
+       1. 从 mask_cache 中找到 skb_hash & (MC_HASH_ENTRIES - 1) 对应 mask_cache_entry 缓存的 mask_index
+       2. 从 mask_array[mask_index] 哈希之后对应的 bucket 查找
+       3. 找不到全表查询.
+    3. 如果还找不到, 全表查询.
+
+    注: 实际 3 不会到达.
+
+    TODO: 进一步详细分析
+
+struct sw_flow *ovs_flow_tbl_lookup(struct flow_table *tbl, const struct sw_flow_key *key)
+
+    全表查询 key 对应的 flow
+
+struct sw_flow *ovs_flow_tbl_lookup_exact(struct flow_table *tbl, struct sw_flow_match *match)
+
+    全表查询 match->key 对应的 flow
+
+int ovs_flow_tbl_num_masks(const struct flow_table *table)
+
+    返回 table->mask_array 中 masks 的元素个数
+
+static struct table_instance *table_instance_expand(struct table_instance *ti)
+
+    将 ti 中 buckets 扩大一倍
+
+static void tbl_mask_array_delete_mask(struct mask_array *ma, struct sw_flow_mask *mask)
+
+    遍历 ma->masks  的所有元素, 找到 mask 匹配的 mask, 之后删除
+
+
+static void flow_mask_remove(struct flow_table *tbl, struct sw_flow_mask *mask)
+
+    如果 mask 不为 null, 并且引用计数已经为 0. 将其从 tbl->mask_array 中删除
+    如果满足条件, 对 tbl->mask_array 进行压缩
+    条件: mask_array 元素个数大于 32, 但实际元素个数小于 mask_array->max 的 1/3
+    TODO: 结合 mask_array 重分配
+
+    这里 MASK_ARRAY_SIZE_MIN  是否可以根据实际场景进行 tunning
+
+void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
+
+    将 flow 从 table 中删除. 如果 flow->mask 引用计数为 0, flow->mask 从
+    table->mask_array 中删除
+
+static struct sw_flow_mask *mask_alloc(void)
+
+    分配一个 sw_flow_mask
+
+static bool mask_equal(const struct sw_flow_mask *a, const struct sw_flow_mask *b)
+
+    比较 a, b 是否相等.
+
+static struct sw_flow_mask *flow_mask_find(const struct flow_table *tbl, const struct sw_flow_mask *mask)
+
+    从 tbl->mask_array 中查找与 mask 相同的 sw_flow_mask, 返回找到的 sw_flow_mask
+
+static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow, struct sw_flow_mask *new)
+
+    从 tbl->mask_array 中找到 new 对应的 mask(sw_flow_mask)
+    1. 如果找到 mask, mask 的引用计数加 1. flow->mask 为 mask
+    2. 如果没有找到, 如果 mask_array 已经满了, 对 tbl->mask_array 进行扩容. 如果没有满, 从第一个元素开始找到空的位置, 将 mask 加入.
+
+int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow, struct sw_flow_mask *mask)
+
+    将 mask 插入 table->mask_array, 并且 flow->mask = mask
+    将 flow 插入 table->ti
+
+int ovs_flow_init(void)
+
+    在 slab 分配内存给 flow_cache
+    在 slab 分配内存给 flow_stats_cache
+
+void ovs_flow_exit(void)
+
+    在 slab 清除 flow_cache, flow_stats_cache
+
+ovs_flow_tbl_init
+    tbl_mask_array_alloc
+    table_instance_alloc
+
+ovs_flow_tbl_insert
+    flow_mask_insert
+        flow_mask_find
+            mask_equal
+        mask_alloc
+        tbl_mask_array_realloc
+    table_instance_insert
+
+    table_instance_expand
+        table_instance_rehash
+            table_instance_alloc
+            flow_table_copy_flows
+                table_instance_insert
+    table_instance_rehash
+        table_instance_alloc
+        flow_table_copy_flows
+
+ovs_flow_tbl_remove
+    flow_mask_remove
+        tbl_mask_array_delete_mask
+        tbl_mask_array_realloc
+
+ovs_flow_tbl_num_masks
+ovs_flow_tbl_lookup_exact
+    masked_flow_lookup
+    ovs_flow_cmp_unmasked_key
+
+ovs_flow_tbl_lookup
+    flow_lookup
+        masked_flow_lookup
+
+
+问题:
+    mask 查找和 mask 删除进行比较不一致?
+
+    mask == ovsl_dereference(ma->masks[i]) VS mask_equal(mask, t)
+
+
+流表查找算法:
+
+
+table_instance_rehash
+    flow_table_copy_flows
+
+ovs_flow_tbl_flush
+    table_instance_alloc
 
 -------------------------------------------------------------
+
 
 ##核心处理逻辑
 
