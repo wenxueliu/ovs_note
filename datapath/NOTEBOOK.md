@@ -77,6 +77,32 @@ vport
     netdev_vport : 1
         dev : sizeof(internal_dev) 该设备注册到内核中. 并通知内核可以传输数据
 
+    net_device
+        private: internal_dev
+
+    vport 的私有部分为 netdev_vport
+    netdev_vport->dev 为 internal_dev
+    interal_dev 又与 net_device 关联
+    internal_dev->vport = vport
+    通过 net_device 可以定位到 internal_dev, vport 可以定位到 internal_dev
+    internal_dev 可以定位到 vport.
+
+internal vport 对应 ovs 为 internal 类型的 port
+netdev vport 对应 ovs 为非 internal 类型的 port
+
+/* List of statically compiled vport implementations.  Don't forget to also
+ * add yours to the list at the bottom of vport.h. */
+static const struct vport_ops *vport_ops_list[] = {
+	&ovs_netdev_vport_ops,
+	&ovs_internal_vport_ops,
+#if IS_ENABLED(CONFIG_NET_IPGRE_DEMUX)
+	&ovs_gre_vport_ops,
+	&ovs_gre64_vport_ops,
+#endif
+	&ovs_vxlan_vport_ops,
+	&ovs_lisp_vport_ops,
+};
+
 
 flow_table
 
@@ -593,6 +619,39 @@ netdev_create
 __netif_receive_skb_core 会调用 rx_hander(vport) 即 netdev_frame_hook.
 
 ```
+/**
+ *      netdev_rx_handler_register - register receive handler
+ *      @dev: device to register a handler for
+ *      @rx_handler: receive handler to register
+ *      @rx_handler_data: data pointer that is used by rx handler
+ *
+ *      Register a receive hander for a device. This handler will then be
+ *      called from __netif_receive_skb. A negative errno code is returned
+ *      on a failure.
+ *
+ *      The caller must hold the rtnl_mutex.
+ *
+ *      For a general description of rx_handler, see enum rx_handler_result.
+ */
+int netdev_rx_handler_register(struct net_device *dev,
+                               rx_handler_func_t *rx_handler,
+                               void *rx_handler_data)
+{
+        ASSERT_RTNL();
+
+        if (dev->rx_handler)
+                return -EBUSY;
+
+        /* Note: rx_handler_data must be set before rx_handler */
+        rcu_assign_pointer(dev->rx_handler_data, rx_handler_data);
+        rcu_assign_pointer(dev->rx_handler, rx_handler);
+
+        return 0;
+}
+EXPORT_SYMBOL_GPL(netdev_rx_handler_register);
+
+
+
 位于 /net/core/dev.c
 
     rx_handler = rcu_dereference(skb->dev->rx_handler);
@@ -696,6 +755,8 @@ ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
 
 
 ## 收到包后的处理逻辑:
+
+netdev_rx_handler_register
 
 netif_receive_skb
 __netif_receive_skb
@@ -2640,6 +2701,20 @@ int ovs_flow_init(void)
     在 slab 分配内存给 flow_cache
     在 slab 分配内存给 flow_stats_cache
 
+    从内核缓存区初始化 sw_flow sw_flow_stats 两块内存
+
+    static struct kmem_cache *flow_cache;
+    struct kmem_cache *flow_stats_cache __read_mostly;
+	flow_cache = kmem_cache_create("sw_flow", sizeof(struct sw_flow)
+				       + (nr_node_ids
+					  * sizeof(struct flow_stats *)),
+				       0, 0, NULL);
+	flow_stats_cache
+		= kmem_cache_create("sw_flow_stats", sizeof(struct flow_stats),
+				    0, SLAB_HWCACHE_ALIGN, NULL);
+
+    nr_node_ids = 1
+
 void ovs_flow_exit(void)
 
     在 slab 清除 flow_cache, flow_stats_cache
@@ -2697,12 +2772,296 @@ ovs_flow_tbl_flush
 
 -------------------------------------------------------------
 
+vport-internal.c
+
+static const struct net_device_ops internal_dev_netdev_ops = {
+	.ndo_open = internal_dev_open,
+	.ndo_stop = internal_dev_stop,
+	.ndo_start_xmit = internal_dev_xmit,
+	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_change_mtu = internal_dev_change_mtu,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)
+	.ndo_get_stats64 = internal_dev_get_stats,
+#else
+	.ndo_get_stats = internal_dev_sys_stats,
+#endif
+};
+
+static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
+
+    接受外部网络传来的数据并进行处理
+
+static int internal_dev_open(struct net_device *netdev)
+
+    通知上层可以传输数据(即将 dev->_tx[0]->state 中的 __QUEUE_STATE_DRV_XOFF
+    位清零) 如果将 dev->_tx[0]->state 的 __QUEUE_STATE_DRV_XOFF 置位, 表示
+    停止传输数据
+
+```
+static inline void netif_start_queue(struct net_device *dev)
+{
+        netif_tx_start_queue(netdev_get_tx_queue(dev, 0));
+}
+static inline void netif_tx_start_queue(struct netdev_queue *dev_queue)
+{
+        clear_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state);
+}
+static inline struct netdev_queue *netdev_get_tx_queue(const struct net_device *dev, unsigned int index)
+{
+        return &dev->_tx[index];
+}
+
+static inline void netif_tx_stop_queue(struct netdev_queue *dev_queue)
+{
+        if (WARN_ON(!dev_queue)) {
+                pr_info("netif_stop_queue() cannot be called before register_netdev()\n");
+                return;
+        }
+        set_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state);
+}
+
+/**
+ *      netif_stop_queue - stop transmitted packets
+ *      @dev: network device
+ *
+ *      Stop upper layers calling the device hard_start_xmit routine.
+ *      Used for flow control when transmit resources are unavailable.
+ */
+static inline void netif_stop_queue(struct net_device *dev)
+{
+        netif_tx_stop_queue(netdev_get_tx_queue(dev, 0));
+}
+```
+
+static int internal_dev_stop(struct net_device *netdev)
+
+    通知上层可以传输数据(即将 dev->_tx[0]->state 中的 __QUEUE_STATE_DRV_XOFF
+    位置位)
+
+static void internal_dev_getinfo(struct net_device *netdev, struct ethtool_drvinfo *info)
+
+    拷贝 openvswitch 到 info->driver
+
+static int internal_dev_change_mtu(struct net_device *netdev, int new_mtu)
+
+	netdev->mtu = new_mtu;
+
+static void internal_dev_destructor(struct net_device *dev)
+
+    释放 dev 对应的 vport 及 dev 的内存
+
+const struct vport_ops ovs_internal_vport_ops = {
+	.type		= OVS_VPORT_TYPE_INTERNAL,
+	.create		= internal_dev_create,
+	.destroy	= internal_dev_destroy,
+	.get_name	= ovs_netdev_get_name,
+	.send		= internal_dev_recv,
+};
+
+static void do_setup(struct net_device *netdev)
+
+    初始化网卡特性
+
+static struct vport *internal_dev_create(const struct vport_parms *parms)
+
+    1. 分配 vport 内存, 其中私有部分为 netdev_vport, netdev_vport->dev = internal_dev
+    2. internal_dev 关联的 net_device 分配内存
+    3. 设置 internal_dev 的命名空间
+    4. 将 internal_dev 对应 net_device 注册到内核空间
+    5. 设置 internal_dev 对应 net_device 为混杂模式
+    6. 打开处理上层传递数据开关
+
+
+static void internal_dev_destroy(struct vport *vport)
+
+    停止传输上层传来的数据
+    停止混杂模式
+    注销 internal_dev 对应的 net_device
+
+static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
+
+    将 skb 加入 cpu 的 softnet_data->input_pkt_queue 中
+
+-------------------------------------------------------------
+
+### vport-netdev
+
+
+const struct vport_ops ovs_netdev_vport_ops = {
+	.type		= OVS_VPORT_TYPE_NETDEV,
+	.create		= netdev_create,
+	.destroy	= netdev_destroy,
+	.get_name	= ovs_netdev_get_name,
+	.send		= netdev_send,
+};
+
+static rx_handler_result_t netdev_frame_hook(struct sk_buff **pskb)
+
+    处理收到的 skb
+
+
+static struct vport *netdev_create(const struct vport_parms *parms)
+
+    1. 为 vport 分配内存, 其中私有部分为 netdev_vport, netdev_vport->dev
+    为已经存在的网卡对应的 net_device
+    2. 将该网卡的上联 net_device 置为为所属网桥的 local 端口所对应的 net_device
+    3. 注册该网卡的收包回调函数
+    4. 设置网卡为混杂模式
+
+
+static void free_port_rcu(struct rcu_head *rcu)
+
+    是否 rcu 对应的 vport 内存
+
+
+void ovs_netdev_detach_dev(struct vport *vport)
+
+    将网卡恢复原来的状态
+    1. 清除网卡私有标记.
+    2. 注销收包回调函数
+    3. 删除上联设备关系
+    4. 取消混杂模式.
+
+static void netdev_destroy(struct vport *vport)
+
+    如果 vport 关联到网卡, 将网卡恢复原来的状态
+    释放 vport 内存
+
+const char *ovs_netdev_get_name(const struct vport *vport)
+
+    返回 vport 对应 net_device 的网卡名
+
+static void netdev_port_receive(struct vport *vport, struct sk_buff *skb)
+
+    处理收到的包
+
+static int netdev_send(struct vport *vport, struct sk_buff *skb)
+
+    发送 skb
+
+int __init ovs_netdev_init(void)
+{
+    return ovs_vport_ops_register(&ovs_netdev_vport_ops);
+}
+
+int ovs_vport_ops_register(struct vport_ops *ops)
+
+    将 ovs_netdev_vport_ops 加入 vport.c 中的全局变量 vport_ops_list 双向链表中
+
+    其中
+        static struct vport_ops ovs_netdev_vport_ops = {
+            .type		= OVS_VPORT_TYPE_NETDEV,
+            .create		= netdev_create,
+            .destroy	= netdev_destroy,
+            .get_name	= ovs_netdev_get_name,
+            .send		= netdev_send,
+        };
+
+-------------------------------------------------------------
+
+### vport.c
+
+struct vport *ovs_vport_locate(struct net *net, const char *name)
+
+    通过 net, name 定位 vport
+
+struct vport *ovs_vport_alloc(int priv_size, const struct vport_ops *ops, const struct vport_parms *parms)
+
+    分配 vport 内存并初始化, 具体为:
+
+    初始化　struct vport 指针
+    1. 为 vport  分配 sizeof(struct vport) + priv_size 内存, VPORT_ALIGN 对齐
+    2. vport->dp = params->dp
+    3. vport->port_no = parms->port_no
+    4. vport->opst = ops;
+    5. 初始化 hash 链表  vport->dp_hash_node
+    6. 初始化 vport->upcall_portids : kmalloc 分配 vport_portids
+    7. 初始化 vport->percpu_stats : 每个 cpu 分配一个
+
+    其中
+    vport->upcall_portids->n_ids = nla_len(ids) / sizeof(u32)
+    vport->upcall_portids->rn_ids = reciprocal_value(vport->upcall_portids->n_ids)
+    vport->upcall_portids->ids = params->upcall_portids
+
+    vport->ops 包括:
+        .type		= OVS_VPORT_TYPE_INTERNAL,
+        .create		= internal_dev_create,
+        .destroy	= internal_dev_destroy,
+        .get_name	= ovs_netdev_get_name,
+        .send		= internal_dev_recv,
+
+    注:
+    1. 对照 vport 数据结构发现: hash_node err_stats detach_list 没有初始化
+    2. 对 vport 分配了私有数据 netdev_vport, 这内核 net_device 的惯例
+
+void ovs_vport_free(struct vport *vport)
+
+    是否 vport 内存
+
+struct vport *ovs_vport_add(const struct vport_parms *parms)
+
+    创建一个 parms->type 类型的 vport. 分配内存, 并加入 dev_table
+
+int ovs_vport_set_options(struct vport *vport, struct nlattr *options)
+
+    设置 vport 的选项
+
+void ovs_vport_del(struct vport *vport)
+
+    将 vport 从 dev_table 删除, 并销毁 vport
+
+void ovs_vport_set_stats(struct vport *vport, struct ovs_vport_stats *stats)
+
+	vport->offset_stats = *stats;
+
+void ovs_vport_get_stats(struct vport *vport, struct ovs_vport_stats *stats)
+
+    用 vport 状态初始化 stats
+
+int ovs_vport_get_options(const struct vport *vport, struct sk_buff *skb)
+
+    将 vport 的 option 加入 skb
+
+static void vport_portids_destroy_rcu_cb(struct rcu_head *rcu)
+
+    释放 vport_portids
+
+int ovs_vport_set_upcall_portids(struct vport *vport,  struct nlattr *ids)
+
+    用 ids 初始化 vport->upcall_portids
+
+int ovs_vport_get_upcall_portids(const struct vport *vport, struct sk_buff *skb)
+
+    将 vport 的 upcall_portids 加入 skb
+
+u32 ovs_vport_find_upcall_portid(const struct vport *p, struct sk_buff *skb)
+
+    找到 upcall_portids
+
+void ovs_vport_receive(struct vport *vport, struct sk_buff *skb, struct ovs_key_ipv4_tunnel *tun_key)
+
+    处理收到的 skb, 更新状态
+
+int ovs_vport_send(struct vport *vport, struct sk_buff *skb)
+
+    将包发送出去. 并更新 vport
+
+static void free_vport_rcu(struct rcu_head *rcu)
+
+    直接释放 rcu 对应 vport 内存
+
+void ovs_vport_deferred_free(struct vport *vport)
+
+    延迟 vport 内存释放动作
+
+-------------------------------------------------------------
 
 ##核心处理逻辑
 
     创建 netdev_create(const struct vport_parms *parms) 的注册的 rx_handler_result_t netdev_frame_hook( pskb)
 
-    rx_handler_result_t netdev_frame_hook( pskb)
+netdev_rx_handler_register
+    -->netdev_frame_hook( pskb)
     -->netdev_port_receive(vport, skb)
        -->ovs_vport_receive(vport, skb, NULL)
           -->ovs_flow_key_extract()
@@ -2722,168 +3081,6 @@ ovs_flow_tbl_flush
 ### 流表动作执行
 
 	核心函数: ovs_execute_actions(dp, skb, flow->sf_acts, key);
-
-
-
-### vswitchd 通信 -- netlink upcall
-
-    核心函数: ovs_dp_upcall(dp, skb, key, &upcall);
-
-      Message Format:
-         <--- nlmsg_total_size(payload)  --->
-         <-- nlmsg_msg_size(payload) ->
-        +----------+- - -+-------------+- - -+-------- - -
-        | nlmsghdr | Pad |   Payload   | Pad | nlmsghdr
-        +----------+- - -+-------------+- - -+-------- - -
-        nlmsg_data(nlh)---^                   ^
-        nlmsg_next(nlh)-----------------------+
-
-      Payload Format:
-         <---------------------- nlmsg_len(nlh) --------------------->
-         <------ hdrlen ------>       <- nlmsg_attrlen(nlh, hdrlen) ->
-        +----------------------+- - -+--------------------------------+
-        |     Family Header    | Pad |           Attributes           |
-        +----------------------+- - -+--------------------------------+
-        nlmsg_attrdata(nlh, hdrlen)---^
-     Attribute Format:
-        <------- nla_total_size(payload) ------->
-        <---- nla_attr_size(payload) ----->
-        +----------+- - -+- - - - - - - - - +- - -+-------- - -
-        |  Header  | Pad |     Payload      | Pad |  Header
-        +----------+- - -+- - - - - - - - - +- - -+-------- - -
-                         <- nla_len(nla) ->      ^
-        nla_data(nla)----^                        |
-        nla_next(nla)-----------------------------'
-
-        <------- NLA_HDRLEN ------> <-- NLA_ALIGN(payload)-->
-        +---------------------+- - -+- - - - - - - - - -+- - -+
-        |        Header       | Pad |     Payload       | Pad |
-        |   (struct nlattr)   | ing |                   | ing |
-        +---------------------+- - -+- - - - - - - - - -+- - -+
-        <-------------- nlattr->nla_len -------------->
-
-        nla_type (16 bits)
-         +---+---+-------------------------------+
-         | N | O | Attribute Type                |
-         +---+---+-------------------------------+
-         N := Carries nested attributes
-         O := Payload stored in network byte order
-
-         Note: The N and O flag are mutually exclusive.
-
-
-
-    skb_buff->data = nlmsg
-                     -> nlmsghdr = struct nlmsghdr *nlh
-                     -> family header = struct genlmsghdr *hdr
-                     -> attributes 
-                        -> upcall                           : dp_ifindex
-                        -> OVS_PACKET_ATTR_KEY              : key
-                        -> OVS_PACKET_ATTR_USERDATA         : upcall_info->userdata
-                        -> OVS_PACKET_ATTR_EGRESS_TUN_KEY   : tun_info
-                        -> OVS_PACKET_ATTR_ACTIONS          : actions
-    genlmsg_unicast(dp->net, skb_buff, upcall_info->portid)
-
-        struct sw_flow_key *key
-        struct dp_upcall_info upcall = {
-            .cmd    = OVS_PACKET_CMD_MISS
-            .portid = ovs_vport_find_upcall_portid(OVS_CB(skb)->input_vport, skb)
-        }
-
-        struct genl_info info = {
-        #ifdef HAVE_GENLMSG_NEW_UNICAST
-            .dst_sk = ovs_dp_get_net(dp)->genl_sock,
-        #endif
-            .snd_portid = upcall_info->portid,
-        };
-
-        family = dp_packet_genl_family
-        nlh->nlmsg_type = family->id;
-        nlh->nlmsg_len = nlmsg_msg_size(GENL_HDRLEN + family->hdrsize);
-        nlh->nlmsg_flags = 0;
-        nlh->nlmsg_pid = 0;
-        nlh->nlmsg_seq = 0;
-
-        hdr->cmd = upcall_info->cmd
-        hdr->version = family->version
-        hdr->reserved = 0;
-
-        upcall->dp_ifindex = get_dpifindex(dp);
-
-        nlattr key = {
-            OVS_KEY_ATTR_RECIRC_ID : key->recirc_id
-            OVS_KEY_ATTR_DP_HASH   : key->ovs_flow_hash
-            OVS_KEY_ATTR_PRIORITY  : key->phy.priority
-            OVS_KEY_ATTR_IN_PORT   : key->phy.in_port
-            OVS_KEY_ATTR_SKB_MARK  : key->phy.skb_mark
-            OVS_KEY_ATTR_ETHERNET  : key->eth.src+key->eth.dst
-            OVS_KEY_ATTR_ETHERTYPE : key->eth.type
-            OVS_KEY_ATTR_IPV4      : key->ipv4.addr.src+key->ipv4.addr.dst ..
-            OVS_KEY_ATTR_TCP       : key->tp.src+key->tp.dst+key->tp.flags
-        }
-
-        tun_key = upcall_info->tunnel
-        nlattr tun_info = {
-            OVS_TUNNEL_KEY_ATTR_ID              : tun_key->tun_id
-            OVS_TUNNEL_KEY_ATTR_IPV4_SRC        : tun_key->ipv4_src
-            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : tun_key->ipv4_dst
-            OVS_TUNNEL_KEY_ATTR_TOS             : tun_key->ipv4_tos
-            OVS_TUNNEL_KEY_ATTR_TTL             : tun_key->ipv4_ttl
-            OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT   : NULL
-            OVS_TUNNEL_KEY_ATTR_CSUM            : NULL
-            OVS_TUNNEL_KEY_ATTR_TP_SRC          : tun_key->tp_src
-            OVS_TUNNEL_KEY_ATTR_TP_DST          : tun_key->tp_dst
-            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : NULL
-            OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS     : upcall_info->options
-            OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS      {
-                OVS_VXLAN_EXT_GBP : upcall_info->options->gbp
-            }
-        }
-
-        actions = upcall_info->actions
-        actions = {
-            if actions = OVS_ACTION_ATTR_SET:
-            OVS_ACTION_ATTR_SET : {
-                actions = nla_data(actions)
-                OVS_KEY_ATTR_TUNNEL_INFO {
-                    actions = nla_data(nla_data(actions))
-                    OVS_ACTION_ATTR_SET : {
-                        tun_key = actions->tunnel
-                        OVS_KEY_ATTR_TUNNEL : {
-                            OVS_TUNNEL_KEY_ATTR_ID              : tun_key->tun_id
-                            OVS_TUNNEL_KEY_ATTR_IPV4_SRC        : tun_key->ipv4_src
-                            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : tun_key->ipv4_dst
-                            OVS_TUNNEL_KEY_ATTR_TOS             : tun_key->ipv4_tos
-                            OVS_TUNNEL_KEY_ATTR_TTL             : tun_key->ipv4_ttl
-                            OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT   : NULL
-                            OVS_TUNNEL_KEY_ATTR_CSUM            : NULL
-                            OVS_TUNNEL_KEY_ATTR_TP_SRC          : tun_key->tp_src
-                            OVS_TUNNEL_KEY_ATTR_TP_DST          : tun_key->tp_dst
-                            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : NULL
-                            OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS     : upcall_info->options
-                            OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS      {
-                                OVS_VXLAN_EXT_GBP : upcall_info->options->gbp
-                            }
-                        }
-                    }
-                }
-                OVS_ACTION_ATTR_SET : nla_data(actions)
-            }
-
-            if actions->type = OVS_ACTION_ATTR_SET_TO_MASKED :
-            OVS_ACTION_ATTR_SET : nal_data(actions)
-
-            if actions->type = OVS_ACTION_ATTR_SET_TO_MASKED :
-            OVS_ACTION_ATTR_SAMPLE {
-                OVS_SAMPLE_ATTR_PROBABILITY : nla_data(actions)
-                OVS_SAMPLE_ATTR_ACTIONS     : {
-                     递归了
-                }
-            }
-
-            else
-            nla_type(actions) : nla_data(actions)
-        }
 
 ## datapath 初始化
 
@@ -2974,196 +3171,6 @@ int ovs_vport_ops_register(struct vport_ops *ops)
             .send		= internal_dev_recv,
         };
 
-----------------------------------------------
-
-###static struct vport *internal_dev_create(const struct vport_parms *parms)
-
-     将 vport 与一个 net_device 关联, 然后注册 net_device
-
-    1. 初始化 vport, 其私有数据为 sizeof(struct netdev_vport)
-    2. 初始化 vport 的私有数据为一个 struct net_device 设备 netdev_vport. 启动函数为 do_setup
-    3. 初始化 netdev_vport 的私有数据为一个 struct internal_dev 对象 internal_dev. 其 vport 指向 1 初始化的 vport
-    4. 如果 vport->port_no = OVSP_LOCAL, netdev_vport->dev 增加特性 NETIF_F_NETNS_LOCAL(目前的命名空间);
-    5. 注册 netdev_vport 到网络驱动中, 并设置为混杂模式
-    6. 允许上层设备调用 netdev_vport 的 hard_start_xmit routine
-
-    其中2 包括:
-    netdev_vport->name = params->name
-    netdev_vport->net = vport->dp->net
-
-    struct netdev_vport {
-        struct rcu_head rcu;
-        struct net_device *dev;
-    };
-
-struct vport *ovs_vport_alloc(int priv_size, const struct vport_ops *ops,
-			      const struct vport_parms *parms)
-
-    初始化　struct vport 指针
-    1. 为 vport  分配 sizeof(struct vport) + priv_size 内存, VPORT_ALIGN 对齐
-    2. vport->dp = params->dp
-    3. vport->port_no = parms->port_no
-    4. vport->opst = ops;
-    5. 初始化 hash 链表  vport->dp_hash_node
-    6. 初始化 vport->upcall_portids : kmalloc 分配 vport_portids
-    7. 初始化 vport->percpu_stats : 每个 cpu 分配一个
-
-    其中
-    vport->upcall_portids->n_ids = nla_len(ids) / sizeof(u32)
-    vport->upcall_portids->rn_ids = reciprocal_value(vport->upcall_portids->n_ids)
-    vport->upcall_portids->ids = params->upcall_portids
-
-    vport->ops 包括:
-        .type		= OVS_VPORT_TYPE_INTERNAL,
-        .create		= internal_dev_create,
-        .destroy	= internal_dev_destroy,
-        .get_name	= ovs_netdev_get_name,
-        .send		= internal_dev_recv,
-
-    注:
-    1. 对照 vport 数据结构发现: hash_node err_stats detach_list 没有初始化
-    2. 对 vport 分配了私有数据 netdev_vport, 这内核 net_device 的惯例
-
-static void do_setup(struct net_device *netdev)
-
-    //dev->header_ops         = &eth_header_ops;
-    //dev->type               = ARPHRD_ETHER;
-    //dev->hard_header_len    = ETH_HLEN;
-    //dev->mtu                = ETH_DATA_LEN;
-    //dev->addr_len           = ETH_ALEN;
-    //dev->tx_queue_len       = 1000; /* Ethernet wants good queues */
-    //dev->flags              = IFF_BROADCAST|IFF_MULTICAST;
-    //dev->priv_flags         |= IFF_TX_SKB_SHARING;
-    //eth_broadcast_addr(dev->broadcast);
-	ether_setup(netdev);
-
-	netdev->netdev_ops = &internal_dev_netdev_ops;
-
-	netdev->priv_flags &= ~IFF_TX_SKB_SHARING;
-	netdev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
-    // 释放 internal_dev_create 中分配的 dev 及 vport
-	netdev->destructor = internal_dev_destructor;
-	netdev->ethtool_ops = &internal_dev_ethtool_ops;
-	netdev->rtnl_link_ops = &internal_dev_link_ops;
-	netdev->tx_queue_len = 0;
-
-	netdev->features = NETIF_F_LLTX | NETIF_F_SG | NETIF_F_FRAGLIST |
-			   NETIF_F_HIGHDMA | NETIF_F_HW_CSUM |
-			   NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL;
-
-	netdev->vlan_features = netdev->features;
-	netdev->features |= NETIF_F_HW_VLAN_CTAG_TX;
-
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
-	netdev->hw_features = netdev->features & ~NETIF_F_LLTX;
-    #endif
-
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)
-	netdev->hw_enc_features = netdev->features;
-    #endif
-
-    //分配随机的 MAC 地址
-	eth_hw_addr_random(netdev);
-
-    其中
-    internal_dev_netdev_ops = {
-        //开启
-        .ndo_open = internal_dev_open,
-        //关闭
-        .ndo_stop = internal_dev_stop,
-        //开始接收
-        .ndo_start_xmit = internal_dev_xmit,
-        //设置 MAC
-        .ndo_set_mac_address = eth_mac_addr,
-        //设置 MTU
-        .ndo_change_mtu = internal_dev_change_mtu,
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)
-        //获取状态如接收,传输的包数, 错误和丢弃的包数
-        .ndo_get_stats64 = internal_dev_get_stats,
-    #else
-        //获取状态如接收,传输的包数, 错误和丢弃的包数
-        .ndo_get_stats = internal_dev_sys_stats,
-    #endif
-    };
-
-    internal_dev_ethtool_ops = {
-        .get_drvinfo	= internal_dev_getinfo,
-        .get_link	= ethtool_op_get_link,
-    #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39)
-        .get_sg		= ethtool_op_get_sg,
-        .set_sg		= ethtool_op_set_sg,
-        .get_tx_csum	= ethtool_op_get_tx_csum,
-        .set_tx_csum	= ethtool_op_set_tx_hw_csum,
-        .get_tso	= ethtool_op_get_tso,
-        .set_tso	= ethtool_op_set_tso,
-    #endif
-    };
-
-    internal_dev_link_ops __read_mostly = {
-        .kind = "openvswitch",
-    };
-
-----------------------------------------------
-
-###static void internal_dev_destroy(struct vport *vport)
-
-1 停止 vport 所在网络设备
-2 取消混杂模式
-3 退出设备驱动
-
-----------------------------------------------
-
-###const char *ovs_netdev_get_name(const struct vport *vport)
-
-获取 vport 所在网络设备的名称
-
-----------------------------------------------
-
-###static int internal_dev_recv(struct vport *vport, struct sk_buff *skb)
-
-	len = skb->len;
-
-    //skb->_refdst = 0
-	skb_dst_drop(skb);
-    //skb->nfct = NULL
-	nf_reset(skb);
-    //skb->sp = NULL
-	secpath_reset(skb);
-
-	skb->dev = netdev;
-	skb->pkt_type = PACKET_HOST;
-	skb->protocol = eth_type_trans(skb, netdev);
-	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
-
-    //将 skb 加入当前 CPU 的 backlog
-	netif_rx(skb);
-	return len;
-
-----------------------------------------------
-
-
-
-
-
-##flow_table
-
-----------------------------------------------
-int ovs_flow_init(void)
-
-    从内核缓存区初始化 sw_flow sw_flow_stats 两块内存
-
-    static struct kmem_cache *flow_cache;
-    struct kmem_cache *flow_stats_cache __read_mostly;
-	flow_cache = kmem_cache_create("sw_flow", sizeof(struct sw_flow)
-				       + (nr_node_ids
-					  * sizeof(struct flow_stats *)),
-				       0, 0, NULL);
-	flow_stats_cache
-		= kmem_cache_create("sw_flow_stats", sizeof(struct flow_stats),
-				    0, SLAB_HWCACHE_ALIGN, NULL);
-
-    nr_node_ids = 1
-----------------------------------------------
 
 ##vport
 
@@ -3178,16 +3185,11 @@ int ovs_vport_init(void)
 	dev_table = kzalloc(VPORT_HASH_BUCKETS * sizeof(struct hlist_head),
 			    GFP_KERNEL);
 
-----------------------------------------------
 
 int ovs_vport_ops_register(struct vport_ops *ops)
 
     将 ops 加入 vport_ops_list 中(前提是 vport_ops_list 中每个元素的 type 是唯一的)
 
-----------------------------------------------
-
-
-----------------------------------------------
 
 int ovs_vport_set_upcall_portids(struct vport *vport, const struct nlattr *ids)
 
@@ -3199,9 +3201,8 @@ int ovs_vport_set_upcall_portids(struct vport *vport, const struct nlattr *ids)
 
 ----------------------------------------------
 
-##net_namespace
+## net_namespace
 
-----------------------------------------------
 static struct pernet_operations ovs_net_ops = {
 	.init = ovs_init_net,
 	.exit = ovs_exit_net,
@@ -3310,58 +3311,6 @@ static int dp_device_event(struct notifier_block *unused, unsigned long event,
     如果 event 是 NETDEV_UNREGISTER, 将 ptr->dev->dp_notify_work 加入 system_wq
 
 ----------------------------------------------
-
-##vport_netdev
-
-static struct vport_ops ovs_netdev_vport_ops = {
-    .type		= OVS_VPORT_TYPE_NETDEV,
-    .create		= netdev_create,
-    .destroy	= netdev_destroy,
-    .get_name	= ovs_netdev_get_name,
-    .send		= netdev_send,
-};
-
-int __init ovs_netdev_init(void)
-{
-    return ovs_vport_ops_register(&ovs_netdev_vport_ops);
-}
-
-int ovs_vport_ops_register(struct vport_ops *ops)
-
-    将 ovs_netdev_vport_ops 加入 vport.c 中的全局变量 vport_ops_list 双向链表中
-
-    其中
-        static struct vport_ops ovs_netdev_vport_ops = {
-            .type		= OVS_VPORT_TYPE_NETDEV,
-            .create		= netdev_create,
-            .destroy	= netdev_destroy,
-            .get_name	= ovs_netdev_get_name,
-            .send		= netdev_send,
-        };
-
-static struct vport *netdev_create(const struct vport_parms *parms)
-
-    为 vport 分配内存, 其私有数据大小为 struct netdev_vport, 并初始化
-
-    1. 初始化 vport, 其私有数据为 sizeof(struct netdev_vport)
-    2. 确保 netdev_vport->flags & IFF_LOOPBACK = 0; netdev_vport->dev->type =
-    ARPHRD_ETHER, netdev_vport->dev->ops != internal_dev_netdev_ops
-    3. 从 vport->dp->ports[0] 找到 端口号为 0 的 vp, 将 netdev_vport->dev 增加到 netdev_vport_priv(vp)->dev
-    4. 为 netdev_vport 注册一个接受处理器 netdev_frame_hook
-    5. 设置 netdev 为混杂模式
-	6. netdev_vport->dev->priv_flags |= IFF_OVS_DATAPATH;
-
-static rx_handler_result_t netdev_frame_hook(struct sk_buff **pskb)
-
-	struct sk_buff *skb = *pskb;
-	vport = ovs_netdev_get_vport(skb->dev);
-    调用 netdev_port_receive(vport, skb)
-
-static void netdev_destroy(struct vport *vport)
-
-    获取 vport 的私有数据, 当 netdev_vport_priv(vport) 的所有读者都读完后, 销毁 netdev_vport_priv(vport)
-
-------------------------------------------------
 
 ##datapath
 
@@ -3713,93 +3662,6 @@ int dp_register_genl(void)
     其中 genl_register_family(dp_genl_families[i])
 
 
-
-
-------------------------------------------------
-
-内核版本为 *** 之前
-
-#define genl_register_family rpl_genl_register_family
-static inline int rpl_genl_register_family(struct genl_family *family)
-{
-	family->module = THIS_MODULE;
-	return rpl___genl_register_family(family);
-}
-
-------------------------------------------------
-
-##genetlink
-
-#define GENL_ID_GENERATE        0
-#define GENL_FAM_TAB_SIZE       16
-#define GENL_FAM_TAB_MASK       (GENL_FAM_TAB_SIZE - 1)
-static struct list_head family_ht[GENL_FAM_TAB_SIZE]
-
-struct rpl_genl_family {
-	struct genl_family	compat_family;
-	unsigned int            id;
-	unsigned int            hdrsize;
-	char                    name[GENL_NAMSIZ];
-	unsigned int            version;
-	unsigned int            maxattr;
-	bool                    netnsok;
-	bool                    parallel_ops;
-	int                     (*pre_doit)(const struct genl_ops *ops,
-					    struct sk_buff *skb,
-					    struct genl_info *info);
-	void                    (*post_doit)(const struct genl_ops *ops,
-					     struct sk_buff *skb,
-					     struct genl_info *info);
-	struct nlattr **        attrbuf;        /* private */
-	const struct genl_ops * ops;            /* private */
-	const struct genl_multicast_group *mcgrps; /* private */
-	unsigned int            n_ops;          /* private */
-	unsigned int            n_mcgrps;       /* private */
-	unsigned int            mcgrp_offset;   /* private */
-	struct list_head        family_list;    /* private */
-	struct module           *module;
-};
-
-------------------------------------------------
-
-static inline struct list_head *genl_family_chain(unsigned int id)
-
-    return &family_ht[genl_family_hash(id)];
-
-------------------------------------------------
-
-static inline unsigned int genl_family_hash(unsigned int id)
-
-    return id & GENL_FAM_TAB_MASK;
-
-------------------------------------------------
-
-static inline int genl_register_family(struct genl_family *family)
-
-    family->module = THIS_MODULE;
-    return __genl_register_family(family);
-
-------------------------------------------------
-
-/**
- * __genl_register_family - register a generic netlink family
- * @family: generic netlink family
- *
- * Registers the specified family after validating it first. Only one
- * family may be registered with the same family name or identifier.
- * The family id may equal GENL_ID_GENERATE causing an unique id to
- * be automatically generated and assigned.
- *
- * The family's ops array must already be assigned, you can use the
- * genl_register_family_with_ops() helper function.
- *
- * Return 0 on success or a negative error code.
- */
-int __genl_register_family(struct genl_family *family)
-
-        genl_family_find_byname(family->name))
-
-
 ## 参考
 
 http://blog.csdn.net/shallnet/article/details/47682383
@@ -3807,3 +3669,319 @@ http://blog.csdn.net/shallnet/article/details/47682593
 http://blog.csdn.net/yuzhihui_no1/article/details/47284329
 http://blog.csdn.net/yuzhihui_no1/article/details/47305361
 
+
+
+##附录
+
+```
+/*
+ * enqueue_to_backlog is called to queue an skb to a per CPU backlog
+ * queue (may be a remote CPU queue).
+ */
+static int enqueue_to_backlog(struct sk_buff *skb, int cpu, unsigned int *qtail)
+{
+        struct softnet_data *sd;
+        unsigned long flags;
+        unsigned int qlen;
+
+        sd = &per_cpu(softnet_data, cpu);
+
+        local_irq_save(flags);
+
+        rps_lock(sd);
+        qlen = skb_queue_len(&sd->input_pkt_queue);
+        if (qlen <= netdev_max_backlog && !skb_flow_limit(skb, qlen)) {
+                if (skb_queue_len(&sd->input_pkt_queue)) {
+enqueue:
+                        __skb_queue_tail(&sd->input_pkt_queue, skb);
+                        input_queue_tail_incr_save(sd, qtail);
+                        rps_unlock(sd);
+                        local_irq_restore(flags);
+                        return NET_RX_SUCCESS;
+                }
+
+                /* Schedule NAPI for backlog device
+                 * We can use non atomic operation since we own the queue lock
+                 */
+                if (!__test_and_set_bit(NAPI_STATE_SCHED, &sd->backlog.state)) {
+                        if (!rps_ipi_queued(sd))
+                                ____napi_schedule(sd, &sd->backlog);
+                }
+                goto enqueue;
+        }
+
+        sd->dropped++;
+        rps_unlock(sd);
+
+        local_irq_restore(flags);
+
+        atomic_long_inc(&skb->dev->rx_dropped);
+        kfree_skb(skb);
+        return NET_RX_DROP;
+}
+static int netif_rx_internal(struct sk_buff *skb)
+{
+        int ret;
+
+        /* if netpoll wants it, pretend we never saw it */
+        if (netpoll_rx(skb))
+                return NET_RX_DROP;
+
+        net_timestamp_check(netdev_tstamp_prequeue, skb);
+
+        trace_netif_rx(skb);
+#ifdef CONFIG_RPS
+        if (static_key_false(&rps_needed)) {
+                struct rps_dev_flow voidflow, *rflow = &voidflow;
+                int cpu;
+
+                preempt_disable();
+                rcu_read_lock();
+
+                cpu = get_rps_cpu(skb->dev, skb, &rflow);
+                if (cpu < 0)
+                        cpu = smp_processor_id();
+
+                ret = enqueue_to_backlog(skb, cpu, &rflow->last_qtail);
+
+                rcu_read_unlock();
+                preempt_enable();
+        } else
+#endif
+        {
+                unsigned int qtail;
+                ret = enqueue_to_backlog(skb, get_cpu(), &qtail);
+                put_cpu();
+        }
+        return ret;
+}
+
+/**
+ *      netif_rx        -       post buffer to the network code
+ *      @skb: buffer to post
+ *
+ *      This function receives a packet from a device driver and queues it for
+ *      the upper (protocol) levels to process.  It always succeeds. The buffer
+ *      may be dropped during processing for congestion control or by the
+ *      protocol layers.
+ *
+ *      return values:
+ *      NET_RX_SUCCESS  (no congestion)
+ *      NET_RX_DROP     (packet was dropped)
+ *
+ */
+
+int netif_rx(struct sk_buff *skb)
+{
+        trace_netif_rx_entry(skb);
+
+        return netif_rx_internal(skb);
+}
+EXPORT_SYMBOL(netif_rx);
+```
+
+收到包, 如果没有开启 RPS, 那么, 包将发送给 CPU0, 扶开启, RPS, 将对包进行计算,
+找到匹配的 CPU, 满足一定的条件, 将包加入对应的 CPU 的 softnet_data->input_pkt_queue
+否则将包丢弃.
+
+满足的条件:
+
+1. softnet_data->input_pkt_queue 的长度小于 netdev_max_backlog
+2. softnet_data->flow_limit 达到阈值
+3. softnet_data->input_pkt_queue 不为 0
+
+如果 softnet_data->input_pkt_queue 为 0, 开始 NAPI 收包之后, 重复上述动作
+
+### 初始化网卡
+
+```
+/**
+ *      alloc_netdev_mqs - allocate network device
+ *      @sizeof_priv:   size of private data to allocate space for
+ *      @name:          device name format string
+ *      @setup:         callback to initialize device
+ *      @txqs:          the number of TX subqueues to allocate
+ *      @rxqs:          the number of RX subqueues to allocate
+ *
+ *      Allocates a struct net_device with private data area for driver use
+ *      and performs basic initialization.  Also allocates subqueue structs
+ *      for each queue on the device.
+ */
+struct net_device *alloc_netdev_mqs(int sizeof_priv, const char *name,
+                void (*setup)(struct net_device *),
+                unsigned int txqs, unsigned int rxqs)
+{
+        struct net_device *dev;
+        size_t alloc_size;
+        struct net_device *p;
+
+        BUG_ON(strlen(name) >= sizeof(dev->name));
+
+        if (txqs < 1) {
+                pr_err("alloc_netdev: Unable to allocate device with zero queues\n");
+                return NULL;
+        }
+
+#ifdef CONFIG_SYSFS
+        if (rxqs < 1) {
+                pr_err("alloc_netdev: Unable to allocate device with zero RX queues\n");
+                return NULL;
+        }
+#endif
+
+        alloc_size = sizeof(struct net_device);
+        if (sizeof_priv) {
+                /* ensure 32-byte alignment of private area */
+                alloc_size = ALIGN(alloc_size, NETDEV_ALIGN);
+                alloc_size += sizeof_priv;
+        }
+        /* ensure 32-byte alignment of whole construct */
+        alloc_size += NETDEV_ALIGN - 1;
+
+        p = kzalloc(alloc_size, GFP_KERNEL | __GFP_NOWARN | __GFP_REPEAT);
+        if (!p)
+                p = vzalloc(alloc_size);
+        if (!p)
+                return NULL;
+
+        dev = PTR_ALIGN(p, NETDEV_ALIGN);
+        dev->padded = (char *)dev - (char *)p;
+
+        dev->pcpu_refcnt = alloc_percpu(int);
+        if (!dev->pcpu_refcnt)
+                goto free_dev;
+
+        if (dev_addr_init(dev))
+                goto free_pcpu;
+
+        dev_mc_init(dev); //初始化多播地址
+        dev_uc_init(dev); //初始化单播地址
+
+        dev_net_set(dev, &init_net);  dev->nd_net = init_net
+
+        dev->gso_max_size = GSO_MAX_SIZE;
+        dev->gso_max_segs = GSO_MAX_SEGS;
+
+        INIT_LIST_HEAD(&dev->napi_list);
+        INIT_LIST_HEAD(&dev->unreg_list);
+        INIT_LIST_HEAD(&dev->close_list);
+        INIT_LIST_HEAD(&dev->link_watch_list);
+        INIT_LIST_HEAD(&dev->adj_list.upper);
+        INIT_LIST_HEAD(&dev->adj_list.lower);
+        INIT_LIST_HEAD(&dev->all_adj_list.upper);
+        INIT_LIST_HEAD(&dev->all_adj_list.lower);
+        dev->priv_flags = IFF_XMIT_DST_RELEASE;
+        setup(dev);
+
+        dev->num_tx_queues = txqs;
+        dev->real_num_tx_queues = txqs;
+        if (netif_alloc_netdev_queues(dev))
+                goto free_all;
+
+#ifdef CONFIG_SYSFS
+        dev->num_rx_queues = rxqs;
+        dev->real_num_rx_queues = rxqs;
+        if (netif_alloc_rx_queues(dev))
+                goto free_all;
+#endif
+
+        strcpy(dev->name, name);
+        dev->group = INIT_NETDEV_GROUP;
+        if (!dev->ethtool_ops)
+                dev->ethtool_ops = &default_ethtool_ops;
+        return dev;
+
+free_all:
+        free_netdev(dev);
+        return NULL;
+
+free_pcpu:
+        free_percpu(dev->pcpu_refcnt);
+        netif_free_tx_queues(dev);
+#ifdef CONFIG_SYSFS
+        kfree(dev->_rx);
+#endif
+
+free_dev:
+        netdev_freemem(dev);
+        return NULL;
+}
+EXPORT_SYMBOL(alloc_netdev_mqs);
+```
+
+
+### 根据 name 获取 net_device
+
+```
+net/core/dev.c
+
+/**
+ *      dev_get_by_name_rcu     - find a device by its name
+ *      @net: the applicable net namespace
+ *      @name: name to find
+ *
+ *      Find an interface by name.
+ *      If the name is found a pointer to the device is returned.
+ *      If the name is not found then %NULL is returned.
+ *      The reference counters are not incremented so the caller must be
+ *      careful with locks. The caller must hold RCU lock.
+ */
+
+struct net_device *dev_get_by_name_rcu(struct net *net, const char *name)
+{
+        struct net_device *dev;
+        struct hlist_head *head = dev_name_hash(net, name);
+
+        hlist_for_each_entry_rcu(dev, head, name_hlist)
+                if (!strncmp(dev->name, name, IFNAMSIZ))
+                        return dev;
+
+        return NULL;
+}
+EXPORT_SYMBOL(dev_get_by_name_rcu);
+
+/**
+ *      dev_get_by_name         - find a device by its name
+ *      @net: the applicable net namespace
+ *      @name: name to find
+ *
+ *      Find an interface by name. This can be called from any
+ *      context and does its own locking. The returned handle has
+ *      the usage count incremented and the caller must use dev_put() to
+ *      release it when it is no longer needed. %NULL is returned if no
+ *      matching device is found.
+ */
+
+struct net_device *dev_get_by_name(struct net *net, const char *name)
+{
+        struct net_device *dev;
+
+        rcu_read_lock();
+        dev = dev_get_by_name_rcu(net, name);
+        if (dev)
+                dev_hold(dev);
+        rcu_read_unlock();
+        return dev;
+}
+EXPORT_SYMBOL(dev_get_by_name);
+
+static inline struct hlist_head *dev_name_hash(struct net *net, const char *name)
+{
+        unsigned int hash = full_name_hash(name, strnlen(name, IFNAMSIZ));
+
+        return &net->dev_name_head[hash_32(hash, NETDEV_HASHBITS)];
+}
+
+```
+
+每个命名空间中的 dev 都保存在 dev->dev_name_head 的数组中.
+
+### 发送包
+
+__dev_queue_xmit(skb, NULL)
+    __dev_xmit_skb(skb, q, dev, txq)
+    dev_hard_start_xmit(skb, dev, txq);
+
+
+```
+```
