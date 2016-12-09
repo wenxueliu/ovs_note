@@ -1,4 +1,13 @@
 
+## 版本
+
+2.3.5 较 2.3.2 的变化
+
+1. 增加 ufid
+2. 加强日志
+3. 增加 per_cpu 的 action_fifo
+4. 增加 mpls, geneve 的协议支持
+
 ## 内核预备知识
 
 * 模块编译
@@ -44,12 +53,9 @@
 
 ## 执行流程
 
-datapath.c : dp_init()
-
 1. 内核模块 openvswitch 初始化
 2. bridge 的每个端口监听收到的数据, 对每个收到的包查找对应的流表，如果没有匹配的流表, 发送到用户态的 vswitchd.
 3. 通过 netlink 接受用户态的命令, 创建网桥, 流表等等
-
 
 
 ## 各个关键数据结构的内存布局
@@ -240,6 +246,7 @@ NOTE:通常在创建 vport 的时候将 vport 加入 dev_table
 * vport 找到 datapath
 * vport_priv(vport) 找到 net_device
 * datapath->ports 找到 vport
+* skb 找到 vport
 
 注: 其中 hash 表是整个内核数据结构最为关键的
 
@@ -366,6 +373,7 @@ dp_init(void)
 	ovs_vport_init();
 	register_pernet_device(&ovs_net_ops);
 	register_netdevice_notifier(&ovs_dp_device_notifier);
+	ovs_netdev_init();
 	dp_register_genl();
 
 ### 退出
@@ -373,11 +381,14 @@ dp_init(void)
 dp_cleanup(void)
 
     dp_unregister_genl(ARRAY_SIZE(dp_genl_families));
+	ovs_netdev_exit();
 	unregister_netdevice_notifier(&ovs_dp_device_notifier);
 	unregister_pernet_device(&ovs_net_ops);
 	rcu_barrier();
 	ovs_vport_exit();
 	ovs_flow_exit();
+	ovs_internal_dev_rtnl_link_unregister();
+	action_fifos_exit();
 
 
 module_init(dp_init);
@@ -875,11 +886,21 @@ ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	                mask = flow_mask_find(tbl, new);
 	            table_instance_insert(ti, flow);
 			ovs_flow_cmd_fill_info(new_flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+                ovs_nla_put_identifier(flow, skb);
+                ovs_nla_put_masked_key(flow, skb);
+                ovs_nla_put_mask(flow, skb);
+                ovs_flow_cmd_fill_stats(flow, skb);
+                ovs_flow_cmd_fill_actions(flow, skb, skb_orig_len);
         flow != null:
             ovs_flow_cmp_unmasked_key(flow, &match) == false:
                 flow = ovs_flow_tbl_lookup_exact(&dp->table, &match);
 		    rcu_assign_pointer(flow->sf_acts, acts);
 			ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+                ovs_nla_put_identifier(flow, skb);
+                ovs_nla_put_masked_key(flow, skb);
+                ovs_nla_put_mask(flow, skb);
+                ovs_flow_cmd_fill_stats(flow, skb);
+                ovs_flow_cmd_fill_actions(flow, skb, skb_orig_len);
 	ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
 
 1. 为流表分配内存, 并初始化 new_flow.
@@ -952,11 +973,21 @@ ovs_flow_cmd_set(skb, info)
     acts != null:
 		rcu_assign_pointer(flow->sf_acts, acts);
         ovs_flow_cmd_fill_info(flow, ovs_header->dp_ifindex, reply, info->snd_portid, info->snd_seq, 0, OVS_FLOW_CMD_NEW);
+            ovs_nla_put_identifier(flow, skb);
+            ovs_nla_put_masked_key(flow, skb);
+            ovs_nla_put_mask(flow, skb);
+            ovs_flow_cmd_fill_stats(flow, skb);
+            ovs_flow_cmd_fill_actions(flow, skb, skb_orig_len);
     acts == null:
     	reply = ovs_flow_cmd_build_info(flow, ovs_header->dp_ifindex, info, OVS_FLOW_CMD_NEW, false);
             skb = ovs_flow_cmd_alloc_info(ovsl_dereference(flow->sf_acts), info, false);
                 skb = genlmsg_new_unicast(ovs_flow_cmd_msg_size(acts), info, GFP_KERNEL);
             ovs_flow_cmd_fill_info(flow, dp_ifindex, skb, info->snd_portid, info->snd_seq, 0, cmd);
+                ovs_nla_put_identifier(flow, skb);
+                ovs_nla_put_masked_key(flow, skb);
+                ovs_nla_put_mask(flow, skb);
+                ovs_flow_cmd_fill_stats(flow, skb);
+                ovs_flow_cmd_fill_actions(flow, skb, skb_orig_len);
 	if (info->attrs[OVS_FLOW_ATTR_CLEAR]):
 		ovs_flow_stats_clear(flow);
     ovs_notify(&dp_flow_genl_family, &ovs_dp_flow_multicast_group, reply, info);
@@ -1070,35 +1101,6 @@ struct datapath {
 #endif
 
 	u32 user_features;  // 什么意思待理解
-};
-
-/**
- * enum ovs_datapath_attr - attributes for %OVS_DP_* commands.
- * @OVS_DP_ATTR_NAME: Name of the network device that serves as the "local
- * port".  This is the name of the network device whose dp_ifindex is given in
- * the &struct ovs_header.  Always present in notifications.  Required in
- * %OVS_DP_NEW requests.  May be used as an alternative to specifying
- * dp_ifindex in other requests (with a dp_ifindex of 0).
- * @OVS_DP_ATTR_UPCALL_PID: The Netlink socket in userspace that is initially
- * set on the datapath port (for OVS_ACTION_ATTR_MISS).  Only valid on
- * %OVS_DP_CMD_NEW requests. A value of zero indicates that upcalls should
- * not be sent.
- * @OVS_DP_ATTR_STATS: Statistics about packets that have passed through the
- * datapath.  Always present in notifications.
- * @OVS_DP_ATTR_MEGAFLOW_STATS: Statistics about mega flow masks usage for the
- * datapath. Always present in notifications.
- *
- * These attributes follow the &struct ovs_header within the Generic Netlink
- * payload for %OVS_DP_* commands.
- */
-enum ovs_datapath_attr {
-	OVS_DP_ATTR_UNSPEC,
-	OVS_DP_ATTR_NAME,		/* name of dp_ifindex netdev */
-	OVS_DP_ATTR_UPCALL_PID,		/* Netlink PID to receive upcalls */
-	OVS_DP_ATTR_STATS,		/* struct ovs_dp_stats */
-	OVS_DP_ATTR_MEGAFLOW_STATS,	/* struct ovs_dp_megaflow_stats */
-	OVS_DP_ATTR_USER_FEATURES,	/* OVS_DP_F_*  */
-	__OVS_DP_ATTR_MAX
 };
 
 
@@ -1404,10 +1406,6 @@ static struct datapath *lookup_datapath(struct net *net,
     遍历 dev_table[jhash(name, strlen(name), (unsigned long) net) & (VPORT_HASH_BUCKETS - 1)] 的所有 vport,
     找到 vport->ops->get_name(vport）= name, vport->dp->net = net 的 vport, 返回 vport->dp
 
-static int ovs_dp_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
-
-    遍历 skb->sk->net->gen->ptr[ovs_net_id -1]->dps 中所有 dp, 将索引大于 cb->agrs[0] 的统计加入 skb
-
 static int ovs_dp_cmd_set(struct sk_buff *skb, struct genl_info *info)
 
     通过 skb->sk->net info->userhdr, info->attrs 找到待删除的 dp
@@ -1682,21 +1680,6 @@ enum ovs_packet_cmd {
 
 	/* Userspace commands. */
 	OVS_PACKET_CMD_EXECUTE  /* Apply actions to a packet. */
-};
-
-enum ovs_packet_attr {
-	OVS_PACKET_ATTR_UNSPEC,
-	OVS_PACKET_ATTR_PACKET,      /* Packet data. */
-	OVS_PACKET_ATTR_KEY,         /* Nested OVS_KEY_ATTR_* attributes. */
-	OVS_PACKET_ATTR_ACTIONS,     /* Nested OVS_ACTION_ATTR_* attributes. */
-	OVS_PACKET_ATTR_USERDATA,    /* OVS_ACTION_ATTR_USERSPACE arg. */
-	OVS_PACKET_ATTR_EGRESS_TUN_KEY,  /* Nested OVS_TUNNEL_KEY_ATTR_*
-					    attributes. */
-	OVS_PACKET_ATTR_UNUSED1,
-	OVS_PACKET_ATTR_UNUSED2,
-	OVS_PACKET_ATTR_PROBE,      /* Packet operation is a feature probe,
-				       error logging should be suppressed. */
-	__OVS_PACKET_ATTR_MAX
 };
 
 
@@ -2177,12 +2160,6 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 如果包含 VLAN, skb_vlan_tag_present 就不会为 0, 也即 skb->vlan_tci = 0x1000
 
 -------------------------------------------------------------
-void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
-
-	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb),
-    if (!flow) --> ovs_dp_upcall(dp, skb, key, &upcall);
-                   ovs_execute_actions(dp, skb, sf_acts, key);
-    else       --> ovs_execute_actions(dp, skb, sf_acts, key);
 
 -------------------------------------------------------------
 struct sw_flow *ovs_flow_tbl_lookup_stats(struct flow_table *tbl,
@@ -2259,6 +2236,398 @@ static struct hlist_head *find_bucket(struct table_instance *ti, u32 hash)
 
 ## 各个文件的源码解析
 
+### datapath.c
+
+const char *ovs_dp_name(const struct datapath *dp)
+
+    即 dp 中类型为 OVSP_LOCAL 的 vport->ops->get_name(vport)
+
+static int get_dpifindex(const struct datapath *dp)
+
+    dp 中 OVSP_LOCAL 对应 vport, 与 vport 关联的物理网卡的 ifindex
+
+static void destroy_dp_rcu(struct rcu_head *rcu)
+
+    销毁 rcu 对应的 datapath 的内存
+
+static struct hlist_head *vport_hash_bucket(const struct datapath *dp, u16 port_no)
+
+    返回 dp->ports[port_no & (DP_VPORT_HASH_BUCKETS - 1)];
+
+struct vport *ovs_lookup_vport(const struct datapath *dp, u16 port_no)
+
+    先定位 bucket, 然后遍历 bucket 找到对应的 vport
+
+static struct vport *new_vport(const struct vport_parms *parms)
+
+    先创建 vport, 之后将 vport 加入 datapath 的 ports 中
+
+    1. 将 vport->hash_node 加入 dev_table
+    2. vport->dp_hash_node 加入 dp->ports[vport->port_no & (DP_VPORT_HASH_BUCKETS - 1)]
+
+void ovs_dp_detach_port(struct vport *p)
+
+    将 vport 与 datapath 解除关系, 之后释放 vport 内存
+
+void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
+
+    从 skb 找到对应的 datapath, 查询 datapath->table 找到 key 对应的 flow.
+    if (!flow) 发送到用户态
+    else       执行对应的 action
+
+int ovs_dp_upcall(struct datapath *dp, struct sk_buff *skb, const struct sw_flow_key *key, const struct dp_upcall_info *upcall_info)
+
+    如果 gso 使能, offload 到硬件, 之后发送给用户态, 否则直接发送给用户态
+
+static int queue_gso_packets(struct datapath *dp, struct sk_buff *skb, const struct sw_flow_key *key, const struct dp_upcall_info *upcall_info)
+
+    将 skb 分片, 之后发送给用户态
+
+static int queue_userspace_packet(struct datapath *dp, struct sk_buff *skb, const struct sw_flow_key *key, const struct dp_upcall_info *upcall_info)
+
+    将 skb 以 netlink 方式发送给用户态
+
+static int ovs_packet_cmd_execute(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info 将 skb 执行给定的 action
+
+static void get_dp_stats(const struct datapath *dp, struct ovs_dp_stats *stats, struct ovs_dp_megaflow_stats *mega_stats)
+
+    获取 datapath 的统计信息
+
+static bool should_fill_key(const struct sw_flow_id *sfid, uint32_t ufid_flags)
+
+	return ovs_identifier_is_ufid(sfid) && !(ufid_flags & OVS_UFID_F_OMIT_KEY);
+
+static bool should_fill_mask(uint32_t ufid_flags)
+
+	return !(ufid_flags & OVS_UFID_F_OMIT_MASK);
+
+static bool should_fill_actions(uint32_t ufid_flags)
+
+	return !(ufid_flags & OVS_UFID_F_OMIT_ACTIONS);
+
+static int ovs_flow_cmd_fill_stats(const struct sw_flow *flow, struct sk_buff *skb)
+
+    聚合所有 CPU 中 flow 的统计信息加入到 skb 中
+
+static int ovs_flow_cmd_fill_actions(const struct sw_flow *flow, struct sk_buff *skb, int skb_orig_len)
+
+    将 flow->sf_acts 加入到 skb
+
+static int ovs_flow_cmd_fill_info(const struct sw_flow *flow, int dp_ifindex, struct sk_buff *skb, u32 portid, u32 seq, u32 flags, u8 cmd, u32 ufid_flags)
+
+    构造一条 netlink 信息, 即将 flow 的各个属性加入 skb.
+
+static struct sk_buff *ovs_flow_cmd_alloc_info(const struct sw_flow_actions *acts, const struct sw_flow_id *sfid, struct genl_info *info, bool always, uint32_t ufid_flags)
+
+    根据输入参数生成一条单播 netlink 消息. 返回该消息.
+
+static struct sk_buff *ovs_flow_cmd_build_info(const struct sw_flow *flow, int dp_ifindex, struct genl_info *info, u8 cmd, bool always, u32 ufid_flags)
+
+    根据输入参数生成一条单播 netlink 消息. 并填充消息体, 返回该消息.
+
+static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info 生成一条 flow, 在 dp->table 中查找是否存在对应的 flow,
+    如果不存在, 将该 flow 加入 dp 的 table 中;
+    如果存在, 用新的 actions 替代旧的 actions
+
+    将 flow->flow_table->node[table->ti->node_ver] 插入 dp->table->ti->buckets
+    将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 dp->table->ufid_ti->buckets
+
+
+static struct sw_flow_actions *get_flow_actions(const struct nlattr *a, const struct sw_flow_key *key, const struct sw_flow_mask *mask, bool log)
+
+    解析 a 中获取 action, 并返回该 action
+
+static int ovs_flow_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info, 从 dp->table 的 ufid 表或全局查找对应的 flow, 用新的 action 代替旧的 action
+
+static int ovs_flow_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info, 从 dp->table 的 ufid 表或全局查找对应的 flow
+
+static int ovs_flow_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info, 从 dp->table 的 ufid 表或全局查找对应的 flow, 将 flow 与
+    dp->table 解除关系, 并是否 flow 对应的内存
+
+    1. 从 table->ti->bucket 中删除 flow->flow_table.node[table->ti->node_ver]
+    2. 从 table->ufid_ti->bucket 中删除 flow->ufid_table.node[table->ufid_ti->node_ver]
+
+static int ovs_flow_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+    从 skb->sk->net, genlmsg_data(nlmsg_data(cb->nlh))->dp_ifindex 找到 dp,
+    遍历 dp->table->ti->buckets, bucket 从 cb->args[0] 开始, 每个 bucket
+    的索引从 cb->args[1] 开始, 直到遍历完所有的 flow, 每个 flow 都加入 skb
+
+static size_t ovs_dp_cmd_msg_size(void)
+
+    计算 datapath 的 netlink 消息体大小
+
+static int ovs_dp_cmd_fill_info(struct datapath *dp, struct sk_buff *skb, u32 portid, u32 seq, u32 flags, u8 cmd)
+
+    解析参数, 将 datapath 的相关属性加入 netlink 消息对应的 skb.
+
+static struct sk_buff *ovs_dp_cmd_alloc_info(struct genl_info *info)
+
+    生成一个 netlink 消息.
+
+static struct datapath *lookup_datapath(struct net *net, const struct ovs_header *ovs_header, struct nlattr *a[OVS_DP_ATTR_MAX + 1])
+
+    解析 a 找到对应的 datapath 并返回
+
+static void ovs_dp_reset_user_features(struct sk_buff *skb, struct genl_info *info)
+
+    找到对应的 datapath, 并设置 datapath->user_features = 0;
+
+static void ovs_dp_change(struct datapath *dp, struct nlattr *a[])
+
+    用 a[OVS_DP_ATTR_USER_FEATURES] 设置 dp->user_features
+
+static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+    解析 info 构造一个 datapath, 并初始化 datapath 的各个数据成员
+
+static void __dp_destroy(struct datapath *dp)
+
+    删除 datapath 并释放其内存
+
+static int ovs_dp_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+    通过 skb->sk->net info->userhdr, info->attrs 找到待删除的 dp
+    销毁 dp 下的每个端口, 向发送者通知删除操作
+
+static int ovs_dp_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    通过 skb, info 找到对应的 datapath, 修改其 user_features
+
+    如果 info->attrs[OVS_DP_ATTR_NAME] = NULL
+    遍历 skb->sk-net->dev_index_head[info->userhdr->ifindex & (NETDEV_HASHENTRIES - 1)] 所有元素,
+    找到 dev->ifindex = ifindex 的 dev, 返回 netdev_priv(dev)->vport->dp
+
+    否则
+    遍历 dev_table[jhash(name, strlen(name), (unsigned long) net) & (VPORT_HASH_BUCKETS - 1)] 的所有 vport,
+    找到 vport->ops->get_name(vport）= name, vport->dp->net = net 的 vport, 返回 vport->dp
+
+static int ovs_dp_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+    遍历 skb->sk->net->gen->ptr[ovs_net_id -1]->dps 中所有 dp, 将索引大于 cb->agrs[0] 的统计加入 skb
+
+static int ovs_vport_cmd_fill_info(struct vport *vport, struct sk_buff *skb, u32 portid, u32 seq, u32 flags, u8 cmd)
+
+    解析参数, 将 vport 的属性加入 skb.
+
+static struct sk_buff *ovs_vport_cmd_alloc_info(void)
+
+    初始化一个 netlink 消息
+
+struct sk_buff *ovs_vport_cmd_build_info(struct vport *vport, u32 portid, u32 seq, u8 cmd)
+
+    解析参数, 将 vport 的属性加入 netlink 消息. 返回该 netlink 消息
+
+static struct vport *lookup_vport(struct net *net, const struct ovs_header *ovs_header, struct nlattr *a[OVS_VPORT_ATTR_MAX + 1])
+
+    从 net,name 找到 dp, 进而找到 vport
+        bucket = dev_table[jhash(name, strlen(name), (unsigned long) net) & (VPORT_HASH_BUCKETS - 1)]
+        找到 name = vport->ops->get_name(vport) 并且　vport->dp->net = net 的 vport
+    从 net,dpifindex 找到 dp, 进而找到 vport
+        遍历 net->dev_index_head[ifindex & (NETDEV_HASHENTRIES - 1)] 所有元素,
+        找到 dev->ifindex = ifindex 的 dev, 返回netdev_priv(dev)->vport->dp
+
+static int ovs_vport_cmd_new(struct sk_buff *skb, struct genl_info *info)
+
+    1. 从 skb->sk->net, ovs_header->dp_ifindex 定位到 datapath
+    2. 如果没有给定端口号, 在 datapath 中从头开始找到空闲的端口号 port_no.
+       如果给定端口号, 确保端口号 port_no 与已有的端口号 port_no 不冲突.
+    3. 创建一个 vport 并初始化各个数据成员, 包括私有数据
+    4. 如果端口创建成功, 将其加入 parms->dp->ports 中
+    5. 将信息应答给请求者(vswitchd)
+
+static int ovs_vport_cmd_set(struct sk_buff *skb, struct genl_info *info)
+
+    从 net,name 找到 dp, 进而找到 vport 或 从 net,dpifindex 找到 dp, 进而找到 vport
+    设置 vport 的属性, 包括:
+
+    OVS_VPORT_ATTR_OPTIONS : info->attrs[OVS_VPORT_ATTR_OPTIONS]
+    OVS_VPORT_ATTR_UPCALL_PID : info->attrs[OVS_VPORT_ATTR_UPCALL_PID]
+
+static int ovs_vport_cmd_del(struct sk_buff *skb, struct genl_info *info)
+
+    1. 从 net,name 找到 dp, 进而找到 vport 或 从 net,dpifindex 找到 dp, 进而找到 vport
+    2. 删除 vport (OVSP_LOCAL 的端口不可以删除)
+    3. 发送消息给发送者(vswitchd)
+
+static int ovs_vport_cmd_get(struct sk_buff *skb, struct genl_info *info)
+
+    从 net,name 找到 dp, 进而找到 vport 或 从 net,dpifindex 找到 dp, 进而找到 vport
+    获取指定 vport 的属性信息, 应答给请求者(vswitchd)
+
+static int ovs_vport_cmd_dump(struct sk_buff *skb, struct netlink_callback *cb)
+
+    从数字 dp->ports[] 索引 cb->agrs[0] 开始, 跳过前 cb->args[1] 个 vport,
+    将剩余的 vport 属性信息写入 skb
+
+static void dp_unregister_genl(int n_families)
+
+	for (i = 0; i < n_families; i++)
+		genl_unregister_family(dp_genl_families[i]);
+
+static int dp_register_genl(void)
+
+	for (i = 0; i < ARRAY_SIZE(dp_genl_families); i++)
+		genl_register_family(dp_genl_families[i]);
+
+static int __net_init ovs_init_net(struct net *net)
+
+    用 net->gen->ptr[ovs_net_id - 1] 初始化结构体 ovs_net
+
+    1. 定义 ovs_net 指向 net->gen->ptr[ovs_net_id - 1]
+    2. 初始化双向链表 ovs_net->dps
+    3. 初始化 ovs_net->dp_notify_work
+
+	INIT_WORK(&ovs_net->dp_notify_work, ovs_dp_notify_wq);
+    其中 3:
+        ovs_net->dp_notify_work->data = WORK_STRUCT_NO_POOL
+        初始化双向循环链表 ovs_net->dp_notify_work->entry
+        ovs_net->dp_notify_work->func = ovs_dp_notify_wq
+
+    注: 没有初始化 ovs_net-> vport_net
+
+static void __net_exit list_vports_from_net(struct net *net, struct net *dnet, struct list_head *head)
+
+    遍历 vport = net->gen->ptr[ovs_net_id-1]->dps[i]->vport[j]
+    如果 vport->ops->type != OVS_VPORT_TYPE_INTERNAL && netdev_vport_priv(vport)->dev->net = dnet
+    将 vport->detach_list 加入 head
+
+
+static void __net_exit ovs_exit_net(struct net *dnet)
+
+    1. 遍历 dnet->gen->ptr[ovs_net_id - 1]->dps, 释放每一个 dps
+    2. 遍历系统 net_namespace_list 中所有的命名空间对应的网络 struct net,
+    遍历每个网络 net->gen->ptr[ovs_net_id - 1]->dps 中每个 dps 中的每个 vport,
+    如果 vport->ops->type != OVS_VPORT_TYPE_INTERNAL && netdev_vport_priv(vport)->dev->net = dnet
+    将 vport->deatch_list 增加到一个链表 head 中, 然后遍历 head 链表, 销毁对应的 vport.
+    4. 取消 net->gen->ptr[ovs_net_id - 1]->dp_notify_work
+
+    其中 3 包括:
+    将 vport->deatch_list 从其对应的链表中删除;
+    将 vport->dp_hash_node 从其对应的链表中删除;
+    将 vport->hash_node 从其对应的链表中删除;
+    递减 vport->ops->owner 的引用计数
+    调用 vport->ops->destory(vport) 将其自身销毁
+
+----------------------------------------------------------------------------
+
+### flow.h
+
+static inline bool ovs_identifier_is_ufid(const struct sw_flow_id *sfid)
+
+	return sfid->ufid_len;
+
+static inline bool ovs_identifier_is_key(const struct sw_flow_id *sfid)
+
+	return !sfid->ufid_len;
+
+### flow.c
+
+u64 ovs_flow_used_time(unsigned long flow_jiffies)
+
+    当前时间减去　flow_jiffies 对应的时间, 单位 ms
+
+void ovs_flow_stats_update(struct sw_flow *flow, __be16 tcp_flags, const struct sk_buff *skb)
+
+    更新 flow->stats[numa_node_id()] 的状态
+
+void ovs_flow_stats_get(const struct sw_flow *flow, struct ovs_flow_stats *ovs_stats, unsigned long *used, __be16 *tcp_flags)
+
+    将 flow 各个节点的状态聚合之后赋值给 ovs_stats 和 tcp_flags
+
+void ovs_flow_stats_clear(struct sw_flow *flow)
+
+    清除 flow 各个节点的状态
+
+static int check_header(struct sk_buff *skb, int len)
+
+    检查 skb 是否可以容纳 len 的数据
+
+static bool arphdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 arp 包头
+
+static int check_iphdr(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 ip 头
+
+static bool tcphdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 tcp 头
+
+static bool udphdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 udp 头
+
+static bool sctphdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 sctp 头
+
+static bool icmphdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 icmp 头
+
+static int parse_ipv6hdr(struct sk_buff *skb, struct sw_flow_key *key)
+
+    解析 skb 的 ipv6 头, 初始化 key
+
+static bool icmp6hdr_ok(struct sk_buff *skb)
+
+    检查 skb 是否可以容纳 icmp6 头
+
+static int parse_vlan(struct sk_buff *skb, struct sw_flow_key *key)
+
+    解析 skb vlan 头, 初始化 key
+
+static __be16 parse_ethertype(struct sk_buff *skb)
+
+    解析网卡头
+
+static int parse_icmpv6(struct sk_buff *skb, struct sw_flow_key *key, int nh_len)
+
+    解析 skb 中的 icmpv6, 初始化　key
+
+static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
+
+    从 skb 中提取包信息初始化 key
+
+        key->eth.src
+        key->eth.dst
+        key->ipv4.addr.src
+        key->ipv4.addr.dst
+        key->ip.proto
+        key->ip.tos
+        key->ip.ttl
+        key->tp.src
+        key->tp.dst
+        key->tp.flags
+
+int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
+
+    从 skb 中提取包信息初始化 key
+
+
+int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info, struct sk_buff *skb, struct sw_flow_key *key)
+
+    从 tun_info 提取信息初始化 key
+    从 skb 中提取包信息初始化 key
+
+int ovs_flow_key_extract_userspace(const struct nlattr *attr, struct sk_buff *skb, struct sw_flow_key *key, bool log)
+
+    解析 attr 填充 key 的物理链路层属性, 解析 skb 填充 key 数据链路层以上的属性
+
+-------------------------------------------------------------------------
+
 ### flow_netlink.c
 
 static bool match_validate(const struct sw_flow_match *match, u64 key_attrs, u64 mask_attrs)
@@ -2275,6 +2644,7 @@ static bool match_validate(const struct sw_flow_match *match, u64 key_attrs, u64
         return true
 
 static int __parse_flow_nlattrs(const struct nlattr *attr, const struct nlattr *a[], u64 *attrsp, bool nz)
+static int __parse_flow_nlattrs(const struct nlattr *attr, const struct nlattr *a[], u64 *attrsp, bool log, bool nz)
 
     遍历 attr 所有 nla, 初始化 a
 
@@ -2292,23 +2662,74 @@ static int parse_flow_nlattrs(const struct nlattr *attr, const struct nlattr *a[
 
     其中 attrsp 记录出现的所有属性, 如果出现属性重复出现, 返回错误
 
+static int genev_tun_opt_from_nlattr(const struct nlattr *a, struct sw_flow_match *match, bool is_mask, bool log)
+
+    TODO
+
+static int vxlan_tun_opt_from_nlattr(const struct nlattr *a, struct sw_flow_match *match, bool is_mask, bool log)
+
+    TODO
+
+
 static int ipv4_tun_from_nlattr(const struct nlattr *attr, struct sw_flow_match *match, bool is_mask)
+static int ipv4_tun_from_nlattr(const struct nlattr *attr, struct sw_flow_match *match, bool is_mask, bool log)
 
     遍历 attr 所有 nla
     如果 is_mask 为 true, 初始化 match->mask->key.tun_key;
     如果 is_mask 为 false, 初始化 match->key->tun_key;
 
+        match->key->tun_key.tun_id = a[OVS_TUNNEL_KEY_ATTR_ID]
+        match->key->tun_key.ipv4_src = a[OVS_TUNNEL_KEY_ATTR_IPV4_SRC]
+        match->key->tun_key.ipv4_dst = a[OVS_TUNNEL_KEY_ATTR_IPV4_DST]
+        match->key->tun_key.ipv4_tos = a[OVS_TUNNEL_KEY_ATTR_IPV4_TOS]
+        match->key->tun_key.ipv4_ttl = a[OVS_TUNNEL_KEY_ATTR_IPV4_TTL]
+        match->key->tun_key.tp_src   = a[OVS_TUNNEL_KEY_ATTR_TP_SRC]
+        match->key->tun_key.tp_dst   = a[OVS_TUNNEL_KEY_ATTR_TP_DST]
+        match->key->tun_key.tun_flags = TUNNEL_KEY | TUNNEL_DONT_FRAGMENT | TUNNEL_CSUM
+                                     | TUNNEL_OAM | TUNNEL_GENEVE_OPT | TUNNEL_VXLAN_OPT
+
+static int vxlan_opt_to_nlattr(struct sk_buff *skb, const void *tun_opts, int swkey_tun_opts_len)
+
+    TODO
+
+static int __ipv4_tun_to_nlattr(struct sk_buff *skb, const struct ovs_key_ipv4_tunnel *output, const void *tun_opts, int swkey_tun_opts_len)
+
+    TODO
+
+
 static int ipv4_tun_to_nlattr(struct sk_buff *skb, const struct ovs_key_ipv4_tunnel *tun_key, const struct ovs_key_ipv4_tunnel *output)
+static int ipv4_tun_to_nlattr(struct sk_buff *skb, const struct ovs_key_ipv4_tunnel *output, const void *tun_opts, int swkey_tun_opts_len)
 
     将 output 成员加入 netlink 消息 skb 的 nested attribute 中
 
+int ovs_nla_put_egress_tunnel_key(struct sk_buff *skb, const struct ovs_tunnel_info *egress_tun_info)
+
+    TODO
+
 static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs, const struct nlattr **a, bool is_mask)
+static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs, const struct nlattr **a, bool is_mask, bool log)
 
     如果 attrs 相关 ovs_key_attr 属性位不为 0, 从 a 中获取对应属性初始化 match, 并将 attrs 相关位清零, 表明该属性已经被解析
     如果 is_mask 为 true, 初始化 match->mask-key 相关属性
     如果 is_mask 为 false, 初始化 match->key 相关属性
 
+    match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    match->key->tun_key = ipv4_tun_from_nlattr()
+
+    match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
+    match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+
+    match->mask->tun_key = ipv4_tun_from_nlattr(a[OVS_KEY_ATTR_TUNNEL], match, is_mask, log)
+
 static int ovs_key_from_nlattrs(struct sw_flow_match *match, u64 attrs, const struct nlattr **a, bool is_mask)
+static int ovs_key_from_nlattrs(struct sw_flow_match *match, u64 attrs, const struct nlattr **a, bool is_mask, bool log)
 
     用 a 初始化 match;
     其中:
@@ -2316,21 +2737,172 @@ static int ovs_key_from_nlattrs(struct sw_flow_match *match, u64 attrs, const st
     2. 如果 is_mask 为 true, 初始化 match->mask->key
     3. 如果 is_mask 为 false, 初始化 match->key
 
+
+    match->key->eth.src = a[OVS_KEY_ATTR_ETHERNET]->eth_src
+    match->key->eth.dst = a[OVS_KEY_ATTR_ETHERNET]->eth_dst
+    match->key->eth.tci = a[OVS_KEY_ATTR_VLAN]
+    match->key->eth.type = htons(ETH_P_802_2)
+
+    //IPV4
+    match->key->ip.proto = a[OVS_KEY_ATTR_IPV4]->ipv4_proto
+    match->key->ip.tos = a[OVS_KEY_ATTR_IPV4]->ipv4_tos
+    match->key->ip.ttl = a[OVS_KEY_ATTR_IPV4]->ipv4_ttl
+    match->key->ip.frag = a[OVS_KEY_ATTR_IPV4]->ipv4_frag
+    match->key->ip.addr.src = a[OVS_KEY_ATTR_IPV4]->ipv4_src
+    match->key->ip.addr.dst = a[OVS_KEY_ATTR_IPV4]->ipv4_dst
+
+    //IPV6
+    match->key->ipv6_key->ipv6_label = a[OVS_KEY_ATTR_IPV6]->ipv6_label
+    match->key->ipv6_key->ip.proto = a[OVS_KEY_ATTR_IPV6]->ipv6_proto
+    match->key->ip.tos   = a[OVS_KEY_ATTR_IPV6]->ipv6_tclass
+    match->key->ip.ttl   = a[OVS_KEY_ATTR_IPV6]->ipv6_hlimit
+    match->key->ip.frag  = a[OVS_KEY_ATTR_IPV6]->ipv6_frag
+    match->key->ipv6_key->ipv6.addr.src = a[OVS_KEY_ATTR_IPV6]->ipv6_src
+    match->key->ipv6_key->ipv6.addr.dst = a[OVS_KEY_ATTR_IPV6]->ipv6_dst
+
+    //ARP
+    match->key->ipv4.addr.src = a[OVS_KEY_ATTR_ARP]->arp_sip
+    match->key->ipv4.addr.dst = a[OVS_KEY_ATTR_ARP]->arp_tip
+    match->key->ip.proto = a[OVS_KEY_ATTR_ARP]->arp_op
+    match->key->ipv4.arp.sha = a[OVS_KEY_ATTR_ARP]->arp_sha
+    match->key->ipv4.arp.tha = a[OVS_KEY_ATTR_ARP]->arp_tha
+
+    //TCP
+    match->key->mpls.top_lse = a[OVS_KEY_ATTR_MPLS]->mpls_lse
+    match->key->tp.src = a[OVS_KEY_ATTR_TCP]->tcp_src
+    match->key->tp.dst = a[OVS_KEY_ATTR_TCP]->tcp_dst
+    match->key->tp.flags = a[OVS_KEY_ATTR_TCP_FLAGS]
+
+    //UDP
+    match->key->tp.src = a[OVS_KEY_ATTR_UDP]->udp_src
+    match->key->tp.dst = a[OVS_KEY_ATTR_UDP]->udp_dst
+
+    //SCTP
+    match->key->tp.src = a[OVS_KEY_ATTR_SCTP]->sctp_src
+    match->key->tp.dst = a[OVS_KEY_ATTR_SCTP]->sctp_dst
+
+    //ICMP
+    match->key->tp.src = a[OVS_KEY_ATTR_ICMP]->icmp_src
+    match->key->tp.dst = a[OVS_KEY_ATTR_ICMP]->icmp_dst
+
+    //ICMPV6
+    match->key->tp.src = a[OVS_KEY_ATTR_ICMPV6]->icmpv6_type
+    match->key->tp.dst = a[OVS_KEY_ATTR_ICMPV6]->icmpv6_code
+
+    //
+    match->key->ipv6.nd.target = a[OVS_KEY_ATTR_ND]->nd_target
+    match->key->ipv6.nd.ssl = a[OVS_KEY_ATTR_ND]->nd_sll
+    match->key->ipv6.nd.tll = a[OVS_KEY_ATTR_ND]->nd_tll
+
+    match->mask->key.eth.src = a[OVS_KEY_ATTR_ETHERNET]->eth_src
+    match->mask->key.eth.dst = a[OVS_KEY_ATTR_ETHERNET]->eth_dst
+    match->mask->key.eth.tci = a[OVS_KEY_ATTR_VLAN]
+    match->mask->key.eth.type = htons(0xffff)
+    match->mask->key.ip.proto = a[OVS_KEY_ATTR_IPV4]->ipv4_proto
+    match->mask->key.ip.tos = a[OVS_KEY_ATTR_IPV4]->ipv4_tos
+    match->mask->key.ip.ttl = a[OVS_KEY_ATTR_IPV4]->ipv4_ttl
+    match->mask->key.ip.frag = a[OVS_KEY_ATTR_IPV4]->ipv4_frag
+    match->mask->key.ip.addr.src = a[OVS_KEY_ATTR_IPV4]->ipv4_src
+    match->mask->key.ip.addr.dst = a[OVS_KEY_ATTR_IPV4]->ipv4_dst
+
+    match->key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    match->key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    match->key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    match->key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    match->key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    match->key->tun_key = ipv4_tun_from_nlattr()
+
+    match->mask->key.ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    match->mask->key.recirc_id = a[OVS_KEY_ATTR_RECIRC_ID]
+    match->mask->key.phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    match->mask->key.phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    match->mask->key.phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+
+    match->mask->tun_key = ipv4_tun_from_nlattr(a[OVS_KEY_ATTR_TUNNEL], match, is_mask, log)
+
+
+static void nlattr_set(struct nlattr *attr, u8 val, const struct ovs_len_tbl *tbl)
+
+    TODO
+
+static void mask_set_nlattr(struct nlattr *attr, u8 val)
+
+    TODO
+
+
 static void sw_flow_mask_set(struct sw_flow_mask *mask, struct sw_flow_key_range *range, u8 val)
 
     用 val 初始化 mask->range->start 到 mask->range->end
 
 int ovs_nla_get_match(struct sw_flow_match *match, const struct nlattr *key, const struct nlattr *mask)
+int ovs_nla_get_match(struct sw_flow_match *match, const struct nlattr *nla_key, const struct nlattr *nla_mask, bool log)
 
     1. 遍历 key 所有 nla, 保存到临时数组 a (包括全部为 0 的属性)中, 之后用 a 初始化 match->key
     2. 如果 mask 不为 NULL, 遍历 mask 所有 nla, 保存到临时数组 a (包括全部为 0 的属性)中, 之后用 a 初始化 match->mask->key
     3. 如果 mask 为 NULL, 设置 match->mask 从 match->range->start 到 match->range->end 每个字节为 ff
     4. 校验 match
 
+static size_t get_ufid_len(const struct nlattr *attr, bool log)
+
+	返回 nla_len(attr);
+
+bool ovs_nla_get_ufid(struct sw_flow_id *sfid, const struct nlattr *attr,
+
+    解析 attr 初始化 sfid->ufid_len, sfid->ufid
+
+int ovs_nla_get_identifier(struct sw_flow_id *sfid, const struct nlattr *ufid, const struct sw_flow_key *key, bool log)
+
+    计算 flow key 的 id 即 sfid
+    如果 nla_len(attr) 不为 0
+          new_flow->id->ufid_len = nla_len(a[OVS_FLOW_ATTR_UFID])
+          new_flow->id->ufid = nla_data([OVS_FLOW_ATTR_UFID])
+    否则 a[OVS_FLOW_ATTR_UFID] = NULL, new_flow->unmasked_key = key
+
+u32 ovs_nla_get_ufid_flags(const struct nlattr *attr)
+
+	return attr ? nla_get_u32(attr) : 0;
+
 int ovs_nla_get_flow_metadata(const struct nlattr *attr, struct sw_flow_key *key)
 
     1. 遍历 attr 所有 nla, 保存到临时数组 a(包括全部为 0 的属性)中.
     2. 用 a 初始化 key
+
+    memset(key, 0, OVS_SW_FLOW_KEY_METADATA_SIZE);
+    key->phy.in_port = DP_MAX_PORTS;
+    key->ovs_flow_hash = a[OVS_KEY_ATTR_DP_HASH]
+    key->ovs_flow_hash = a[OVS_KEY_ATTR_RECIRC_ID]
+    key->phy.priority = a[OVS_KEY_ATTR_PRIORITY]
+    key->phy.in_port = a[OVS_KEY_ATTR_IN_PORT]
+    key->phy.skb_mark = a[OVS_KEY_ATTR_SKB_MARK]
+    key->tun_key = ipv4_tun_from_nlattr()
+
+static int __ovs_nla_put_key(const struct sw_flow_key *swkey, const struct sw_flow_key *output, bool is_mask, struct sk_buff *skb)
+
+    TODO
+
+int ovs_nla_put_key(const struct sw_flow_key *swkey, const struct sw_flow_key *output, int attr, bool is_mask, struct sk_buff *skb)
+
+    TODO
+
+int ovs_nla_put_identifier(const struct sw_flow *flow, struct sk_buff *skb)
+
+	if (ovs_identifier_is_ufid(&flow->id))
+		return nla_put(skb, OVS_FLOW_ATTR_UFID, flow->id.ufid_len, flow->id.ufid);
+
+	return ovs_nla_put_key(flow->id.unmasked_key, flow->id.unmasked_key, OVS_FLOW_ATTR_KEY, false, skb);
+
+int ovs_nla_put_masked_key(const struct sw_flow *flow, struct sk_buff *skb)
+
+	return ovs_nla_put_key(&flow->key, &flow->key, OVS_FLOW_ATTR_KEY, false, skb);
+
+int ovs_nla_put_mask(const struct sw_flow *flow, struct sk_buff *skb)
+
+	return ovs_nla_put_key(&flow->key, &flow->mask->key, OVS_FLOW_ATTR_MASK, true, skb);
+
+static struct sw_flow_actions *nla_alloc_flow_actions(int size, bool log)
+
+    TODO
+
 
 int ovs_nla_put_flow(const struct sw_flow_key *swkey, const struct sw_flow_key *output, struct sk_buff *skb)
 
@@ -2349,14 +2921,26 @@ void ovs_nla_free_flow_actions(struct sw_flow_actions *sf_acts)
     调用 sw_flow_actions 的 rcu 回调函数 rcu_free_acts_callback 释放 sw_flow_actions 内存
 
 static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa, int attr_len)
+static struct nlattr *reserve_sfa_size(struct sw_flow_actions **sfa, int attr_len, bool log)
 
     sfa 的内存空间扩展 NLA_ALIGN(attr_len) byte, (如果 sfa 不够, 重新分配) 返回新的扩展空间首地址
 
+    在 sfs 现有长度基础上增加 attr_len 长度:
+    如果空间不够, 就将原来空间扩大 2 倍, 如果扩大 2 被超出了 action 的阈值, 检查 action 的阈值长度
+    是否能满足要求
+    如果空间足够返回 sfs 扩展首地址
+
+static struct nlattr *__add_action(struct sw_flow_actions **sfa, int attrtype, void *data, int len, bool log)
+
+    TODO
+
 static int add_action(struct sw_flow_actions **sfa, int attrtype, void *data, int len)
+static int add_action(struct sw_flow_actions **sfa, int attrtype, void *data, int len, bool log)
 
     sfa 增加新的 action. 类型为 attrtype, 数据为 data(长度为 len)
 
 static inline int add_nested_action_start(struct sw_flow_actions **sfa, int attrtype)
+static inline int add_nested_action_start(struct sw_flow_actions **sfa, int attrtype, bool log)
 
     给 sfa 增加 attrtype 的内置 action
 
@@ -2364,7 +2948,12 @@ static inline void add_nested_action_end(struct sw_flow_actions *sfa, int st_off
 
 　　略
 
+static int __ovs_nla_copy_actions(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa, __be16 eth_type, __be16 vlan_tci, bool log);
+
+    遍历 attr 每个元素, 验证每个元素的有效性, 并初始化 eth_type, vlan_tci
+
 static int validate_and_copy_sample(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa)
+static int validate_and_copy_sample(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa, __be16 eth_type, __be16 vlan_tci, bool log)
 
     遍历 attr 所有元素, 初始化临时数组 attrs, 将 attrs[OVS_ACTION_ATTR_SAMPLE] 加入 sfa
 
@@ -2372,6 +2961,7 @@ static int validate_and_copy_sample(const struct nlattr *attr, const struct sw_f
 
 
 static int copy_action(const struct nlattr *from, struct sw_flow_actions **sfa)
+static int copy_action(const struct nlattr *from, struct sw_flow_actions **sfa, bool log)
 
     将 from 属性加入 sfa
 
@@ -2379,21 +2969,38 @@ void ovs_match_init(struct sw_flow_match *match, struct sw_flow_key *key, struct
 
     初始化 sw_flow_match
 
+static int validate_geneve_opts(struct sw_flow_key *key)
+
+    TODO
+
 static int validate_and_copy_set_tun(const struct nlattr *attr, struct sw_flow_actions **sfa)
+static int validate_and_copy_set_tun(const struct nlattr *attr, struct sw_flow_actions **sfa, bool log)
 
     遍历 attr 所有 nla, 初始化临时变量 match->key->tun_key
     给 sfa 内置属性 OVS_ACTION_ATTR_SET 增加 OVS_KEY_ATTR_IPV4_TUNNEL 属性
 
 static int validate_set(const struct nlattr *a, const struct sw_flow_key *flow_key, struct sw_flow_actions **sfa, bool *set_tun)
+static int validate_set(const struct nlattr *a, const struct sw_flow_key *flow_key, struct sw_flow_actions **sfa, bool *skip_copy, __be16 eth_type, bool masked, bool log)
 
     对于 OVS_KEY_ATTR_TUNNEL 设置 set_tun 为 true, 并设置 sfa 的 OVS_ACTION_ATTR_SET 属性
     对于其他属性, 仅校验属性
+
+static bool validate_masked(u8 *data, int len)
+
+	u8 *mask = data + len;
+
+	while (len--)
+		if (*data++ & ~*mask++)
+			return false;
+
+	return true;
 
 static int validate_userspace(const struct nlattr *attr)
 
     解析 attr 到临时数组 a 来校验解析 attr 的 ovs_userspace_attr 属性是否有问题
 
 int ovs_nla_copy_actions(const struct nlattr *attr, const struct sw_flow_key *key, int depth, struct sw_flow_actions **sfa)
+int ovs_nla_copy_actions(const struct nlattr *attr, const struct sw_flow_key *key, struct sw_flow_actions **sfa, bool log)
 
     遍历 attr 所有属性, 加入 sfa
 
@@ -2409,6 +3016,10 @@ static int sample_action_to_attr(const struct nlattr *attr, struct sk_buff *skb)
 static int set_action_to_attr(const struct nlattr *a, struct sk_buff *skb)
 
     解析 attr 的 OVS_ACTION_ATTR_SET 加入 netlink 消息体 skb
+
+static int masked_set_action_to_set_action_attr(const struct nlattr *a, struct sk_buff *skb)
+
+    TODO
 
 int ovs_nla_put_actions(const struct nlattr *attr, int len, struct sk_buff *skb)
 
@@ -2565,6 +3176,10 @@ static void table_instance_insert(struct table_instance *ti, struct sw_flow *flo
 
     将 flow->hash_node[ti->node_ver] 加入 ti->buckets[jhash_1word(flow->hash, ti->hash_seed) & & (ti->n_buckets - 1)] 的链表头
 
+static void ufid_table_instance_insert(struct table_instance *ti, struct sw_flow *flow)
+
+    将 flow->ufid_table.node[ti->node_ver] 加入 ti->buckets[jhash_1word(ti->hash_seed, flow->ufid_table.hash)] 中
+
 static void flow_table_copy_flows(struct table_instance *old, struct table_instance *new)
 
     将 old 的所有 flow 插入 new
@@ -2646,6 +3261,28 @@ struct sw_flow *ovs_flow_tbl_lookup_exact(struct flow_table *tbl, struct sw_flow
 
     全表查询 match->key 对应的 flow
 
+static u32 ufid_hash(const struct sw_flow_id *sfid)
+
+	return jhash(sfid->ufid, sfid->ufid_len, 0);
+
+static bool ovs_flow_cmp_ufid(const struct sw_flow *flow, const struct sw_flow_id *sfid)
+
+    先比较长度, 再比较内容
+	if (flow->id.ufid_len != sfid->ufid_len) return false;
+	return !memcmp(flow->id.ufid, sfid->ufid, sfid->ufid_len);
+
+bool ovs_flow_cmp(const struct sw_flow *flow, const struct sw_flow_match *match)
+
+    如果 flow->id->ufid_len != 0, flow->key 与 match->key 是否完全一致
+    否则 flow->unmasked_key 与 match->key 是否完全一致
+
+struct sw_flow *ovs_flow_tbl_lookup_ufid(struct flow_table *tbl, const struct sw_flow_id *ufid)
+
+    从 tbl->ufid_ti->buckets 中查找 ufid 对应的流表是否存在
+
+    遍历 tbl->ufid_ti->buckets[jhash_1word(jhash(ufid->ufid, ufid->ufid_len, 0), ti->hash_seed)] 中每一个元素 flow, 
+    找到满足 flow->ufid = ufid, 返回 flow; 找不到返回 NULL
+
 int ovs_flow_tbl_num_masks(const struct flow_table *table)
 
     返回 table->mask_array 中 masks 的元素个数
@@ -2691,10 +3328,28 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow, struct
     1. 如果找到 mask, mask 的引用计数加 1. flow->mask 为 mask
     2. 如果没有找到, 如果 mask_array 已经满了, 对 tbl->mask_array 进行扩容. 如果没有满, 从第一个元素开始找到空的位置, 将 mask 加入.
 
+static void flow_key_insert(struct flow_table *table, struct sw_flow *flow)
+
+    将 flow 插入 table->ti->buckets 中的一个链表中
+
+    1. 初始化 flow->flow_table.hash
+    2. flow->flow_table.node[ti->node_ver] 加入 ti->buckets
+    3. 如果新插入流表数目导致 table->count 大于 table->ti->buckets, 对 table->ti 进行重分配
+    4. 如果当前 jiffies 到 table->last_rehash 超过 600 HZ, 重分配
+    5. 更新 table->count, table->last_rehash
+
+static void flow_ufid_insert(struct flow_table *table, struct sw_flow *flow)
+
+    将 flow 插入 table->ufid_ti->buckets 中的一个链表中
+
+    1. 将 flow->ufid_table.node[table->ufid_ti->node_ver] 加入 table->ufid_ti->buckets[jhash_1word(table->ufid_ti->hash_seed, flow->ufid_table.hash)] 中
+    2. 如果 table->ufid_count 大于 table->ufid_ti->n_buckets 重分配
+
 int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow, struct sw_flow_mask *mask)
 
-    将 mask 插入 table->mask_array, 并且 flow->mask = mask
-    将 flow 插入 table->ti
+    1. 将 mask 插入 table->mask_array, 并且 flow->mask = mask
+    2. 将 flow->flow_table->node[table->ti->node_ver] 插入 table->ti->buckets 中的一个链表中
+    3. 如果 flow->id 存在, 将 flow->ufid_table->node[table->ufid_ti->node_ver] 插入 table->ufid_ti->buckets 中的一个链表中
 
 int ovs_flow_init(void)
 
@@ -3243,43 +3898,7 @@ int register_pernet_device(struct pernet_operations *ops)
     NOTE: net_namespace_list, net_exit_list 都是 net_namespace.h 中 head_list 类型的全局变量,
 
 
-static int __net_init ovs_init_net(struct net *net)
 
-    用 net->gen->ptr[ovs_net_id - 1] 初始化结构体 ovs_net
-
-    1. 定义 ovs_net 指向 net->gen->ptr[ovs_net_id - 1]
-    2. 初始化双向链表 ovs_net->dps
-    3. 初始化 ovs_net->dp_notify_work
-
-	INIT_WORK(&ovs_net->dp_notify_work, ovs_dp_notify_wq);
-    其中 3:
-        ovs_net->dp_notify_work->data = WORK_STRUCT_NO_POOL
-        初始化双向循环链表 ovs_net->dp_notify_work->entry
-        ovs_net->dp_notify_work->func = ovs_dp_notify_wq
-
-    注: 没有初始化 ovs_net-> vport_net
-
-    struct ovs_net {
-        struct list_head dps;
-        struct work_struct dp_notify_work;
-        struct vport_net vport_net;
-    };
-
-static void __net_exit ovs_exit_net(struct net *dnet)
-
-    1. 遍历 dnet->gen->ptr[ovs_net_id - 1]->dps, 释放每一个 dps
-    2. 遍历系统 net_namespace_list 中所有的命名空间对应的网络 struct net,
-    遍历每个网络 net->gen->ptr[ovs_net_id - 1]->dps 中每个 dps 中的每个 vport,
-    如果 vport->ops->type = OVS_VPORT_TYPE_INTERNAL && netdev_vport_priv(vport)->dev->net = dnet
-    将 vport->deatch_list 增加到一个链表 head 中, 然后遍历 head 链表, 销毁对应的 vport.
-    4. 取消 net->gen->ptr[ovs_net_id - 1]->dp_notify_work
-
-    其中 3 包括:
-    将 vport->deatch_list 从其对应的链表中删除;
-    将 vport->dp_hash_node 从其对应的链表中删除;
-    将 vport->hash_node 从其对应的链表中删除;
-    递减 vport->ops->owner 的引用计数
-    调用 vport->ops->destory(vport) 将其自身销毁
 
 ----------------------------------------------
 
@@ -3311,351 +3930,6 @@ static int dp_device_event(struct notifier_block *unused, unsigned long event,
     如果 event 是 NETDEV_UNREGISTER, 将 ptr->dev->dp_notify_work 加入 system_wq
 
 ----------------------------------------------
-
-##datapath
-
-------------------------------------------------
-static struct genl_family * const dp_genl_families[] = {
-	&dp_datapath_genl_family,
-	&dp_vport_genl_family,
-	&dp_flow_genl_family,
-	&dp_packet_genl_family,
-};
-
-
-/**
- * enum ovs_datapath_attr - attributes for %OVS_DP_* commands.
- * @OVS_DP_ATTR_NAME: Name of the network device that serves as the "local
- * port".  This is the name of the network device whose dp_ifindex is given in
- * the &struct ovs_header.  Always present in notifications.  Required in
- * %OVS_DP_NEW requests.  May be used as an alternative to specifying
- * dp_ifindex in other requests (with a dp_ifindex of 0).
- * @OVS_DP_ATTR_UPCALL_PID: The Netlink socket in userspace that is initially
- * set on the datapath port (for OVS_ACTION_ATTR_MISS).  Only valid on
- * %OVS_DP_CMD_NEW requests. A value of zero indicates that upcalls should
- * not be sent.
- * @OVS_DP_ATTR_STATS: Statistics about packets that have passed through the
- * datapath.  Always present in notifications.
- * @OVS_DP_ATTR_MEGAFLOW_STATS: Statistics about mega flow masks usage for the
- * datapath. Always present in notifications.
- *
- * These attributes follow the &struct ovs_header within the Generic Netlink
- * payload for %OVS_DP_* commands.
- */
-enum ovs_datapath_attr {
-	OVS_DP_ATTR_UNSPEC,
-	OVS_DP_ATTR_NAME,		/* name of dp_ifindex netdev */
-	OVS_DP_ATTR_UPCALL_PID,		/* Netlink PID to receive upcalls */
-	OVS_DP_ATTR_STATS,		/* struct ovs_dp_stats */
-	OVS_DP_ATTR_MEGAFLOW_STATS,	/* struct ovs_dp_megaflow_stats */
-	OVS_DP_ATTR_USER_FEATURES,	/* OVS_DP_F_*  */
-	__OVS_DP_ATTR_MAX
-};
-
-
-
-static const struct genl_multicast_group ovs_dp_datapath_multicast_group = {
-	.name = OVS_DATAPATH_MCGROUP,
-};
-
-###datapath
-
-static struct genl_family dp_datapath_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = sizeof(struct ovs_header),
-	.name = OVS_DATAPATH_FAMILY,
-	.version = OVS_DATAPATH_VERSION,
-	.maxattr = OVS_DP_ATTR_MAX,
-	.netnsok = true,
-	.parallel_ops = true,
-	.ops = dp_datapath_genl_ops,
-	.n_ops = ARRAY_SIZE(dp_datapath_genl_ops),
-	.mcgrps = &ovs_dp_datapath_multicast_group,
-	.n_mcgrps = 1,
-};
-
-
-#define OVS_DATAPATH_FAMILY  "ovs_datapath"
-#define OVS_DATAPATH_VERSION 2
-#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
-
-static const struct genl_ops dp_datapath_genl_ops[] = {
-	{ .cmd = OVS_DP_CMD_NEW,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = datapath_policy,
-	  .doit = ovs_dp_cmd_new
-	},
-	{ .cmd = OVS_DP_CMD_DEL,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = datapath_policy,
-	  .doit = ovs_dp_cmd_del
-	},
-	{ .cmd = OVS_DP_CMD_GET,
-	  .flags = 0,		    /* OK for unprivileged users. */
-	  .policy = datapath_policy,
-	  .doit = ovs_dp_cmd_get,
-	  .dumpit = ovs_dp_cmd_dump
-	},
-	{ .cmd = OVS_DP_CMD_SET,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = datapath_policy,
-	  .doit = ovs_dp_cmd_set,
-	},
-};
-
-enum ovs_datapath_cmd {
-	OVS_DP_CMD_UNSPEC,
-	OVS_DP_CMD_NEW,
-	OVS_DP_CMD_DEL,
-	OVS_DP_CMD_GET,
-	OVS_DP_CMD_SET
-};
-
-#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
-static const struct nla_policy datapath_policy[OVS_DP_ATTR_MAX + 1] = {
-	[OVS_DP_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
-	[OVS_DP_ATTR_UPCALL_PID] = { .type = NLA_U32 },
-	[OVS_DP_ATTR_USER_FEATURES] = { .type = NLA_U32 },
-};
-
------------------------------------------------
-
-#define OVS_VPORT_FAMILY  "ovs_vport"
-
-static const struct nla_policy vport_policy[OVS_VPORT_ATTR_MAX + 1] = {
-	[OVS_VPORT_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
-	[OVS_VPORT_ATTR_STATS] = { .len = sizeof(struct ovs_vport_stats) },
-	[OVS_VPORT_ATTR_PORT_NO] = { .type = NLA_U32 },
-	[OVS_VPORT_ATTR_TYPE] = { .type = NLA_U32 },
-	[OVS_VPORT_ATTR_UPCALL_PID] = { .type = NLA_U32 },
-	[OVS_VPORT_ATTR_OPTIONS] = { .type = NLA_NESTED },
-};
-
-static const struct genl_ops dp_vport_genl_ops[] = {
-	{ .cmd = OVS_VPORT_CMD_NEW,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = vport_policy,
-	  .doit = ovs_vport_cmd_new
-	},
-	{ .cmd = OVS_VPORT_CMD_DEL,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = vport_policy,
-	  .doit = ovs_vport_cmd_del
-	},
-	{ .cmd = OVS_VPORT_CMD_GET,
-	  .flags = 0,		    /* OK for unprivileged users. */
-	  .policy = vport_policy,
-	  .doit = ovs_vport_cmd_get,
-	  .dumpit = ovs_vport_cmd_dump
-	},
-	{ .cmd = OVS_VPORT_CMD_SET,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = vport_policy,
-	  .doit = ovs_vport_cmd_set,
-	},
-};
-
-const struct genl_multicast_group ovs_dp_vport_multicast_group = {
-	.name = OVS_VPORT_MCGROUP,
-};
-
-#define OVS_VPORT_MCGROUP "ovs_vport"
-
-struct genl_family dp_vport_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = sizeof(struct ovs_header),
-	.name = OVS_VPORT_FAMILY,
-	.version = OVS_VPORT_VERSION,
-	.maxattr = OVS_VPORT_ATTR_MAX,
-	.netnsok = true,
-	.parallel_ops = true,
-	.ops = dp_vport_genl_ops,
-	.n_ops = ARRAY_SIZE(dp_vport_genl_ops),
-	.mcgrps = &ovs_dp_vport_multicast_group,
-	.n_mcgrps = 1,
-};
-
-------------------------------------------------
-
-#define OVS_FLOW_FAMILY  "ovs_flow"
-#define OVS_FLOW_VERSION 0x1
-
-/**
- * enum ovs_flow_attr - attributes for %OVS_FLOW_* commands.
- * @OVS_FLOW_ATTR_KEY: Nested %OVS_KEY_ATTR_* attributes specifying the flow
- * key.  Always present in notifications.  Required for all requests (except
- * dumps).
- * @OVS_FLOW_ATTR_ACTIONS: Nested %OVS_ACTION_ATTR_* attributes specifying
- * the actions to take for packets that match the key.  Always present in
- * notifications.  Required for %OVS_FLOW_CMD_NEW requests, optional for
- * %OVS_FLOW_CMD_SET requests.  An %OVS_FLOW_CMD_SET without
- * %OVS_FLOW_ATTR_ACTIONS will not modify the actions.  To clear the actions,
- * an %OVS_FLOW_ATTR_ACTIONS without any nested attributes must be given.
- * @OVS_FLOW_ATTR_STATS: &struct ovs_flow_stats giving statistics for this
- * flow.  Present in notifications if the stats would be nonzero.  Ignored in
- * requests.
- * @OVS_FLOW_ATTR_TCP_FLAGS: An 8-bit value giving the OR'd value of all of the
- * TCP flags seen on packets in this flow.  Only present in notifications for
- * TCP flows, and only if it would be nonzero.  Ignored in requests.
- * @OVS_FLOW_ATTR_USED: A 64-bit integer giving the time, in milliseconds on
- * the system monotonic clock, at which a packet was last processed for this
- * flow.  Only present in notifications if a packet has been processed for this
- * flow.  Ignored in requests.
- * @OVS_FLOW_ATTR_CLEAR: If present in a %OVS_FLOW_CMD_SET request, clears the
- * last-used time, accumulated TCP flags, and statistics for this flow.
- * Otherwise ignored in requests.  Never present in notifications.
- * @OVS_FLOW_ATTR_MASK: Nested %OVS_KEY_ATTR_* attributes specifying the
- * mask bits for wildcarded flow match. Mask bit value '1' specifies exact
- * match with corresponding flow key bit, while mask bit value '0' specifies
- * a wildcarded match. Omitting attribute is treated as wildcarding all
- * corresponding fields. Optional for all requests. If not present,
- * all flow key bits are exact match bits.
- * @OVS_FLOW_ATTR_UFID: A value between 1-16 octets specifying a unique
- * identifier for the flow. Causes the flow to be indexed by this value rather
- * than the value of the %OVS_FLOW_ATTR_KEY attribute. Optional for all
- * requests. Present in notifications if the flow was created with this
- * attribute.
- * @OVS_FLOW_ATTR_UFID_FLAGS: A 32-bit value of OR'd %OVS_UFID_F_*
- * flags that provide alternative semantics for flow installation and
- * retrieval. Optional for all requests.
- *
- * These attributes follow the &struct ovs_header within the Generic Netlink
- * payload for %OVS_FLOW_* commands.
- */
-enum ovs_flow_attr {
-	OVS_FLOW_ATTR_UNSPEC,
-	OVS_FLOW_ATTR_KEY,       /* Sequence of OVS_KEY_ATTR_* attributes. */
-	OVS_FLOW_ATTR_ACTIONS,   /* Nested OVS_ACTION_ATTR_* attributes. */
-	OVS_FLOW_ATTR_STATS,     /* struct ovs_flow_stats. */
-	OVS_FLOW_ATTR_TCP_FLAGS, /* 8-bit OR'd TCP flags. */
-	OVS_FLOW_ATTR_USED,      /* u64 msecs last used in monotonic time. */
-	OVS_FLOW_ATTR_CLEAR,     /* Flag to clear stats, tcp_flags, used. */
-	OVS_FLOW_ATTR_MASK,      /* Sequence of OVS_KEY_ATTR_* attributes. */
-	OVS_FLOW_ATTR_PROBE,     /* Flow operation is a feature probe, error
-				  * logging should be suppressed. */
-	OVS_FLOW_ATTR_UFID,      /* Variable length unique flow identifier. */
-	OVS_FLOW_ATTR_UFID_FLAGS,/* u32 of OVS_UFID_F_*. */
-	__OVS_FLOW_ATTR_MAX
-};
-
-#define OVS_FLOW_ATTR_MAX (__OVS_FLOW_ATTR_MAX - 1)
-
-static const struct genl_ops dp_flow_genl_ops[] = {
-	{ .cmd = OVS_FLOW_CMD_NEW,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = flow_policy,
-	  .doit = ovs_flow_cmd_new
-	},
-	{ .cmd = OVS_FLOW_CMD_DEL,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = flow_policy,
-	  .doit = ovs_flow_cmd_del
-	},
-	{ .cmd = OVS_FLOW_CMD_GET,
-	  .flags = 0,		    /* OK for unprivileged users. */
-	  .policy = flow_policy,
-	  .doit = ovs_flow_cmd_get,
-	  .dumpit = ovs_flow_cmd_dump
-	},
-	{ .cmd = OVS_FLOW_CMD_SET,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = flow_policy,
-	  .doit = ovs_flow_cmd_set,
-	},
-};
-
-#define OVS_FLOW_MCGROUP "ovs_flow"
-
-static const struct genl_multicast_group ovs_dp_flow_multicast_group = {
-	.name = OVS_FLOW_MCGROUP,
-};
-
-static struct genl_family dp_flow_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = sizeof(struct ovs_header),
-	.name = OVS_FLOW_FAMILY,
-	.version = OVS_FLOW_VERSION,
-	.maxattr = OVS_FLOW_ATTR_MAX,
-	.netnsok = true,
-	.parallel_ops = true,
-	.ops = dp_flow_genl_ops,
-	.n_ops = ARRAY_SIZE(dp_flow_genl_ops),
-	.mcgrps = &ovs_dp_flow_multicast_group,
-	.n_mcgrps = 1,
-};
-
-----------------------------------------------------
-
-#define OVS_PACKET_FAMILY "ovs_packet"
-#define OVS_PACKET_VERSION 0x1
-
-/**
- * enum ovs_packet_attr - attributes for %OVS_PACKET_* commands.
- * @OVS_PACKET_ATTR_PACKET: Present for all notifications.  Contains the entire
- * packet as received, from the start of the Ethernet header onward.  For
- * %OVS_PACKET_CMD_ACTION, %OVS_PACKET_ATTR_PACKET reflects changes made by
- * actions preceding %OVS_ACTION_ATTR_USERSPACE, but %OVS_PACKET_ATTR_KEY is
- * the flow key extracted from the packet as originally received.
- * @OVS_PACKET_ATTR_KEY: Present for all notifications.  Contains the flow key
- * extracted from the packet as nested %OVS_KEY_ATTR_* attributes.  This allows
- * userspace to adapt its flow setup strategy by comparing its notion of the
- * flow key against the kernel's.  When used with %OVS_PACKET_CMD_EXECUTE, only
- * metadata key fields (e.g. priority, skb mark) are honored.  All the packet
- * header fields are parsed from the packet instead.
- * @OVS_PACKET_ATTR_ACTIONS: Contains actions for the packet.  Used
- * for %OVS_PACKET_CMD_EXECUTE.  It has nested %OVS_ACTION_ATTR_* attributes.
- * Also used in upcall when %OVS_ACTION_ATTR_USERSPACE has optional
- * %OVS_USERSPACE_ATTR_ACTIONS attribute.
- * @OVS_PACKET_ATTR_USERDATA: Present for an %OVS_PACKET_CMD_ACTION
- * notification if the %OVS_ACTION_ATTR_USERSPACE action specified an
- * %OVS_USERSPACE_ATTR_USERDATA attribute, with the same length and content
- * specified there.
- * @OVS_PACKET_ATTR_EGRESS_TUN_KEY: Present for an %OVS_PACKET_CMD_ACTION
- * notification if the %OVS_ACTION_ATTR_USERSPACE action specified an
- * %OVS_USERSPACE_ATTR_EGRESS_TUN_PORT attribute, which is sent only if the
- * output port is actually a tunnel port. Contains the output tunnel key
- * extracted from the packet as nested %OVS_TUNNEL_KEY_ATTR_* attributes.
- * These attributes follow the &struct ovs_header within the Generic Netlink
- * payload for %OVS_PACKET_* commands.
- */
-enum ovs_packet_attr {
-	OVS_PACKET_ATTR_UNSPEC,
-	OVS_PACKET_ATTR_PACKET,      /* Packet data. */
-	OVS_PACKET_ATTR_KEY,         /* Nested OVS_KEY_ATTR_* attributes. */
-	OVS_PACKET_ATTR_ACTIONS,     /* Nested OVS_ACTION_ATTR_* attributes. */
-	OVS_PACKET_ATTR_USERDATA,    /* OVS_ACTION_ATTR_USERSPACE arg. */
-	OVS_PACKET_ATTR_EGRESS_TUN_KEY,  /* Nested OVS_TUNNEL_KEY_ATTR_*
-					    attributes. */
-	OVS_PACKET_ATTR_UNUSED1,
-	OVS_PACKET_ATTR_UNUSED2,
-	OVS_PACKET_ATTR_PROBE,      /* Packet operation is a feature probe,
-				       error logging should be suppressed. */
-	__OVS_PACKET_ATTR_MAX
-};
-
-#define OVS_PACKET_ATTR_MAX (__OVS_PACKET_ATTR_MAX - 1)
-
-static const struct genl_ops dp_packet_genl_ops[] = {
-	{ .cmd = OVS_PACKET_CMD_EXECUTE,
-	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
-	  .policy = packet_policy,
-	  .doit = ovs_packet_cmd_execute
-	}
-};
-
-static struct genl_family dp_packet_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = sizeof(struct ovs_header),
-	.name = OVS_PACKET_FAMILY,
-	.version = OVS_PACKET_VERSION,
-	.maxattr = OVS_PACKET_ATTR_MAX,
-	.netnsok = true,
-	.parallel_ops = true,
-	.ops = dp_packet_genl_ops,
-	.n_ops = ARRAY_SIZE(dp_packet_genl_ops),
-};
-
-
 int dp_register_genl(void)
 
     遍历 dp_genl_families, 对每个元素调用 genl_register_family(dp_genl_families[i]);
