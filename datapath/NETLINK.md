@@ -196,6 +196,15 @@ enum {
         __NLA_TYPE_MAX,
 };
 
+    nla_type (16 bits)
+     +---+---+-------------------------------+
+     | N | O | Attribute Type                |
+     +---+---+-------------------------------+
+     N := Carries nested attributes
+     O := Payload stored in network byte order
+
+     Note: The N and O flag are mutually exclusive.
+
 ### 分配 netlink 消息
 
 /**
@@ -413,14 +422,349 @@ static inline int genlmsg_multicast_netns(struct genl_family *family,
 
 ## ovs 内核与用户交互设计
 
+
+### upcall
+
+数据大小
+
+	size_t size = NLMSG_ALIGN(sizeof(struct ovs_header))
+		+ nla_total_size(hdrlen) /* OVS_PACKET_ATTR_PACKET */
+		+ nla_total_size(ovs_key_attr_size()); /* OVS_PACKET_ATTR_KEY */
+
+	/* OVS_PACKET_ATTR_USERDATA */
+	if (upcall_info->userdata)
+		size += NLA_ALIGN(upcall_info->userdata->nla_len);
+
+	/* OVS_PACKET_ATTR_EGRESS_TUN_KEY */
+	if (upcall_info->egress_tun_info)
+		size += nla_total_size(ovs_tun_key_attr_size());
+
+	/* OVS_PACKET_ATTR_ACTIONS */
+	if (upcall_info->actions_len)
+		size += nla_total_size(upcall_info->actions_len);
+
+	return size;
+
+数据组织形式
+
+    参考 queue_userspace_packet
+
+
+### 注册到内核空间
+
+static void dp_unregister_genl(int n_families)
+
+	for (i = 0; i < n_families; i++)
+		genl_unregister_family(dp_genl_families[i]);
+
+static int dp_register_genl(void)
+
+	for (i = 0; i < ARRAY_SIZE(dp_genl_families); i++)
+		genl_register_family(dp_genl_families[i]);
+
 ### datapath
 
+#define OVS_DATAPATH_FAMILY  "ovs_datapath"
+#define OVS_DATAPATH_VERSION 2
+#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
 
+#define OVS_DP_ATTR_MAX (__OVS_DP_ATTR_MAX - 1)
+
+static const struct nla_policy datapath_policy[OVS_DP_ATTR_MAX + 1] = {
+	[OVS_DP_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
+	[OVS_DP_ATTR_UPCALL_PID] = { .type = NLA_U32 },
+	[OVS_DP_ATTR_USER_FEATURES] = { .type = NLA_U32 },
+};
+
+static const struct genl_ops dp_datapath_genl_ops[] = {
+	{ .cmd = OVS_DP_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_new
+	},
+	{ .cmd = OVS_DP_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_del
+	},
+	{ .cmd = OVS_DP_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_get,
+	  .dumpit = ovs_dp_cmd_dump
+	},
+	{ .cmd = OVS_DP_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = datapath_policy,
+	  .doit = ovs_dp_cmd_set,
+	},
+};
+
+static struct genl_family dp_datapath_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_DATAPATH_FAMILY,
+	.version = OVS_DATAPATH_VERSION,
+	.maxattr = OVS_DP_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_datapath_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_datapath_genl_ops),
+	.mcgrps = &ovs_dp_datapath_multicast_group,
+	.n_mcgrps = 1,
+};
+
+enum ovs_datapath_cmd {
+	OVS_DP_CMD_UNSPEC,
+	OVS_DP_CMD_NEW,
+	OVS_DP_CMD_DEL,
+	OVS_DP_CMD_GET,
+	OVS_DP_CMD_SET
+};
+
+static const struct genl_multicast_group ovs_dp_datapath_multicast_group = {
+	.name = OVS_DATAPATH_MCGROUP,
+};
+
+
+enum ovs_datapath_attr {
+	OVS_DP_ATTR_UNSPEC,
+	OVS_DP_ATTR_NAME,		/* name of dp_ifindex netdev */
+	OVS_DP_ATTR_UPCALL_PID,		/* Netlink PID to receive upcalls */
+	OVS_DP_ATTR_STATS,		/* struct ovs_dp_stats */
+	OVS_DP_ATTR_MEGAFLOW_STATS,	/* struct ovs_dp_megaflow_stats */
+	OVS_DP_ATTR_USER_FEATURES,	/* OVS_DP_F_*  */
+	__OVS_DP_ATTR_MAX
+};
+
+static struct genl_family * const dp_genl_families[] = {
+	&dp_datapath_genl_family,
+	&dp_vport_genl_family,
+	&dp_flow_genl_family,
+	&dp_packet_genl_family,
+};
 
 ### vport
 
+#define OVS_VPORT_FAMILY  "ovs_vport"
+#define OVS_VPORT_MCGROUP "ovs_vport"
+
+static const struct nla_policy vport_policy[OVS_VPORT_ATTR_MAX + 1] = {
+	[OVS_VPORT_ATTR_NAME] = { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
+	[OVS_VPORT_ATTR_STATS] = { .len = sizeof(struct ovs_vport_stats) },
+	[OVS_VPORT_ATTR_PORT_NO] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_TYPE] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_UPCALL_PID] = { .type = NLA_U32 },
+	[OVS_VPORT_ATTR_OPTIONS] = { .type = NLA_NESTED },
+};
+
+static const struct genl_ops dp_vport_genl_ops[] = {
+	{ .cmd = OVS_VPORT_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_new
+	},
+	{ .cmd = OVS_VPORT_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_del
+	},
+	{ .cmd = OVS_VPORT_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_get,
+	  .dumpit = ovs_vport_cmd_dump
+	},
+	{ .cmd = OVS_VPORT_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = vport_policy,
+	  .doit = ovs_vport_cmd_set,
+	},
+}
+
+const struct genl_multicast_group ovs_dp_vport_multicast_group = {
+	.name = OVS_VPORT_MCGROUP,
+};
+
+struct genl_family dp_vport_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_VPORT_FAMILY,
+	.version = OVS_VPORT_VERSION,
+	.maxattr = OVS_VPORT_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_vport_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_vport_genl_ops),
+	.mcgrps = &ovs_dp_vport_multicast_group,
+	.n_mcgrps = 1,
+};
+
+### 消息格式
+
+	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_ATOMIC);
+	ovs_header = genlmsg_put(skb, portid, seq, &dp_vport_genl_family, flags, cmd);
+	ovs_header->dp_ifindex = get_dpifindex(vport->dp);
+    nla_put_u32(skb, OVS_VPORT_ATTR_PORT_NO, vport->port_no)
+	nla_put_u32(skb, OVS_VPORT_ATTR_TYPE, vport->ops->type)
+	nla_put_string(skb, OVS_VPORT_ATTR_NAME, vport->ops->get_name(vport))
+	ovs_vport_get_stats(vport, &vport_stats);
+    nla_put(skb, OVS_VPORT_ATTR_STATS, sizeof(struct ovs_vport_stats), &vport_stats))
+    ovs_vport_get_upcall_portids(vport, skb))
+    ovs_vport_get_options(vport, skb);
+	genlmsg_end(skb, ovs_header);
+
 
 ### flow
+
+#define OVS_FLOW_FAMILY  "ovs_flow"
+#define OVS_FLOW_VERSION 0x1
+
+#define OVS_FLOW_ATTR_MAX (__OVS_FLOW_ATTR_MAX - 1)
+
+#define OVS_FLOW_MCGROUP "ovs_flow"
+
+static const struct nla_policy flow_policy[OVS_FLOW_ATTR_MAX + 1] = {
+	[OVS_FLOW_ATTR_KEY] = { .type = NLA_NESTED },
+	[OVS_FLOW_ATTR_MASK] = { .type = NLA_NESTED },
+	[OVS_FLOW_ATTR_ACTIONS] = { .type = NLA_NESTED },
+	[OVS_FLOW_ATTR_CLEAR] = { .type = NLA_FLAG },
+	[OVS_FLOW_ATTR_PROBE] = { .type = NLA_FLAG },
+	[OVS_FLOW_ATTR_UFID] = { .type = NLA_UNSPEC, .len = 1 },
+	[OVS_FLOW_ATTR_UFID_FLAGS] = { .type = NLA_U32 },
+};
+
+static const struct genl_ops dp_flow_genl_ops[] = {
+	{ .cmd = OVS_FLOW_CMD_NEW,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_new
+	},
+	{ .cmd = OVS_FLOW_CMD_DEL,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_del
+	},
+	{ .cmd = OVS_FLOW_CMD_GET,
+	  .flags = 0,		    /* OK for unprivileged users. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_get,
+	  .dumpit = ovs_flow_cmd_dump
+	},
+	{ .cmd = OVS_FLOW_CMD_SET,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = flow_policy,
+	  .doit = ovs_flow_cmd_set,
+	},
+};
+
+enum ovs_flow_attr {
+	OVS_FLOW_ATTR_UNSPEC,
+	OVS_FLOW_ATTR_KEY,       /* Sequence of OVS_KEY_ATTR_* attributes. */
+	OVS_FLOW_ATTR_ACTIONS,   /* Nested OVS_ACTION_ATTR_* attributes. */
+	OVS_FLOW_ATTR_STATS,     /* struct ovs_flow_stats. */
+	OVS_FLOW_ATTR_TCP_FLAGS, /* 8-bit OR'd TCP flags. */
+	OVS_FLOW_ATTR_USED,      /* u64 msecs last used in monotonic time. */
+	OVS_FLOW_ATTR_CLEAR,     /* Flag to clear stats, tcp_flags, used. */
+	OVS_FLOW_ATTR_MASK,      /* Sequence of OVS_KEY_ATTR_* attributes. */
+	OVS_FLOW_ATTR_PROBE,     /* Flow operation is a feature probe, error
+				  * logging should be suppressed. */
+	OVS_FLOW_ATTR_UFID,      /* Variable length unique flow identifier. */
+	OVS_FLOW_ATTR_UFID_FLAGS,/* u32 of OVS_UFID_F_*. */
+	__OVS_FLOW_ATTR_MAX
+};
+
+static struct genl_family dp_flow_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_FLOW_FAMILY,
+	.version = OVS_FLOW_VERSION,
+	.maxattr = OVS_FLOW_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_flow_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_flow_genl_ops),
+	.mcgrps = &ovs_dp_flow_multicast_group,
+	.n_mcgrps = 1,
+};
+
+static const struct genl_multicast_group ovs_dp_flow_multicast_group = {
+	.name = OVS_FLOW_MCGROUP,
+};
+
+#### 构造 flow 的 netlink 消息过程
+
+2.3.5 较 2.3.2 增加了 ufid
+
+static struct sk_buff *ovs_flow_cmd_build_info(const struct sw_flow *flow, int dp_ifindex, struct genl_info *info, u8 cmd, bool always, u32 ufid_flags)
+
+	len = ovs_flow_cmd_msg_size(acts, sfid, ufid_flags);
+	skb = genlmsg_new_unicast(len, info, GFP_KERNEL);
+	ovs_header = genlmsg_put(skb, portid, seq, &dp_flow_genl_family, flags, cmd);
+	ovs_header->dp_ifindex = dp_ifindex;
+    ovs_nla_put_identifier(flow, skb);
+    ovs_nla_put_masked_key(flow, skb);
+    ovs_nla_put_mask(flow, skb);
+    ovs_flow_cmd_fill_stats(flow, skb);
+    ovs_flow_cmd_fill_actions(flow, skb, skb_orig_len);
+	genlmsg_end(skb, ovs_header);
+	return skb;
+
+
+
+
+
+
+### packet
+
+#define OVS_PACKET_FAMILY "ovs_packet"
+#define OVS_PACKET_VERSION 0x1
+
+static struct genl_family dp_packet_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = sizeof(struct ovs_header),
+	.name = OVS_PACKET_FAMILY,
+	.version = OVS_PACKET_VERSION,
+	.maxattr = OVS_PACKET_ATTR_MAX,
+	.netnsok = true,
+	.parallel_ops = true,
+	.ops = dp_packet_genl_ops,
+	.n_ops = ARRAY_SIZE(dp_packet_genl_ops),
+};
+
+#define OVS_PACKET_ATTR_MAX (__OVS_PACKET_ATTR_MAX - 1)
+
+static const struct nla_policy packet_policy[OVS_PACKET_ATTR_MAX + 1] = {
+	[OVS_PACKET_ATTR_PACKET] = { .len = ETH_HLEN },
+	[OVS_PACKET_ATTR_KEY] = { .type = NLA_NESTED },
+	[OVS_PACKET_ATTR_ACTIONS] = { .type = NLA_NESTED },
+	[OVS_PACKET_ATTR_PROBE] = { .type = NLA_FLAG },
+};
+
+static const struct genl_ops dp_packet_genl_ops[] = {
+	{ .cmd = OVS_PACKET_CMD_EXECUTE,
+	  .flags = GENL_ADMIN_PERM, /* Requires CAP_NET_ADMIN privilege. */
+	  .policy = packet_policy,
+	  .doit = ovs_packet_cmd_execute
+	}
+};
+
+enum ovs_packet_attr {
+	OVS_PACKET_ATTR_UNSPEC,
+	OVS_PACKET_ATTR_PACKET,      /* Packet data. */
+	OVS_PACKET_ATTR_KEY,         /* Nested OVS_KEY_ATTR_* attributes. */
+	OVS_PACKET_ATTR_ACTIONS,     /* Nested OVS_ACTION_ATTR_* attributes. */
+	OVS_PACKET_ATTR_USERDATA,    /* OVS_ACTION_ATTR_USERSPACE arg. */
+	OVS_PACKET_ATTR_EGRESS_TUN_KEY,  /* Nested OVS_TUNNEL_KEY_ATTR_*
+					    attributes. */
+	OVS_PACKET_ATTR_UNUSED1,
+	OVS_PACKET_ATTR_UNUSED2,
+	OVS_PACKET_ATTR_PROBE,      /* Packet operation is a feature probe,
+				       error logging should be suppressed. */
+	__OVS_PACKET_ATTR_MAX
+};
+
+---------------------------------------------------
 
 enum ovs_key_attr {
 	OVS_KEY_ATTR_UNSPEC,
@@ -493,8 +837,83 @@ enum ovs_sample_attr {
 };
 
 
+size_t ovs_key_attr_size(void)
+	/* Whenever adding new OVS_KEY_ FIELDS, we should consider
+	 * updating this function.
+	 */
+	BUILD_BUG_ON(OVS_KEY_ATTR_TUNNEL_INFO != 22);
 
+	return    nla_total_size(4)   /* OVS_KEY_ATTR_PRIORITY */
+		+ nla_total_size(0)   /* OVS_KEY_ATTR_TUNNEL */
+		//ovs_tun_key_attr_size() begin
+	    + nla_total_size(8)    /* OVS_TUNNEL_KEY_ATTR_ID */
+		+ nla_total_size(4)    /* OVS_TUNNEL_KEY_ATTR_IPV4_SRC */
+		+ nla_total_size(4)    /* OVS_TUNNEL_KEY_ATTR_IPV4_DST */
+		+ nla_total_size(1)    /* OVS_TUNNEL_KEY_ATTR_TOS */
+		+ nla_total_size(1)    /* OVS_TUNNEL_KEY_ATTR_TTL */
+		+ nla_total_size(0)    /* OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT */
+		+ nla_total_size(0)    /* OVS_TUNNEL_KEY_ATTR_CSUM */
+		+ nla_total_size(0)    /* OVS_TUNNEL_KEY_ATTR_OAM */
+		+ nla_total_size(256)  /* OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS */
+		/* OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS is mutually exclusive with
+		 * OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS and covered by it.
+		 */
+		+ nla_total_size(2)    /* OVS_TUNNEL_KEY_ATTR_TP_SRC */
+		+ nla_total_size(2);   /* OVS_TUNNEL_KEY_ATTR_TP_DST */
+		//ovs_tun_key_attr_size() end
+		+ nla_total_size(4)   /* OVS_KEY_ATTR_IN_PORT */
+		+ nla_total_size(4)   /* OVS_KEY_ATTR_SKB_MARK */
+		+ nla_total_size(4)   /* OVS_KEY_ATTR_DP_HASH */
+		+ nla_total_size(4)   /* OVS_KEY_ATTR_RECIRC_ID */
+		+ nla_total_size(12)  /* OVS_KEY_ATTR_ETHERNET */
+		+ nla_total_size(2)   /* OVS_KEY_ATTR_ETHERTYPE */
+		+ nla_total_size(4)   /* OVS_KEY_ATTR_VLAN */
+		+ nla_total_size(0)   /* OVS_KEY_ATTR_ENCAP */
+		+ nla_total_size(2)   /* OVS_KEY_ATTR_ETHERTYPE */
+		+ nla_total_size(40)  /* OVS_KEY_ATTR_IPV6 */
+		+ nla_total_size(2)   /* OVS_KEY_ATTR_ICMPV6 */
+		+ nla_total_size(28); /* OVS_KEY_ATTR_ND */
 
+static const struct ovs_len_tbl ovs_tunnel_key_lens[OVS_TUNNEL_KEY_ATTR_MAX + 1] = {
+	[OVS_TUNNEL_KEY_ATTR_ID]	    = { .len = sizeof(u64) },
+	[OVS_TUNNEL_KEY_ATTR_IPV4_SRC]	    = { .len = sizeof(u32) },
+	[OVS_TUNNEL_KEY_ATTR_IPV4_DST]	    = { .len = sizeof(u32) },
+	[OVS_TUNNEL_KEY_ATTR_TOS]	    = { .len = 1 },
+	[OVS_TUNNEL_KEY_ATTR_TTL]	    = { .len = 1 },
+	[OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT] = { .len = 0 },
+	[OVS_TUNNEL_KEY_ATTR_CSUM]	    = { .len = 0 },
+	[OVS_TUNNEL_KEY_ATTR_TP_SRC]	    = { .len = sizeof(u16) },
+	[OVS_TUNNEL_KEY_ATTR_TP_DST]	    = { .len = sizeof(u16) },
+	[OVS_TUNNEL_KEY_ATTR_OAM]	    = { .len = 0 },
+	[OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS]   = { .len = OVS_ATTR_NESTED },
+	[OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS]    = { .len = OVS_ATTR_NESTED },
+};
+
+/* The size of the argument for each %OVS_KEY_ATTR_* Netlink attribute.  */
+static const struct ovs_len_tbl ovs_key_lens[OVS_KEY_ATTR_MAX + 1] = {
+	[OVS_KEY_ATTR_ENCAP]	 = { .len = OVS_ATTR_NESTED },
+	[OVS_KEY_ATTR_PRIORITY]	 = { .len = sizeof(u32) },
+	[OVS_KEY_ATTR_IN_PORT]	 = { .len = sizeof(u32) },
+	[OVS_KEY_ATTR_SKB_MARK]	 = { .len = sizeof(u32) },
+	[OVS_KEY_ATTR_ETHERNET]	 = { .len = sizeof(struct ovs_key_ethernet) },
+	[OVS_KEY_ATTR_VLAN]	 = { .len = sizeof(__be16) },
+	[OVS_KEY_ATTR_ETHERTYPE] = { .len = sizeof(__be16) },
+	[OVS_KEY_ATTR_IPV4]	 = { .len = sizeof(struct ovs_key_ipv4) },
+	[OVS_KEY_ATTR_IPV6]	 = { .len = sizeof(struct ovs_key_ipv6) },
+	[OVS_KEY_ATTR_TCP]	 = { .len = sizeof(struct ovs_key_tcp) },
+	[OVS_KEY_ATTR_TCP_FLAGS] = { .len = sizeof(__be16) },
+	[OVS_KEY_ATTR_UDP]	 = { .len = sizeof(struct ovs_key_udp) },
+	[OVS_KEY_ATTR_SCTP]	 = { .len = sizeof(struct ovs_key_sctp) },
+	[OVS_KEY_ATTR_ICMP]	 = { .len = sizeof(struct ovs_key_icmp) },
+	[OVS_KEY_ATTR_ICMPV6]	 = { .len = sizeof(struct ovs_key_icmpv6) },
+	[OVS_KEY_ATTR_ARP]	 = { .len = sizeof(struct ovs_key_arp) },
+	[OVS_KEY_ATTR_ND]	 = { .len = sizeof(struct ovs_key_nd) },
+	[OVS_KEY_ATTR_RECIRC_ID] = { .len = sizeof(u32) },
+	[OVS_KEY_ATTR_DP_HASH]	 = { .len = sizeof(u32) },
+	[OVS_KEY_ATTR_TUNNEL]	 = { .len = OVS_ATTR_NESTED,
+				     .next = ovs_tunnel_key_lens, },
+	[OVS_KEY_ATTR_MPLS]	 = { .len = sizeof(struct ovs_key_mpls) },
+};
 
 
 /* The size of the argument for each %OVS_KEY_ATTR_* Netlink attribute.  */
@@ -521,6 +940,193 @@ static const int ovs_key_lens[OVS_KEY_ATTR_MAX + 1] = {
 	[OVS_KEY_ATTR_TUNNEL] = -1,
 };
 
+
+### upcall netlink
+
+    skb_buff->data = nlmsg
+                     -> nlmsghdr = struct nlmsghdr *nlh
+                     -> family header = struct genlmsghdr *hdr
+                     -> attributes
+                        -> upcall                           : dp_ifindex
+                        -> OVS_PACKET_ATTR_KEY              : key
+                        -> OVS_PACKET_ATTR_USERDATA         : upcall_info->userdata
+                        -> OVS_PACKET_ATTR_EGRESS_TUN_KEY   : tun_info
+                        -> OVS_PACKET_ATTR_ACTIONS          : actions
+
+    genlmsg_unicast(dp->net, skb_buff, upcall_info->portid)
+
+        struct sw_flow_key *key
+        struct dp_upcall_info upcall = {
+            .cmd    = OVS_PACKET_CMD_MISS
+            .portid = ovs_vport_find_upcall_portid(OVS_CB(skb)->input_vport, skb)
+        }
+
+        struct genl_info info = {
+        #ifdef HAVE_GENLMSG_NEW_UNICAST
+            .dst_sk = ovs_dp_get_net(dp)->genl_sock,
+        #endif
+            .snd_portid = upcall_info->portid,
+        };
+
+        family = dp_packet_genl_family
+        nlh->nlmsg_type = family->id;
+        nlh->nlmsg_len = nlmsg_msg_size(GENL_HDRLEN + family->hdrsize);
+        nlh->nlmsg_flags = 0;
+        nlh->nlmsg_pid = 0;
+        nlh->nlmsg_seq = 0;
+
+        hdr->cmd = upcall_info->cmd
+        hdr->version = family->version
+        hdr->reserved = 0;
+
+        upcall->dp_ifindex = get_dpifindex(dp);
+
+        nlattr key = {
+            OVS_KEY_ATTR_RECIRC_ID : key->recirc_id
+            OVS_KEY_ATTR_DP_HASH   : key->ovs_flow_hash
+            OVS_KEY_ATTR_PRIORITY  : key->phy.priority
+            OVS_KEY_ATTR_IN_PORT   : key->phy.in_port
+            OVS_KEY_ATTR_SKB_MARK  : key->phy.skb_mark
+            OVS_KEY_ATTR_ETHERNET  : key->eth.src+key->eth.dst
+            OVS_KEY_ATTR_ETHERTYPE : key->eth.type
+            OVS_KEY_ATTR_IPV4      : key->ipv4.addr.src+key->ipv4.addr.dst ..
+            OVS_KEY_ATTR_TCP       : key->tp.src+key->tp.dst+key->tp.flags
+        }
+
+        tun_key = upcall_info->tunnel
+        nlattr tun_info = {
+            OVS_TUNNEL_KEY_ATTR_ID              : tun_key->tun_id
+            OVS_TUNNEL_KEY_ATTR_IPV4_SRC        : tun_key->ipv4_src
+            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : tun_key->ipv4_dst
+            OVS_TUNNEL_KEY_ATTR_TOS             : tun_key->ipv4_tos
+            OVS_TUNNEL_KEY_ATTR_TTL             : tun_key->ipv4_ttl
+            OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT   : NULL
+            OVS_TUNNEL_KEY_ATTR_CSUM            : NULL
+            OVS_TUNNEL_KEY_ATTR_TP_SRC          : tun_key->tp_src
+            OVS_TUNNEL_KEY_ATTR_TP_DST          : tun_key->tp_dst
+            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : NULL
+            OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS     : upcall_info->options
+            OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS      {
+                OVS_VXLAN_EXT_GBP : upcall_info->options->gbp
+            }
+        }
+
+        actions = upcall_info->actions
+        actions = {
+            if actions = OVS_ACTION_ATTR_SET:
+            OVS_ACTION_ATTR_SET : {
+                actions = nla_data(actions)
+                OVS_KEY_ATTR_TUNNEL_INFO {
+                    actions = nla_data(nla_data(actions))
+                    OVS_ACTION_ATTR_SET : {
+                        tun_key = actions->tunnel
+                        OVS_KEY_ATTR_TUNNEL : {
+                            OVS_TUNNEL_KEY_ATTR_ID              : tun_key->tun_id
+                            OVS_TUNNEL_KEY_ATTR_IPV4_SRC        : tun_key->ipv4_src
+                            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : tun_key->ipv4_dst
+                            OVS_TUNNEL_KEY_ATTR_TOS             : tun_key->ipv4_tos
+                            OVS_TUNNEL_KEY_ATTR_TTL             : tun_key->ipv4_ttl
+                            OVS_TUNNEL_KEY_ATTR_DONT_FRAGMENT   : NULL
+                            OVS_TUNNEL_KEY_ATTR_CSUM            : NULL
+                            OVS_TUNNEL_KEY_ATTR_TP_SRC          : tun_key->tp_src
+                            OVS_TUNNEL_KEY_ATTR_TP_DST          : tun_key->tp_dst
+                            OVS_TUNNEL_KEY_ATTR_IPV4_DST        : NULL
+                            OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS     : upcall_info->options
+                            OVS_TUNNEL_KEY_ATTR_VXLAN_OPTS      {
+                                OVS_VXLAN_EXT_GBP : upcall_info->options->gbp
+                            }
+                        }
+                    }
+                }
+                OVS_ACTION_ATTR_SET : nla_data(actions)
+            }
+
+            if actions->type = OVS_ACTION_ATTR_SET_TO_MASKED :
+            OVS_ACTION_ATTR_SET : nal_data(actions)
+
+            if actions->type = OVS_ACTION_ATTR_SET_TO_MASKED :
+            OVS_ACTION_ATTR_SAMPLE {
+                OVS_SAMPLE_ATTR_PROBABILITY : nla_data(actions)
+                OVS_SAMPLE_ATTR_ACTIONS     : {
+                     递归了
+                }
+            }
+
+            else
+            nla_type(actions) : nla_data(actions)
+        }
+
+
+## genlink
+
+#define GENL_ID_GENERATE        0
+#define GENL_FAM_TAB_SIZE       16
+#define GENL_FAM_TAB_MASK       (GENL_FAM_TAB_SIZE - 1)
+static struct list_head family_ht[GENL_FAM_TAB_SIZE]
+
+struct rpl_genl_family {
+	struct genl_family	compat_family;
+	unsigned int            id;
+	unsigned int            hdrsize;
+	char                    name[GENL_NAMSIZ];
+	unsigned int            version;
+	unsigned int            maxattr;
+	bool                    netnsok;
+	bool                    parallel_ops;
+	int                     (*pre_doit)(const struct genl_ops *ops,
+					    struct sk_buff *skb,
+					    struct genl_info *info);
+	void                    (*post_doit)(const struct genl_ops *ops,
+					     struct sk_buff *skb,
+					     struct genl_info *info);
+	struct nlattr **        attrbuf;        /* private */
+	const struct genl_ops * ops;            /* private */
+	const struct genl_multicast_group *mcgrps; /* private */
+	unsigned int            n_ops;          /* private */
+	unsigned int            n_mcgrps;       /* private */
+	unsigned int            mcgrp_offset;   /* private */
+	struct list_head        family_list;    /* private */
+	struct module           *module;
+};
+
+------------------------------------------------
+
+static inline struct list_head *genl_family_chain(unsigned int id)
+
+    return &family_ht[genl_family_hash(id)];
+
+------------------------------------------------
+
+static inline unsigned int genl_family_hash(unsigned int id)
+
+    return id & GENL_FAM_TAB_MASK;
+
+------------------------------------------------
+
+static inline int genl_register_family(struct genl_family *family)
+
+    family->module = THIS_MODULE;
+    return __genl_register_family(family);
+
+------------------------------------------------
+
+/**
+ * __genl_register_family - register a generic netlink family
+ * @family: generic netlink family
+ *
+ * Registers the specified family after validating it first. Only one
+ * family may be registered with the same family name or identifier.
+ * The family id may equal GENL_ID_GENERATE causing an unique id to
+ * be automatically generated and assigned.
+ *
+ * The family's ops array must already be assigned, you can use the
+ * genl_register_family_with_ops() helper function.
+ *
+ * Return 0 on success or a negative error code.
+ */
+int __genl_register_family(struct genl_family *family)
+
+        genl_family_find_byname(family->name))
 
 
 ## 参考
