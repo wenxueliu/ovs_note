@@ -3,10 +3,20 @@
 
 2.3.5 较 2.3.2 的变化
 
-1. 增加 ufid
+1. 增加 ufid, 提高 revalidator 性能; 
+
+
 2. 加强日志
 3. 增加 per_cpu 的 action_fifo
 4. 增加 mpls, geneve 的协议支持
+
+参考
+[1](https://mail.openvswitch.org/pipermail/ovs-dev/2014-November/292309.html)
+[2](https://mail.openvswitch.org/pipermail/ovs-dev/2014-November/292299.html)
+[3](https://mail.openvswitch.org/pipermail/ovs-dev/2014-November/292317.html)
+[4](https://mail.openvswitch.org/pipermail/ovs-dev/2014-November/292760.html)
+[5](https://mail.openvswitch.org/pipermail/ovs-dev/2015-January/294043.html)
+
 
 ## 内核预备知识
 
