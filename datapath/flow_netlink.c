@@ -917,7 +917,7 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
  *  match->key->tp.dst = a[OVS_KEY_ATTR_TCP]->tcp_dst
  *  match->key->tp.flags = a[OVS_KEY_ATTR_TCP_FLAGS]
  *
- *  //UDP
+ *  //SCTP
  *  match->key->tp.src = a[OVS_KEY_ATTR_UDP]->udp_src
  *  match->key->tp.dst = a[OVS_KEY_ATTR_UDP]->udp_dst
  *
@@ -948,7 +948,7 @@ static int metadata_from_nlattrs(struct sw_flow_match *match,  u64 *attrs,
  *  match->mask->key.ip.frag = a[OVS_KEY_ATTR_IPV4]->ipv4_frag
  *  match->mask->key.ip.addr.src = a[OVS_KEY_ATTR_IPV4]->ipv4_src
  *  match->mask->key.ip.addr.dst = a[OVS_KEY_ATTR_IPV4]->ipv4_dst
- *  
+ *
  *
  *
  *
